@@ -71,7 +71,7 @@ graph TD
 | Skill | 路径 | 功能 |
 |-------|------|------|
 | using-tws | `using-tws/SKILL.md` | 场景判断 + 路由 + 全局纠错 |
-| tws-init | `init/SKILL.md` | 项目初始化，规约推断 |
+| tws-init | `tws-init/SKILL.md` | 项目初始化，规约推断 |
 
 ---
 
