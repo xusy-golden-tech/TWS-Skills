@@ -63,3 +63,11 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 ## 完成依据
 
 - [ ] .tws/sessions/{当前流程文件} 已删除（流程完成，清理断点文件）
+
+## 后续事项
+
+```
+hotfix 是应急处理，架构质量不是此时的优先级。
+但修复完成后，建议在非紧急时安排一次完整的 code review（加载 `comp-code-review`，含 D7 架构健康度检查），
+确认紧急修复没有引入技术债。如果引入了，走 fix-bug 流程补修。
+```

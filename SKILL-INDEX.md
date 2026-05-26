@@ -80,7 +80,7 @@ graph TD
 | Skill | 路径 | 调用组件 |
 |-------|------|---------|
 | flow-add-feature | `flow-add-feature/SKILL.md` | design-doc, frontend-ui-design（条件：涉及前端）, impact-assessment, task-breakdown, implementation, test, code-review, design-sync, visual-prototype |
-| flow-fix-bug | `flow-fix-bug/SKILL.md` | reproduce, root-cause-analysis, implementation, test, impact-assessment, design-sync |
+| flow-fix-bug | `flow-fix-bug/SKILL.md` | reproduce, root-cause-analysis, implementation, test, impact-assessment, design-sync, 方案架构校验（步骤③.5，轻量检查，无独立 skill） |
 | flow-hotfix | `flow-hotfix/SKILL.md` | root-cause-analysis, implementation, test, design-sync |
 | flow-new-project | `flow-new-project/SKILL.md` | design-doc, frontend-ui-design（条件：涉及 UI）, implementation, test, design-sync, deploy, visual-prototype |
 | flow-refactor | `flow-refactor/SKILL.md` | migration-plan, frontend-ui-design（条件：涉及 UI）, implementation, test, design-sync, impact-assessment |
