@@ -196,3 +196,5 @@ TWS 默认按需加载，不预加载全仓。若会话已经很长，或当前�
 - 不为 Codex、VSCode 复制一份改名后的 skill。复制会导致规则漂移。
 - 如需平台差异，写在 `PLATFORM-SUPPORT.md`、`README.md` 或 `.tws/platform-skills.md` 中。
 - 修改某个 skill 的核心流程时，默认所有平台同时生效。
+- 修改入口、fingerprint、上下文恢复、platform-skills 映射或 flow closeout 时，同时运行 `python -B validate-skills.py`。这些规则由 `validate-skills.py` 的集中常量清单校验，先改清单再改正文，避免多文件漂移。
+- 项目入口和 `.tws/platform-skills.md` 优先由 `tws-init/scripts/tws_bootstrap.py` 生成；手写只作为降级方案。

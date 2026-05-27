@@ -47,6 +47,18 @@ This skill initializes or rewrites project conventions. If you are a subagent, d
 
 平台检测不改变 TWS 流程，只决定 `.tws/platform-skills.md` 中如何说明 skill 调用方式。
 
+### 确定性生成脚本（优先）
+
+生成或刷新 `.tws/tws-version`、`.tws/platform-skills.md`、`CLAUDE.md` / `AGENTS.md` TWS 托管区块时，优先运行本 skill 的脚本，减少手写模板漂移：
+
+```bash
+python tws-init/scripts/tws_bootstrap.py --platform Codex --project-root <目标项目> --write
+python tws-init/scripts/tws_bootstrap.py --platform "Claude Code" --project-root <目标项目> --write
+python tws-init/scripts/tws_bootstrap.py --platform VSCode --emit platform-skills
+```
+
+无脚本运行条件时，才按下文模板手写；手写后必须确认字段与脚本输出结构一致。
+
 ---
 
 ## ② 按策略生成

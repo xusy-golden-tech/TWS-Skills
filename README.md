@@ -107,6 +107,13 @@ Claude Code 使用目标项目 `CLAUDE.md`，Codex 使用目标项目 `AGENTS.md
 
 项目级入口使用 `<!-- TWS:BEGIN managed by TWS Skills {version} -->` / `<!-- TWS:END -->` 托管区块。升级或覆盖 TWS 后，应替换该区块而不是追加第二份，并同步 `.tws/tws-version` 中的 source root、realpath、commit 和 fingerprint。
 
+可用 `tws-init/scripts/tws_bootstrap.py` 生成或刷新这些入口文件，降低手写模板漂移：
+
+```powershell
+python tws-init/scripts/tws_bootstrap.py --platform Codex --project-root <目标项目> --write
+python tws-init/scripts/tws_bootstrap.py --platform "Claude Code" --project-root <目标项目> --write
+```
+
 ## Codex 或其他平台使用
 
 TWS 对 Claude Code、Codex、VSCode 使用同一套 skills。`SKILL.md` 是唯一源头；不同平台只做加载和执行方式的适配。完整说明见 `PLATFORM-SUPPORT.md`。
@@ -131,7 +138,7 @@ TWS 对 Claude Code、Codex、VSCode 使用同一套 skills。`SKILL.md` 是唯�
 python validate-skills.py
 ```
 
-它会检查 skill frontmatter、`SKILL-INDEX.md` 路径、`<SUBAGENT-STOP>` 约定，以及 `comp-frontend-ui-design` 的查询脚本和 CSV 基础可读性。
+它会检查 skill frontmatter、`SKILL-INDEX.md` 路径、`<SUBAGENT-STOP>`、平台入口、source fingerprint、上下文压缩恢复协议、flow 交接收口、bootstrap 生成器、UI Gate、CSV 基础可读性，并阻止 `__pycache__` / `.pyc` 进入仓库。
 
 ## 常见问题
 

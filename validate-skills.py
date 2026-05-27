@@ -21,6 +21,153 @@ def read_text(rel_path: str) -> str:
     return (ROOT / rel_path).read_text(encoding="utf-8-sig")
 
 
+def require_phrases(rel_path: str, phrases: list[str], label: str) -> None:
+    text = read_text(rel_path)
+    for phrase in phrases:
+        if phrase not in text:
+            fail(f"{rel_path} missing {label}: {phrase}")
+
+
+PLATFORM_DOC_FILES = [
+    "PLATFORM-SUPPORT.md",
+    "README.md",
+    "USAGE.md",
+    "tws-init/SKILL.md",
+]
+
+PLATFORM_DISCOVERY_PHRASES = [
+    "{sourceRoot}/*/SKILL.md",
+    ".claude/skills",
+    ".agents/skills",
+    "skill source root",
+    "CLAUDE.md",
+    "AGENTS.md",
+    ".tws/project-map.md",
+    ".tws/platform-skills.md",
+    "using-tws/SKILL.md",
+    "整仓嵌入",
+]
+
+INIT_PLATFORM_TEMPLATE_PHRASES = [
+    "所有映射路径基准",
+    "Claude Code 原生可发现",
+    "Codex 原生可发现",
+    "完整 skill 映射表",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "新会话",
+    "using-tws/SKILL.md",
+]
+
+SOURCE_REFRESH_PHRASES = [
+    "skill source VERSION",
+    "skill source root realpath",
+    "skill source commit",
+    "skill source fingerprint",
+    "{skill source root}/VERSION",
+]
+
+USING_REFRESH_PHRASES = [
+    ".tws/tws-version",
+    "{skill source root}/VERSION",
+    "fingerprint",
+    "不得声称新版 TWS 已完整生效",
+]
+
+CANONICAL_SKILL_ID_PHRASES = [
+    "canonical_id",
+    "frontmatter `name` 只作展示/别名",
+]
+
+FLOW_HANDOFF_CHECKS = {
+    "flow-fix-bug/SKILL.md": [
+        "无法确认",
+        "默认走完整路径",
+    ],
+    "flow-add-feature/SKILL.md": [
+        "comp-subagent-dispatch",
+        "comp-impact-assessment",
+        "comp-task-breakdown",
+        "主 agent 只整合和验收",
+    ],
+    "flow-hotfix/SKILL.md": [
+        "deferred-issues.md",
+        "删除 session 前",
+    ],
+    "checkpoint-reference.md": [
+        "先检查标准完成依据，再删除对应 session 文件",
+    ],
+    "flow-investigate/SKILL.md": [
+        "加载 `flow-fix-bug/SKILL.md`",
+        "阶段交接",
+        "不代表跳过 ③.5",
+        "已吸收报告内容",
+    ],
+    "flow-documentation/SKILL.md": [
+        "记录跳过理由",
+        "checkpoint-reference.md",
+        "检查公共完成依据",
+    ],
+}
+
+CONTEXT_RECOVERY_CHECKS = {
+    "using-tws/SKILL.md": [
+        "上下文压缩恢复协议",
+        "不得只凭摘要继续执行",
+        ".tws/tws-version",
+        "{skill source root}/VERSION",
+        "checkpoint-reference.md",
+        "comp-subagent-dispatch/SKILL.md",
+    ],
+    "checkpoint-reference.md": [
+        "恢复所需文件",
+        "上下文压缩恢复",
+        "压缩摘要只能当作线索",
+        "当前步骤所需 comp/found/team skill 必须重新加载",
+    ],
+    "PLATFORM-SUPPORT.md": [
+        "上下文压缩",
+        "摘要恢复",
+        "context recovery protocol",
+    ],
+    "tws-init/SKILL.md": [
+        "上下文压缩恢复协议",
+        "上下文压缩 / 摘要恢复 / 新窗口续跑恢复规则",
+    ],
+    "comp-subagent-dispatch/SKILL.md": [
+        "子 agent 发生上下文压缩",
+        ".tws/project-map.md",
+        ".tws/platform-skills.md",
+        "不得只凭压缩摘要执行",
+    ],
+    "README.md": ["上下文压缩恢复"],
+    "AGENTS.md": ["compacted-context resumptions"],
+    "CLAUDE.md": ["compacted-context resumptions"],
+}
+
+FRONTEND_UI_GATE_SCRIPT_PHRASES = [
+    '"ux": {"max_results": 3}',
+    "UI_GATE_CHECKLIST",
+    "loading/empty/error/normal states covered",
+    "forms have labels, error copy, and recovery path",
+    "charts/data views include labels, units, empty/error states",
+]
+
+BOOTSTRAP_SCRIPT = ROOT / "tws-init" / "scripts" / "tws_bootstrap.py"
+
+BOOTSTRAP_OUTPUT_PHRASES = [
+    "===== .tws/tws-version =====",
+    "skill_source_fingerprint:",
+    "===== .tws/platform-skills.md =====",
+    "canonical_id",
+    "using-tws/SKILL.md",
+    "上下文压缩",
+    "===== CLAUDE.md managed block =====",
+    "===== AGENTS.md managed block =====",
+    "context recovery protocol",
+]
+
+
 def check_skill_files() -> None:
     skill_files = sorted(ROOT.glob("*/SKILL.md"))
     if not skill_files:
@@ -77,97 +224,40 @@ def check_index_paths() -> None:
             fail(f"SKILL-INDEX.md does not mention {rel}")
 
 
+def check_no_bytecode_artifacts() -> None:
+    for path in sorted(ROOT.rglob("*")):
+        if ".git" in path.parts:
+            continue
+        if path.suffix == ".pyc" or path.name == "__pycache__":
+            fail(f"{path.relative_to(ROOT)} should not be committed")
+
+
 def check_platform_docs() -> None:
-    required = [
-        ROOT / "PLATFORM-SUPPORT.md",
-        ROOT / "README.md",
-        ROOT / "USAGE.md",
-        ROOT / "tws-init" / "SKILL.md",
-    ]
-    for path in required:
+    for rel_path in PLATFORM_DOC_FILES:
+        path = ROOT / rel_path
         if not path.exists():
-            fail(f"{path.relative_to(ROOT)} missing")
+            fail(f"{rel_path} missing")
             continue
         text = path.read_text(encoding="utf-8-sig")
         if "Codex" not in text or "VSCode" not in text:
             fail(f"{path.relative_to(ROOT)} should mention Codex and VSCode platform support")
 
-    platform = (ROOT / "PLATFORM-SUPPORT.md").read_text(encoding="utf-8-sig")
-    required_phrases = [
-        "{sourceRoot}/*/SKILL.md",
-        ".claude/skills",
-        ".agents/skills",
-        "skill source root",
-        "CLAUDE.md",
-        "AGENTS.md",
-        ".tws/project-map.md",
-        ".tws/platform-skills.md",
-        "using-tws/SKILL.md",
-        "整仓嵌入",
-    ]
-    for phrase in required_phrases:
-        if phrase not in platform:
-            fail(f"PLATFORM-SUPPORT.md should document platform discovery phrase: {phrase}")
+    require_phrases("PLATFORM-SUPPORT.md", PLATFORM_DISCOVERY_PHRASES, "platform discovery phrase")
+    require_phrases("tws-init/SKILL.md", INIT_PLATFORM_TEMPLATE_PHRASES, "platform-skills template phrase")
 
-    init_text = (ROOT / "tws-init" / "SKILL.md").read_text(encoding="utf-8-sig")
-    init_required = [
-        "所有映射路径基准",
-        "Claude Code 原生可发现",
-        "Codex 原生可发现",
-        "完整 skill 映射表",
-        "CLAUDE.md",
-        "AGENTS.md",
-        "新会话",
-        "using-tws/SKILL.md",
-    ]
-    for phrase in init_required:
-        if phrase not in init_text:
-            fail(f"tws-init/SKILL.md platform-skills template missing: {phrase}")
-
-    using_text = (ROOT / "using-tws" / "SKILL.md").read_text(encoding="utf-8-sig")
-    dispatch_text = (ROOT / "comp-subagent-dispatch" / "SKILL.md").read_text(encoding="utf-8-sig")
-    for rel, text in {
-        "using-tws/SKILL.md": using_text,
-        "comp-subagent-dispatch/SKILL.md": dispatch_text,
-    }.items():
-        if "无原生 Skill loader" not in text:
+    for rel in ["using-tws/SKILL.md", "comp-subagent-dispatch/SKILL.md"]:
+        if "无原生 Skill loader" not in read_text(rel):
             fail(f"{rel} should define no-loader SKILL.md fallback")
 
 
 def check_platform_activation_fingerprint() -> None:
-    platform = read_text("PLATFORM-SUPPORT.md")
-    init_text = read_text("tws-init/SKILL.md")
-    using_text = read_text("using-tws/SKILL.md")
-    docs = {
-        "PLATFORM-SUPPORT.md": platform,
-        "tws-init/SKILL.md": init_text,
-    }
-    required = [
-        "skill source VERSION",
-        "skill source root realpath",
-        "skill source commit",
-        "skill source fingerprint",
-        "{skill source root}/VERSION",
-    ]
-    for rel, text in docs.items():
-        for phrase in required:
-            if phrase not in text:
-                fail(f"{rel} missing source refresh phrase: {phrase}")
+    for rel in ["PLATFORM-SUPPORT.md", "tws-init/SKILL.md"]:
+        require_phrases(rel, SOURCE_REFRESH_PHRASES, "source refresh phrase")
 
-    for phrase in [
-        ".tws/tws-version",
-        "{skill source root}/VERSION",
-        "fingerprint",
-        "不得声称新版 TWS 已完整生效",
-    ]:
-        if phrase not in using_text:
-            fail(f"using-tws/SKILL.md missing activation refresh phrase: {phrase}")
+    require_phrases("using-tws/SKILL.md", USING_REFRESH_PHRASES, "activation refresh phrase")
 
     for rel in ["README.md", "AGENTS.md", "CLAUDE.md"]:
-        text = read_text(rel)
-        for phrase in ["fingerprint", "tws-version"]:
-            if phrase not in text:
-                fail(f"{rel} should document managed entry refresh phrase: {phrase}")
+        require_phrases(rel, ["fingerprint", "tws-version"], "managed entry refresh phrase")
 
 
 def check_skill_reference_resolution() -> None:
@@ -186,96 +276,55 @@ def check_skill_reference_resolution() -> None:
                 fail(f"{path.relative_to(ROOT)} references missing skill directory: {skill_id}")
 
     for rel in ["PLATFORM-SUPPORT.md", "tws-init/SKILL.md"]:
-        text = read_text(rel)
-        for phrase in ["canonical_id", "frontmatter `name` 只作展示/别名"]:
-            if phrase not in text:
-                fail(f"{rel} missing canonical skill id rule: {phrase}")
+        require_phrases(rel, CANONICAL_SKILL_ID_PHRASES, "canonical skill id rule")
 
 
 def check_flow_handoffs_and_closeout() -> None:
-    checks = {
-        "flow-fix-bug/SKILL.md": [
-            "无法确认",
-            "默认走完整路径",
-        ],
-        "flow-add-feature/SKILL.md": [
-            "comp-subagent-dispatch",
-            "comp-impact-assessment",
-            "comp-task-breakdown",
-            "主 agent 只整合和验收",
-        ],
-        "flow-hotfix/SKILL.md": [
-            "deferred-issues.md",
-            "删除 session 前",
-        ],
-        "checkpoint-reference.md": [
-            "先检查标准完成依据，再删除对应 session 文件",
-        ],
-        "flow-investigate/SKILL.md": [
-            "加载 `flow-fix-bug/SKILL.md`",
-            "阶段交接",
-            "不代表跳过 ③.5",
-            "已吸收报告内容",
-        ],
-        "flow-documentation/SKILL.md": [
-            "记录跳过理由",
-            "checkpoint-reference.md",
-            "检查公共完成依据",
-        ],
-    }
-    for rel, phrases in checks.items():
-        text = read_text(rel)
-        for phrase in phrases:
-            if phrase not in text:
-                fail(f"{rel} missing flow handoff/closeout phrase: {phrase}")
+    for rel, phrases in FLOW_HANDOFF_CHECKS.items():
+        require_phrases(rel, phrases, "flow handoff/closeout phrase")
 
 
 def check_context_recovery_protocol() -> None:
-    checks = {
-        "using-tws/SKILL.md": [
-            "上下文压缩恢复协议",
-            "不得只凭摘要继续执行",
-            ".tws/tws-version",
-            "{skill source root}/VERSION",
-            "checkpoint-reference.md",
-            "comp-subagent-dispatch/SKILL.md",
+    for rel, phrases in CONTEXT_RECOVERY_CHECKS.items():
+        require_phrases(rel, phrases, "context recovery phrase")
+
+
+def check_bootstrap_generator() -> None:
+    if not BOOTSTRAP_SCRIPT.exists():
+        fail("tws-init/scripts/tws_bootstrap.py missing")
+        return
+
+    for rel in ["tws-init/SKILL.md", "README.md", "PLATFORM-SUPPORT.md"]:
+        require_phrases(rel, ["tws-init/scripts/tws_bootstrap.py"], "bootstrap generator reference")
+
+    env = os.environ.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            str(BOOTSTRAP_SCRIPT),
+            "--platform",
+            "Codex",
+            "--timestamp",
+            "2000-01-01 00:00",
+            "--emit",
+            "all",
         ],
-        "checkpoint-reference.md": [
-            "恢复所需文件",
-            "上下文压缩恢复",
-            "压缩摘要只能当作线索",
-            "当前步骤所需 comp/found/team skill 必须重新加载",
-        ],
-        "PLATFORM-SUPPORT.md": [
-            "上下文压缩",
-            "摘要恢复",
-            "context recovery protocol",
-        ],
-        "tws-init/SKILL.md": [
-            "上下文压缩恢复协议",
-            "上下文压缩 / 摘要恢复 / 新窗口续跑恢复规则",
-        ],
-        "comp-subagent-dispatch/SKILL.md": [
-            "子 agent 发生上下文压缩",
-            ".tws/project-map.md",
-            ".tws/platform-skills.md",
-            "不得只凭压缩摘要执行",
-        ],
-        "README.md": [
-            "上下文压缩恢复",
-        ],
-        "AGENTS.md": [
-            "compacted-context resumptions",
-        ],
-        "CLAUDE.md": [
-            "compacted-context resumptions",
-        ],
-    }
-    for rel, phrases in checks.items():
-        text = read_text(rel)
-        for phrase in phrases:
-            if phrase not in text:
-                fail(f"{rel} missing context recovery phrase: {phrase}")
+        cwd=ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        fail("tws_bootstrap.py smoke test failed: " + result.stderr.strip())
+        return
+
+    for phrase in BOOTSTRAP_OUTPUT_PHRASES:
+        if phrase not in result.stdout:
+            fail(f"tws_bootstrap.py output missing: {phrase}")
 
 
 def check_rule_clarity() -> None:
@@ -430,16 +479,11 @@ def check_frontend_ui_data() -> None:
         fail("comp-frontend-ui-design/scripts/design_system.py missing")
         return
 
-    design_system_text = design_system.read_text(encoding="utf-8-sig")
-    for phrase in [
-        '"ux": {"max_results": 3}',
-        "UI_GATE_CHECKLIST",
-        "loading/empty/error/normal states covered",
-        "forms have labels, error copy, and recovery path",
-        "charts/data views include labels, units, empty/error states",
-    ]:
-        if phrase not in design_system_text:
-            fail(f"comp-frontend-ui-design/scripts/design_system.py missing UI Gate phrase: {phrase}")
+    require_phrases(
+        "comp-frontend-ui-design/scripts/design_system.py",
+        FRONTEND_UI_GATE_SCRIPT_PHRASES,
+        "UI Gate phrase",
+    )
 
     spec = importlib.util.spec_from_file_location("frontend_ui_core", core)
     if spec is None or spec.loader is None:
@@ -504,11 +548,13 @@ def main() -> int:
     check_skill_files()
     check_stop_tags()
     check_index_paths()
+    check_no_bytecode_artifacts()
     check_platform_docs()
     check_platform_activation_fingerprint()
     check_skill_reference_resolution()
     check_flow_handoffs_and_closeout()
     check_context_recovery_protocol()
+    check_bootstrap_generator()
     check_rule_clarity()
     check_context_budget_structure()
     check_entry_activation_chain()
