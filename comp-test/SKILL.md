@@ -24,9 +24,22 @@ AFTER implementation, BEFORE claiming completion:
 4. ONLY THEN: 标记测试通过
 ```
 
-## 领域测试 skill
+## 与领域测试 skill 的边界
 
-按 project-map.md 中的技术栈加载对应的领域测试 skill（如有）：`comp-backend-test`、`comp-frontend-test` 等。无匹配时使用本通用 skill。
+`comp-test` 是测试验证的总入口，负责决定要跑哪些测试、读取完整输出、处理失败和上报。
+
+`comp-backend-test`、`comp-frontend-test` 是领域覆盖清单，负责说明后端或前端分别该测什么。它们不是 `comp-test` 的替代品。
+
+执行规则：
+
+```
+1. 先加载 comp-test，确定本次验证范围和失败处理规则
+2. 按 project-map.md 的技术栈加载对应领域测试 skill：
+   - 后端改动 → comp-backend-test
+   - 前端改动 → comp-frontend-test
+   - 前后端都改 → 两者都加载，但逐项执行，不混在一个报告里
+3. 无匹配领域 skill 时，只使用 comp-test 的通用规则
+```
 
 ## 回归验证
 

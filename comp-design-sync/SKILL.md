@@ -28,7 +28,7 @@ AFTER code changes are complete, BEFORE marking task done:
 
 ## 轻量模式（hotfix 等紧急场景）
 
-紧急修复时至少做到：在设计书「变更履历」追加一行。完整同步可延后，但必须在 session-state.md 标记「待补完整 design-sync」。
+紧急修复时至少做到：在设计书「变更履历」追加一行。完整同步可延后，但必须在 `.tws/sessions/{当前流程文件}` 的待补事项中标记「待补完整 design-sync」。
 
 ## 修改对照表
 
@@ -86,27 +86,7 @@ AFTER code changes are complete, BEFORE marking task done:
 
 **agent 只出报告，不直接写入。** 架构决策影响全局，必须由人类项目经理审核后才能记录。
 
-报告格式：
-
-```
-📌 检测到可升级为项目级的架构决策：
-
-1. {决策标题}
-   背景：{为什么需要做这个决策}
-   决定：{选了什么}
-   排除：{排除了什么}
-   影响：{影响哪些模块}
-   来源：设计书 {功能名}
-```
-
-报告汇总后交给项目经理。项目经理调用 `comp-arch-decision` skill 整理格式、检查重复/矛盾，确认后写入 `.tws/architecture-decisions.md`。
-
-设计书的决策记录保留不动——它是"这个功能为什么这么做"的原始记录。
-
-**闭环机制：**
-- 主 agent 汇总所有任务的决策报告后，统一输出给用户
-- 如果用户不立即处理，决策报告追加到 `.tws/deferred-issues.md`，标记为「待审核架构决策」
-- 下次 using-tws 启动时，检查 deferred-issues.md 中的待审核决策，提醒用户处理
+报告汇总后交给项目经理。项目经理调用 `comp-arch-decision` skill 整理格式、检查重复/矛盾，确认后写入 `.tws/architecture-decisions.md`。报告格式和闭环机制见 `references/architecture-escalation.md`。
 
 ## 什么情况应该新写，什么情况应该修改
 
@@ -144,8 +124,4 @@ AFTER code changes are complete, BEFORE marking task done:
 
 ## 为什么重要
 
-- 过时的设计书 → 误导人
-- 缺失的设计书 → 看不懂
-- 每次不同步 → 设计书群体会逐渐没人信 → 没人写 → 回到原始状态
-
-**30 秒的同步，省的是 30 分钟的未来排查时间。**
+过时或缺失的设计书会误导后续开发；每次同步是维持设计书可信度的最低成本。

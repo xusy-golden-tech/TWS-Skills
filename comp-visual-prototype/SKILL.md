@@ -34,6 +34,8 @@ CLI / 终端              → SVG 模式：模拟终端界面的 SVG
 双击打开即可预览。
 ```
 
+外部 CDN 需要用户确认；离线或受限网络环境优先使用内嵌 CSS fallback。
+
 ## SVG 模式（非 Web）
 
 ```
@@ -46,23 +48,7 @@ CLI / 终端              → SVG 模式：模拟终端界面的 SVG
 - 浏览器直接打开 SVG 即可查看。
 ```
 
-SVG 模式示例（终端界面布局）：
-
-```svg
-<svg width="600" height="400" xmlns="http://www.w3.org/2000/svg">
-  <!-- 窗口外框 -->
-  <rect x="0" y="0" width="600" height="400" fill="#1e1e1e" rx="5"/>
-  <!-- 标题栏 -->
-  <rect x="0" y="0" width="600" height="30" fill="#333"/>
-  <text x="10" y="20" fill="#fff" font-size="12">终端窗口</text>
-  <!-- 输出区域 -->
-  <rect x="10" y="40" width="580" height="300" fill="#252526"/>
-  <text x="20" y="60" fill="#4ec9b0" font-size="12">$ 请输入命令...</text>
-  <!-- 输入框 -->
-  <rect x="10" y="350" width="580" height="40" fill="#333" rx="3"/>
-  <text x="20" y="375" fill="#888" font-size="12">输入区域</text>
-</svg>
-```
+SVG 示例见 `references/examples.md`。普通任务不要把示例预加载进上下文。
 
 ## Mermaid 模式（流程图/架构图）
 
@@ -88,11 +74,7 @@ SVG 模式示例（终端界面布局）：
 
 ## 示例
 
-项目 `demo-mockups/` 目录下有移动端通讯录布局的输出样例（SVG 模式）：
-- `mobile-contacts-A.svg` — 基础布局
-- `mobile-contacts-B.svg` — 变体布局
-- `mobile-contacts-C.svg` — 另一变体
-- `mobile-contacts-overlay.svg` — 弹层布局
+按需读取 `references/examples.md` 或项目 `demo-mockups/` 目录；主流程不预加载示例。
 
 ---
 

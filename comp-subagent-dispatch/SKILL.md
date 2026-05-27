@@ -1,6 +1,6 @@
 ﻿---
 name: comp-subagent-dispatch
-description: 子 agent 调度规则（Solo 和 Team 模式通用）。主 agent 不写代码，所有编码/测试/同步由子 agent 执行。这是 TWS 的核心机制，不是团队模式专属
+description: 子 agent 调度规则（Solo 和 Team 模式通用）。有可用子 agent 时，主 agent 不写代码，编码/测试/同步由子 agent 执行；无子 agent 平台按降级协议执行
 ---
 
 <SUBAGENT-STOP>
@@ -13,7 +13,7 @@ This rule applies to agents that are considering splitting work into sub-agents.
 
 **主 agent = 项目经理，子 agent = 执行者。**
 
-主 agent 不写代码。子 agent 只执行不决策。
+有可用子 agent 时，主 agent 不写代码。子 agent 只执行不决策。
 
 ```
 主 agent（项目经理）：
@@ -22,7 +22,7 @@ This rule applies to agents that are considering splitting work into sub-agents.
 - 派子 agent 执行具体任务
 - 派子 agent 审查执行结果（review 也交给子 agent）
 - 收报告 → 决定下一步 → 推进度
-- 不写代码、不亲自审查、不加载组件 skill
+- 不写代码、不亲自审查、不加载组件 skill（无子 agent 平台按降级协议例外）
 
 子 agent（执行者）：
 - 每次领取一个具体任务
@@ -53,6 +53,7 @@ This rule applies to agents that are considering splitting work into sub-agents.
 你是一个执行子 agent。请完成以下任务：
 
 1. 通过 Skill 工具加载 {comp-skill-name}（如 Skill(skill: "comp-reproduce")）
+   - 若当前平台无 Skill 工具，请读取 {skill_root}/{comp-skill-name}/SKILL.md，并声明这是等价加载
 2. 按 skill 中的指引执行任务
 3. 完成后汇报：做了什么、改了哪些文件、发现了什么
 
@@ -62,9 +63,22 @@ This rule applies to agents that are considering splitting work into sub-agents.
 禁止：
 ❌ 使用 Explore 类型派需要加载 skill 的子 agent
 ❌ 主 agent 自己写调查 prompt 替代 comp skill 的工作
-❌ 在 prompt 中写"读 xxx skill"——必须是"通过 Skill 工具加载 xxx skill"
+❌ 在原生 Skill loader 可用时，在 prompt 中写"读 xxx skill"替代"通过 Skill 工具加载 xxx skill"
 
-这是我们在 G-Assistant 修复项目里验证过的模式：妈妈（主 agent）管规划和验收，小念（子 agent）管执行。效果好。
+## 平台适配
+
+本文中的 `Agent(...)`、`Skill(...)`、`Read/Edit/Write`、`context:"isolated"` 是 Claude Code 语义。其他平台按意图等价执行，详细平台规则见根目录 `PLATFORM-SUPPORT.md`。
+
+| Claude Code 语义 | 平台中立含义 |
+|------------------|--------------|
+| `Agent(subagent_type: "general-purpose")` | 启动可执行的隔离子 agent；不可用时作为降级例外，由当前 agent 按组件 skill 自我约束执行 |
+| `Skill(skill: "comp-xxx")` | 读取对应 `comp-xxx/SKILL.md`，并遵循其中步骤、边界和输出格式 |
+| `Read/Edit/Write` | 使用当前平台的文件读取和编辑工具 |
+| `context:"isolated"` | 只提供任务背景、审查对象和规约路径，不继承执行者历史 |
+
+如果平台不支持子 agent，必须在汇报中说明“按子 agent 约束由当前 agent 执行”，并保留相同的读深度、边界和验收标准。
+
+无原生 Skill loader 时，显式读取对应 `SKILL.md` 是正式激活 skill 的等价动作。
 
 ---
 
@@ -110,28 +124,11 @@ This rule applies to agents that are considering splitting work into sub-agents.
 
 主 agent 和子 agent 按职责分别加载不同的 skill，不做全量加载：
 
-```
-主 agent 只加载——流程编排类：
-  using-tws（入口）
-  add-feature / fix-bug / ...（当前流程）
-  task-breakdown、impact-assessment（核心组件）
-  comp-subagent-dispatch（子 agent 调度，所有模式通用）
-  checkpoint-reference（状态管理）
-  约 4-6 个文件，~300-400 行
-
-子 agent 只加载——具体执行类（每次一个任务）：
-  design-doc（写设计书）
-  OR implementation（编码）
-  OR test（测试）
-  OR design-sync（同步）
-  每次只加载 1-2 个文件，~100-200 行
-```
-
-**规则：**
-- 主 agent 不加载组件 skill（design-doc、implementation、test 等）
-- 主 agent 派任务时，使用 general-purpose 类型，prompt 中明确写「通过 Skill 工具加载 xxx skill，然后按指引执行」
-- 子 agent 完成任务后上下文释放，主 agent 只收取结果
-- 这样设计书、编码、测试的叠加内容不会污染主会话上下文
+- 主 agent 只加载入口、当前 flow、调度规则和必要的状态参考。
+- 子 agent 每次只加载领取任务需要的 1-2 个 comp skill。
+- 主 agent 不加载组件 skill（design-doc、implementation、test 等）。
+- 主 agent 派任务时，使用 general-purpose 类型，prompt 中明确写「通过 Skill 工具加载 xxx skill，然后按指引执行」。
+- 子 agent 完成任务后上下文释放，主 agent 只收取结果。
 
 ## 读深度规则
 

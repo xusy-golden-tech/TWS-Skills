@@ -65,8 +65,17 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 
 ## 完成依据
 
-- [ ] .tws/sessions/{当前流程文件} 已删除（流程完成，清理断点文件）
+标准完成依据见根目录 `checkpoint-reference.md`。本流程额外要求：
+
 - [ ] 所有模块开发完成
 - [ ] 集成测试通过
 - [ ] 各模块设计书已同步
 - [ ] 没遗留的 TODO 或未处理的技术决策
+
+## Rationalization Prevention
+
+| 想说的话 | 真相 |
+|---------|------|
+| 「新项目先把代码堆起来」 | 新项目最需要先定架构和模块边界 |
+| 「部署以后再考虑」 | 部署约束会反过来影响目录、配置和测试策略 |
+| 「模块之间边做边对」 | 接口契约要先对齐，否则集成阶段会返工 |

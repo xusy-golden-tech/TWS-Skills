@@ -63,4 +63,12 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 
 ## 完成依据
 
-- [ ] .tws/sessions/{当前流程文件} 已删除（流程完成，清理断点文件）
+标准完成依据见根目录 `checkpoint-reference.md`。
+
+## Rationalization Prevention
+
+| 想说的话 | 真相 |
+|---------|------|
+| 「文档只是润色，不用审计」 | 文档也可能影响 API、架构和用户操作理解 |
+| 「示例代码看起来对」 | 示例必须能按说明复现或明确标注为伪代码 |
+| 「先发布，缺的以后补」 | 缺口会被用户当成事实，发布前要标明范围 |

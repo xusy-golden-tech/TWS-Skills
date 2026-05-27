@@ -31,3 +31,11 @@ description: 前端测试。组件渲染、用户交互、状态变化、API moc
 - 不依赖真实后端环境
 - 组件测试用 Testing Library（React Testing Library / Vue Testing Library）
 ```
+
+## Rationalization Prevention
+
+| 想说的话 | 真相 |
+|---------|------|
+| 「页面能打开就算通过」 | 用户看到的是状态流转，不只是首屏渲染 |
+| 「错误状态以后再补」 | 错误状态缺失会让失败看起来像空白 |
+| 「前端测试不用 mock」 | 依赖真实后端会让组件测试不稳定且难定位 |

@@ -3,6 +3,10 @@ name: tws-init
 description: TWS 项目初始化。新项目走问答生成规约，既有项目分层采样推断规约。首次使用 TWS 必须调用
 ---
 
+<SUBAGENT-STOP>
+This skill initializes or rewrites project conventions. If you are a subagent, do not invoke it unless the main agent or user explicitly asked for initialization.
+</SUBAGENT-STOP>
+
 # TWS 项目初始化
 
 ## 核心原则
@@ -14,7 +18,7 @@ description: TWS 项目初始化。新项目走问答生成规约，既有项目
 ## 流程
 
 ```
-① 检测技术栈 + 判断项目状态 → ② 按策略生成规约 → ③ CONTRACTS.md 生成（可选）→ ④ 确认 → ⑤ 保存
+① 检测技术栈 + 判断项目状态 + 开发平台 → ② 按策略生成规约 → ③ CONTRACTS.md 生成（可选）→ ④ 确认 → ⑤ 保存
 ```
 
 ## ① 检测
@@ -30,6 +34,18 @@ description: TWS 项目初始化。新项目走问答生成规约，既有项目
 扫 package.json / requirements.txt / pom.xml / go.mod / Cargo.toml
 → 输出技术栈列表：Python(FastAPI) + TypeScript(React) 等
 ```
+
+同时检测开发平台，用于生成同等 skill 调用映射：
+
+```
+用户明确说明 / 当前运行环境可识别 → 采用明确平台
+运行环境或用户说明为 Codex / 存在 .agents/skills → Codex
+有 Claude Code 原生 Skill 工具 / .claude/skills → Claude Code
+运行环境或用户说明为 VSCode / 编辑器插件 → VSCode
+无法判断 → Other（按平台中立映射）
+```
+
+平台检测不改变 TWS 流程，只决定 `.tws/platform-skills.md` 中如何说明 skill 调用方式。
 
 ---
 
@@ -196,6 +212,8 @@ TWS 模板补充：
 ```
 .tws/
 ├── project-map.md                        ← 项目结构索引（所有 agent 启动时先读此文件）
+├── platform-skills.md                    ← Claude Code / Codex / VSCode 的 skill 调用映射
+├── tws-version                           ← 当前项目使用的 TWS Skills 版本和 source root 指纹
 ├── coding-conventions.md                 ← 代码规约（单栈项目无后缀）
 ├── coding-conventions-{栈}.md            ← 代码规约（多栈项目按栈分文件）
 ├── testing-conventions.md                ← 测试规约（单栈项目无后缀）
@@ -204,9 +222,37 @@ TWS 模板补充：
 ├── env-conventions.md                    ← 环境规约（不限技术栈）
 ├── architecture-decisions.md             ← 架构决策（空模板，使用中积累）
 ├── env-rules.md                          ← 环境问题决策记录（使用中积累）
-├── session-state.md                      ← 会话断点续传状态（流程运行时生成）
+├── sessions/                             ← 会话断点续传状态（每个流程一个文件）
 └── deferred-issues.md                    ← 延迟问题列表（审查中积累）
 ```
+
+同时生成或建议写入项目级持久入口，避免新会话只看到目标项目而看不到 TWS。完整模板以根目录 `PLATFORM-SUPPORT.md` 的“项目级持久入口”为准，本 skill 只规定写入责任和必填字段：
+
+- Claude Code：项目根 `CLAUDE.md`
+- Codex：项目根 `AGENTS.md`
+- VSCode / 编辑器插件：插件配置、workspace instruction 或项目 prompt
+
+写入时保留既有内容，只追加或更新 TWS 托管区块，不覆盖用户已有规则。若已存在旧的 TWS 托管区块，必须整体替换为当前版本，不追加第二份，防止 Claude Code / Codex 新会话继续读到旧规则。
+
+TWS 托管区块必须使用稳定边界：
+
+```markdown
+<!-- TWS:BEGIN managed by TWS Skills {version} -->
+...
+<!-- TWS:END -->
+```
+
+TWS 区块必须包含：`TWS version`、`skill source root`、`using-tws/SKILL.md`、`tws-init/SKILL.md`、新会话读取 `.tws/project-map.md` 和 `.tws/platform-skills.md`、未完成 `.tws/sessions/` 的恢复规则、无原生 loader 的显式读取规则、用户可明确跳过 TWS。
+
+同时写入 `.tws/tws-version`：
+
+```markdown
+version: {读取根目录 VERSION}
+skill_source_root: {TWS-Skills 仓库路径或安装路径}
+updated_at: {YYYY-MM-DD HH:MM}
+```
+
+如果目标工程已经覆盖了新版 TWS Skills 仓库，`tws-init` 必须更新 `.tws/tws-version`、`.tws/platform-skills.md` 和项目级持久入口中的 TWS 托管区块，使 Claude Code / Codex 新会话读取的是新版入口，而不是旧的项目说明。
 
 ### project-map.md 格式
 
@@ -233,12 +279,42 @@ TWS 模板补充：
 
 保存后所有 TWS skill 启动时自动读取 project-map.md，按需加载规约。
 
+### platform-skills.md 格式
+
+完整解释和示例以根目录 `PLATFORM-SUPPORT.md` 为准。初始化时生成的 `.tws/platform-skills.md` 必须包含：
+
+```
+□ 当前平台：Claude Code / Codex / VSCode / Other
+□ skill 源目录
+□ TWS version（读取根目录 VERSION）
+□ `.tws/tws-version` 的版本和 skill source root
+□ 所有映射路径基准
+□ Claude Code 原生可发现：是/否 + 实际路径
+□ Codex 原生可发现：是/否 + 实际路径
+□ VSCode 兼容 loader：是/否/未知 + 扫描规则 `{sourceRoot}/*/SKILL.md`
+□ 是否支持子 agent：是/否/未知
+□ `/tws-init` → `tws-init/SKILL.md`
+□ `/using-tws` → `using-tws/SKILL.md`
+□ 新会话恢复规则
+□ 无原生 skill loader / 无子 agent / 无隔离上下文的降级规则
+□ 完整 skill 映射表：枚举 `{skill 源目录}/*/SKILL.md`，不得用 `...` 代替
+```
+
 ### 规约的用途
 
 | 规约 | 谁读 | 生成方式 |
 |------|------|---------|
+| platform-skills | 所有 agent | 平台检测 + 模板 |
 | coding-conventions | 编码中的 agent | 采样推断 |
 | testing-conventions | 写和执行测试的 agent | 推断框架 + 模板 |
 | design-conventions | 写设计书的 agent | 纯模板 |
 | env-conventions | 遇到环境问题的 agent | 扫描 + 模板 |
 | architecture-decisions | 所有 agent | 空模板，使用中积累 |
+
+## Rationalization Prevention
+
+| 想说的话 | 真相 |
+|---------|------|
+| 「项目很小，不用初始化」 | 初始化让后续 agent 有共同上下文 |
+| 「规约可以凭经验写」 | 既有项目要采样，避免把外部偏好强加给项目 |
+| 「先跑流程，缺规约再说」 | 缺规约会让设计、测试和同步标准漂移 |

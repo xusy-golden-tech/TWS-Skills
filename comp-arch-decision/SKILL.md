@@ -3,6 +3,10 @@ name: arch-decision
 description: 记录架构决策。由人类项目经理调用，将 agent 报告整理为固定格式，自动检查重复和矛盾。agent 不直接调用此 skill
 ---
 
+<SUBAGENT-STOP>
+This skill is for human project-manager confirmation. If you are a subagent, report architecture-decision material instead of invoking this skill directly.
+</SUBAGENT-STOP>
+
 # 记录架构决策
 
 ## 核心原则

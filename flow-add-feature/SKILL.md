@@ -25,7 +25,7 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 
 ```
 设计书 → 编码 → 测试 → 同步
-跳过：discuss、plan、任务分解、集成测试
+省略完整路径中的 discuss、plan、任务分解、集成测试；不省略设计书、测试和同步
 ```
 
 ### 完整路径
@@ -90,9 +90,16 @@ i. ✅ 标记完成 → 更新 checkpoint
 
 ## 完成依据
 
-- [ ] .tws/sessions/{当前流程文件} 已删除（流程完成，清理断点文件）
+标准完成依据见根目录 `checkpoint-reference.md`。本流程额外要求：
+
 - [ ] 所有任务已完成
 - [ ] 集成测试通过
 - [ ] 设计书已同步
-- [ ] checkpoint 已清理
-- [ ] 无阻塞项
+
+## Rationalization Prevention
+
+| 想说的话 | 真相 |
+|---------|------|
+| 「这是小功能，直接写就行」 | 小功能也会改接口、状态和测试边界 |
+| 「设计书写完就不用再看」 | 编码和同步都要回到设计书核对 |
+| 「集成测试最后有空再跑」 | 集成测试是完成条件，不是附加项 |

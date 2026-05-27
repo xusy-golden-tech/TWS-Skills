@@ -70,4 +70,12 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 
 ## 完成依据
 
-- [ ] .tws/sessions/{当前流程文件} 已删除（流程完成，清理断点文件）
+标准完成依据见根目录 `checkpoint-reference.md`。
+
+## Rationalization Prevention
+
+| 想说的话 | 真相 |
+|---------|------|
+| 「重构不改功能，所以不用测」 | 重构的核心验收就是行为不变 |
+| 「一次性改完更干净」 | 大爆炸式重构很难定位回归 |
+| 「顺手优化一下功能」 | 功能变更会污染重构目标，需拆成独立流程 |

@@ -29,3 +29,11 @@ description: 后端测试。单元测试 + 集成测试 + API 测试。每层独
 | Python | pytest | unittest.mock / pytest-mock |
 | Java | JUnit 5 | Mockito |
 | TypeScript | Jest / Vitest | jest.mock / vi.mock |
+
+## Rationalization Prevention
+
+| 想说的话 | 真相 |
+|---------|------|
+| 「后端逻辑很简单，不用测异常路径」 | 后端最容易在异常路径泄漏错误或状态 |
+| 「集成测试能覆盖单元测试」 | 集成测试慢且定位差，不能替代层内验证 |
+| 「真实服务更可靠」 | 单元测试依赖真实外部服务会变成环境测试 |

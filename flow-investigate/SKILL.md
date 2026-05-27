@@ -44,20 +44,7 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 
 ## ④ 报告
 
-```
-### 排查报告
-- 问题描述：{现象}
-- 复现条件：{步骤}
-- 根因：{具体位置 + 原因}
-- 影响范围：{哪些功能}
-- 建议修复方案：{方案描述}
-
-只查不修。如果要修 → 转 fix-bug 流程。
-```
-
-**转接时的中间产物传递：**
-
-investigate 的排查报告应保存为 `.tws/investigate-report.md`：
+investigate 的排查报告应保存为 `.tws/investigate-report.md`，作为本流程产物和转 `fix-bug` 的唯一中间产物：
 
 ```
 ## 排查报告
@@ -69,25 +56,27 @@ investigate 的排查报告应保存为 `.tws/investigate-report.md`：
 - 生成时间：YYYY-MM-DD HH:MM
 ```
 
+只查不修。如果要修 → 转 `fix-bug` 流程。
+
 转 fix-bug 时：
 
 ```
 1. 主 agent 读取 .tws/investigate-report.md
 2. 从步骤③修复方案开始，将报告内容作为 fix-bug 的输入
 3. 子 agent 收到压缩后的排查结论（不读原始对话历史）
-4. 更新 session-state.md：流程名改为 fix-bug，步骤从③开始
+4. 更新 `.tws/sessions/{当前流程文件}`：流程名改为 fix-bug，步骤从③开始
 5. 修复完成后清理 investigate-report.md
 ```
 
-**转接方式：**
-
-````
-investigate 的报告可作为 fix-bug 的 ① 复现 + ② 根因 输入。
-转 fix-bug 时从第③步修复方案开始，不需要重新排查。
-更新 session-state.md：流程名从 investigate 改为 fix-bug，①②直接标为已完成，当前步骤从③开始。
-````
-
 ## 完成依据
 
-- [ ] .tws/sessions/{当前流程文件} 已删除（流程完成，清理断点文件）
+标准完成依据见根目录 `checkpoint-reference.md`。
+
+## Rationalization Prevention
+
+| 想说的话 | 真相 |
+|---------|------|
+| 「大概知道原因了，可以开始修」 | investigate 只查不修，修复要转 fix-bug |
+| 「日志像是这个模块的问题」 | 范围收敛需要证据链，不靠像不像 |
+| 「查不出来就先改一处试试」 | 试改会污染现场，先报告不确定性 |
 

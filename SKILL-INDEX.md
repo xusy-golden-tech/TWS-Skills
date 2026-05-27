@@ -3,67 +3,13 @@
 > 全系统 skill 一览，含依赖关系和引用图。
 > 维护入口：新增或修改 skill 时同步更新此文件。
 
+## 平台支持
+
+TWS 对 Claude Code、Codex、VSCode 使用同一套 `SKILL.md`。平台发现、调用和降级规则见根目录 `PLATFORM-SUPPORT.md`；`tws-init` 会在目标项目生成 `.tws/platform-skills.md` 记录当前平台映射。
+
 ## 调用关系图
 
-```mermaid
-graph TD
-    A[using-tws 入口] --> B[add-feature]
-    A --> C[fix-bug]
-    A --> D[hotfix]
-    A --> E[new-project]
-    A --> F[refactor]
-    A --> G[documentation]
-    A --> H[investigate]
-
-    B --> I[design-doc]
-    B --> J[impact-assessment]
-    B --> K[task-breakdown]
-    B --> L[implementation]
-    B --> M[test]
-    B --> N[code-review]
-    B --> O[design-sync]
-    B --> VP[visual-prototype]
-    B --> UD[frontend-ui-design]
-
-    C --> P[reproduce]
-    C --> Q[root-cause-analysis]
-    C --> L
-    C --> M
-    C --> J
-    C --> O
-
-    D --> Q
-    D --> L
-    D --> M
-    D --> O
-
-    E --> I
-    E --> L
-    E --> M
-    E --> O
-    E --> R[deploy]
-    E --> VP
-    E --> UD
-
-    F --> S[migration-plan]
-    F --> L
-    F --> M
-    F --> J
-    F --> O
-    F --> UD
-
-    H --> P
-    H --> Q
-
-    L --> T[backend-impl-python]
-    L --> U[backend-impl-java]
-    L --> V[frontend-impl]
-
-    A --> W[subagent-dispatch]
-
-    J --> X[contract-aware]
-    X --> Y[branch-flow]
-```
+调用图见 `SKILL-GRAPH.md`。运行期查找 skill 路径和依赖时，优先读本文件的表格，避免把图结构预加载进上下文。
 
 
 ## 入口
@@ -79,9 +25,9 @@ graph TD
 
 | Skill | 路径 | 调用组件 |
 |-------|------|---------|
-| flow-add-feature | `flow-add-feature/SKILL.md` | design-doc, frontend-ui-design（条件：涉及前端）, impact-assessment, task-breakdown, implementation, test, code-review, design-sync, visual-prototype |
-| flow-fix-bug | `flow-fix-bug/SKILL.md` | reproduce, root-cause-analysis, implementation, test, impact-assessment, design-sync, 方案架构校验（步骤③.5，轻量检查，无独立 skill） |
-| flow-hotfix | `flow-hotfix/SKILL.md` | root-cause-analysis, implementation, test, design-sync |
+| flow-add-feature | `flow-add-feature/SKILL.md` | design-doc, frontend-ui-design（条件：涉及前端）, impact-assessment, task-breakdown, implementation, test, goal-verify（条件触发）, code-review, design-sync, visual-prototype |
+| flow-fix-bug | `flow-fix-bug/SKILL.md` | reproduce, root-cause-analysis, implementation, test, code-review, impact-assessment, design-sync, 方案架构校验（步骤③.5，轻量检查，无独立 skill） |
+| flow-hotfix | `flow-hotfix/SKILL.md` | root-cause-analysis, implementation, test, design-sync；code-review 是事后补齐项，不在阻塞路径 |
 | flow-new-project | `flow-new-project/SKILL.md` | design-doc, frontend-ui-design（条件：涉及 UI）, implementation, test, design-sync, deploy, visual-prototype |
 | flow-refactor | `flow-refactor/SKILL.md` | migration-plan, frontend-ui-design（条件：涉及 UI）, implementation, test, design-sync, impact-assessment |
 | flow-documentation | `flow-documentation/SKILL.md` | （手动审计） |
@@ -98,13 +44,13 @@ graph TD
 | backend-db-design | `comp-backend-db-design/SKILL.md` | 通用 |
 | backend-impl-python | `comp-backend-impl-python/SKILL.md` | 通用 |
 | backend-impl-java | `comp-backend-impl-java/SKILL.md` | 通用 |
-| backend-test | `comp-backend-test/SKILL.md` | 通用 |
+| backend-test | `comp-backend-test/SKILL.md` | 由 comp-test 按后端技术栈调用 |
 | code-review | `comp-code-review/SKILL.md` | 通用 |
 | deploy | `comp-deploy/SKILL.md` | flow-new-project |
 | design-doc | `comp-design-doc/SKILL.md` | flow-add-feature, flow-new-project |
 | design-sync | `comp-design-sync/SKILL.md` | 所有流程 |
 | frontend-impl | `comp-frontend-impl/SKILL.md` | 通用 |
-| frontend-test | `comp-frontend-test/SKILL.md` | 通用 |
+| frontend-test | `comp-frontend-test/SKILL.md` | 由 comp-test 按前端技术栈调用 |
 | frontend-ui-design | `comp-frontend-ui-design/SKILL.md` | flow-add-feature（条件：涉及前端）、flow-new-project（条件：涉及 UI）、flow-refactor（条件：涉及 UI） |
 | goal-verify | `comp-goal-verify/SKILL.md` | flow-add-feature（完整路径，触发条件下） |
 | impact-assessment | `comp-impact-assessment/SKILL.md` | flow-add-feature, flow-refactor, flow-fix-bug |
@@ -112,7 +58,7 @@ graph TD
 | migration-plan | `comp-migration-plan/SKILL.md` | flow-refactor |
 | reproduce | `comp-reproduce/SKILL.md` | flow-fix-bug, flow-investigate |
 | root-cause-analysis | `comp-root-cause-analysis/SKILL.md` | flow-fix-bug, flow-investigate, flow-hotfix |
-| comp-subagent-dispatch | `comp-subagent-dispatch/SKILL.md` | 通用（Solo 和 Team 模式） |
+| comp-subagent-dispatch | `comp-subagent-dispatch/SKILL.md` | 通用调度唯一规则源（Solo 和 Team 模式） |
 | task-breakdown | `comp-task-breakdown/SKILL.md` | flow-add-feature |
 | test | `comp-test/SKILL.md` | 所有流程 |
 | visual-prototype | `comp-visual-prototype/SKILL.md` | 通用 |
@@ -132,17 +78,7 @@ graph TD
 
 ## SUBAGENT-STOP 标签说明
 
-`<SUBAGENT-STOP>` 标签标记**子 agent 不应直接触发的 skill**：
-
-| 有 SUBAGENT-STOP | 没有 SUBAGENT-STOP |
-|-----------------|-------------------|
-| 入口 skill（using-tws） | 所有组件 skill（design-doc, implementation, test 等）|
-| 流程 skill（flow-add-feature, flow-fix-bug 等） | 所有基础 skill（artifact-split, core-principles 等）|
-| 调度 skill（team-subagent-dispatch） | — |
-| 部分 team skill | — |
-| 组件 skill 中的人类专用（arch-decision） | — |
-
-设计意图：主 agent 管理流程编排，子 agent 只执行具体任务。SUBAGENT-STOP 在 flow/entry skill 上保护子 agent 不走错路，component/foundation skill 不加是因为子 agent 正需要它们。
+`<SUBAGENT-STOP>` 标记子 agent 不应直接触发的入口、流程、调度或人类确认类 skill。组件和基础 skill 通常不加，因为子 agent 正需要读取它们。维护规则见 `CONTRIBUTING.md`，校验规则见 `validate-skills.py`。
 
 ---
 
@@ -154,4 +90,4 @@ graph TD
 | team-contract-aware | `team-contract-aware/SKILL.md` | CONTRACTS.md 存在 |
 | team-environment-gov | `team-environment-gov/SKILL.md` | 所有模式生效 |
 | team-impact-report | `team-impact-report/SKILL.md` | 所有模式生效 |
-| team-subagent-dispatch | `team-subagent-dispatch/SKILL.md` | 所有模式生效 |
+| team-subagent-dispatch | `team-subagent-dispatch/SKILL.md` | Team 模式补充清单；通用规则以 comp-subagent-dispatch 为准 |

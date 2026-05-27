@@ -1,6 +1,6 @@
 ﻿---
 name: flow-hotfix
-description: 紧急热修复流程。生产环境 Bug 快速修复用。跳过讨论、plan、review，直接定位 → 修复 → 验证 → 同步
+description: 紧急热修复流程。生产环境 Bug 快速修复用。阻塞路径只做定位 → 修复 → 验证 → 同步；完整审查作为事后补齐项
 ---
 
 <SUBAGENT-STOP>
@@ -15,7 +15,9 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 ① 定位 → ② 修复 → ③ 验证 → ④ 同步
 ```
 
-相比 `fix-bug` 流程，跳过了：discuss、方案确认、防复燃分析、集成测试。
+相比 `fix-bug` 流程，阻塞路径跳过：方案确认、防复燃分析、集成测试、完整代码审查。
+
+这些不是永久省略，而是进入「后续事项」补齐；热修复完成的最低条件是止血、验证和最小同步。
 
 **仅用于生产环境紧急修复。日常修复用 `fix-bug`。**
 
@@ -57,12 +59,12 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 1. 标记 hotfix 分支（分支名：hotfix/{描述}）
 2. 备注紧急修复原因
 3. 必须同步设计书——至少在设计书的变更履历追加一行
-4. 在 session-state.md 中标记「待补完整 design-sync」
+4. 在 `.tws/sessions/{当前流程文件}` 中标记「待补完整 design-sync」
 ```
 
 ## 完成依据
 
-- [ ] .tws/sessions/{当前流程文件} 已删除（流程完成，清理断点文件）
+标准完成依据见根目录 `checkpoint-reference.md`。
 
 ## 后续事项
 
@@ -71,3 +73,11 @@ hotfix 是应急处理，架构质量不是此时的优先级。
 但修复完成后，建议在非紧急时安排一次完整的 code review（加载 `comp-code-review`，含 D7 架构健康度检查），
 确认紧急修复没有引入技术债。如果引入了，走 fix-bug 流程补修。
 ```
+
+## Rationalization Prevention
+
+| 想说的话 | 真相 |
+|---------|------|
+| 「热修就是越快越好，不用记录」 | 热修更需要留下原因和后续补齐项 |
+| 「能止血就完成」 | 完成还包括验证和最小设计同步 |
+| 「紧急时不用回头看」 | 热修后的补审查是防止技术债固化 |

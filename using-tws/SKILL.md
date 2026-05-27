@@ -1,6 +1,6 @@
 ﻿---
 name: using-tws
-description: TWS 入口 skill — 自动判断开发场景，路由到对应流程。用户有任何开发相关的任务时，优先触发本 skill
+description: TWS 入口 skill — 自动判断开发场景，路由到对应流程。用户请求按 TWS 流程开发、修复、重构、排查，或任务需要多步骤工程交付时触发
 ---
 
 <SUBAGENT-STOP>
@@ -17,11 +17,38 @@ If you were dispatched as a subagent with a specific task, skip this skill.
 2. 增量实施，每步可验证，禁止跳过
 3. 测试通过是最低要求，还要检查边界和同步
 4. 改了代码必须同步设计书，不改 = 没改完
-5. **主 agent 不写代码**——所有编码、测试、同步由子 agent 执行（详见 `comp-subagent-dispatch`）。Solo 模式也一样
-6. **主 agent 不加载 comp skill**——comp skill（comp-reproduce、comp-implementation 等）是给子 agent 的工作手册。主 agent 的职责是派子 agent、告诉它加载哪个 comp skill、验收产出。主 agent 只加载 flow skill（如 flow-fix-bug）用于流程控制
+5. **主 agent 不写代码**——有可用子 agent 时，所有编码、测试、同步由子 agent 执行（详见 `comp-subagent-dispatch`）。Solo 模式也一样
+6. **主 agent 不加载 comp skill**——有可用子 agent 时，comp skill（comp-reproduce、comp-implementation 等）是给子 agent 的工作手册。主 agent 的职责是派子 agent、告诉它加载哪个 comp skill、验收产出。主 agent 只加载 flow skill（如 flow-fix-bug）用于流程控制
 7. **所有改动必须从 develop 开新分支**——`git checkout develop && git checkout -b {type}/{description}`。禁止直接在 develop/master 上提交（详见 `team-branch-flow`）
 8. **子 agent 完成后必须 git commit**——每完成一个子任务立即 `git add` + `git commit`（不 push）。防止后续子 agent 误操作回滚已验收的改动。详见 `comp-subagent-dispatch` 的「结果合并」节
 9. **主 agent 关注上下文容量**——长流程中累积多个子 agent 汇报后，上下文会逐渐膨胀。自检信号：已派 5+ 子 agent / 汇报累积超 3 屏 / 下一个任务很复杂。偏重时减少汇报内联、考虑合并后续步骤；过载时 checkpoint 保存后建议用户开新会话续上。这不是精确计算，是纪律——防止在上下文紧张时做低质量编排决策
+
+## 平台适配
+
+- 优先使用平台原生 `Skill` / `Agent` / 文件工具。
+- 无原生 Skill loader 时，按 `.tws/platform-skills.md` 显式读取对应 `SKILL.md`，视为等价激活。
+- 无子 agent 时，这是第 5、6 条的唯一例外：当前 agent 按 `comp-subagent-dispatch/SKILL.md` 的无子 agent 降级协议执行，并在汇报中标注“按子 agent 约束由当前 agent 执行”。
+- 详细平台等价、持久入口和默认生效条件见根目录 `PLATFORM-SUPPORT.md`。
+
+## 入口读取链（不可停在入口）
+
+`using-tws` 只负责路由和编排，不是完整执行规则。激活本 skill 后必须继续完成以下读取链：
+
+```
+1. 读取 `.tws/project-map.md`
+   - 不存在 → 先运行 `tws-init/SKILL.md` 或 `/tws-init`
+   - 存在 → 读取技术栈、规约索引、路径映射
+2. 读取 `.tws/platform-skills.md`（存在时）
+   - 无原生 Skill loader 时，用它把 `Skill(skill: "x")` 映射到 `{skill 源目录}/x/SKILL.md`
+   - 若其中的 TWS 版本或 skill source root 与当前仓库不一致，先提醒用户运行 `tws-init` 更新入口映射
+3. 按场景加载对应 `flow-*/SKILL.md`
+   - 入口只输出计划，不能替代 flow skill
+4. 用户确认计划后，加载 `comp-subagent-dispatch/SKILL.md`
+   - 之后每个执行/审查任务由子 agent 加载对应 `comp-*` 或 `found-*` skill
+5. 按 flow 中的步骤逐项执行；任何按需 references 只在对应 step 需要时读取
+```
+
+如果无法完成上述链路，必须明确报告缺失文件或不可用工具，不得假装 TWS 已完整生效。
 
 ## 第零步：强制模式检测 ⚠️ 不可跳过
 
@@ -31,18 +58,21 @@ If you were dispatched as a subagent with a specific task, skip this skill.
 
 ```
 第 1 项 — 检查 CONTRACTS.md：
-  Bash: ls CONTRACTS.md 2>/dev/null
+  Bash/Git Bash: ls CONTRACTS.md 2>/dev/null
+  PowerShell: Test-Path CONTRACTS.md
   → 文件存在 → Team Mode，直接跳到第 3 项确认
   → 文件不存在 → 继续第 2 项
 
 第 2 项 — 检查 git log 多人提交：
-  Bash: git log --all --since="6 months ago" --format="%an" | sort -u | wc -l
+  Bash/Git Bash: git log --all --since="6 months ago" --format="%an" | sort -u | wc -l
+  PowerShell: git log --all --since="6 months ago" --format="%an" | Sort-Object -Unique | Measure-Object
   → 作者数 >= 2 → Team Mode
   → 作者数 == 1 → 继续第 2b 项
   → 命令失败（不在 git repo 等）→ Solo Mode
 
   第 2b 项 — 避免误判单人 repo：
-  Bash: git log --all --format="%an" | sort -u
+  Bash/Git Bash: git log --all --format="%an" | sort -u
+  PowerShell: git log --all --format="%an" | Sort-Object -Unique
   → 历史上的所有唯一作者数 >= 2 → Team Mode
   → 真的是一个人 → Solo Mode
 
@@ -58,7 +88,7 @@ If you were dispatched as a subagent with a specific task, skip this skill.
 以下想法出现时 STOP，回头执行检测：
 
 「这明显是单人项目，肯定是 Solo」
-  → 先跑 ls CONTRACTS.md && git log --all --format="%an" | sort -u
+  → 先检查 CONTRACTS.md，并统计 git 历史中的唯一作者
 
 「CONTRACTS.md 肯定不存在」
   → 你猜的不算，ls 一下再说
@@ -143,23 +173,14 @@ Mode 确定后写入后续所有输出。输出计划时必须带 `👥 模式�
   → 写设计书 → 加载 design-conventions
   → 遇到环境问题 → 加载 env-conventions
 
-→ 不存在 → 「项目规约尚未初始化。是否先运行 `init/SKILL.md` 初始化？」
-  → 用户选「是」→ 调用 init
+→ 不存在 → 「项目规约尚未初始化。是否先运行 `tws-init/SKILL.md`（或 `/tws-init`）初始化？」
+  → 用户选「是」→ 调用 tws-init
   → 用户选「跳过」→ 继续，但后续 skill 可能提醒
 ```
 
-### 2a-补充：MCP 工具审计
+### 2a-补充：上下文预算提醒
 
-提醒用户（不强制）：
-
-「TWS 提示：当前会话启用的 MCP 工具会在每轮对话中消耗 token。
- 如果当前任务不涉及以下能力，建议在 Claude Code 设置中临时禁用：
- - 浏览器/Playwright → 当前有 UI 测试任务吗？
- - GUI 自动化 → 当前需要 GUI 操作吗？
- - 图片分析 → 当前需要看截图吗？
- 禁用方式：Settings → MCP → 取消勾选不需要的服务器」
-
-不要强制，只是提醒。用户决定。如果用户明确说不需要提醒，本步骤在后续会话中跳过。
+如果当前会话上下文压力明显，或启用了与任务无关的 MCP / 插件工具，提醒用户按 `PLATFORM-SUPPORT.md` 的“上下文预算”建议检查不必要工具。不要强制，用户决定。
 
 ### 2b. 是否有未完成的流程
 
@@ -167,7 +188,7 @@ Mode 确定后写入后续所有输出。输出计划时必须带 `👥 模式�
 
 ### 2c. 加载对应的 flow skill，运行门禁判断
 
-直接用 Skill 工具按名称调用，不要搜索文件、不要用 Read 读文件：
+有原生 Skill loader 时，直接用 Skill 工具按名称调用，不要搜索文件、不要用普通 Read 代替：
 
 ```
 Skill(skill: "flow-fix-bug")
@@ -187,21 +208,25 @@ Skill(skill: "flow-documentation")
 → 加载 ≠ 立即执行所有步骤：此时只做门禁判断和计划输出，用户确认后才进入具体步骤
 
 禁止：
-❌ Search 搜索 skill 文件路径
-❌ Read 直接读 SKILL.md 文件
-❌ 只有用 Skill 工具调用才能正式激活 skill
+❌ 在原生 Skill loader 可用时，用 Search 搜索 skill 文件路径
+❌ 在原生 Skill loader 可用时，用 Read 直接读 SKILL.md 文件代替 Skill
+❌ 在原生 Skill loader 可用时，绕过 Skill 工具激活 skill
 
-> session-state 的格式和恢复流程详见 `skills/checkpoint-reference.md`（需要读/写 checkpoint 时加载，不预加载）。
+平台降级例外：
+→ 如果当前平台没有原生 Skill loader，读取 `.tws/platform-skills.md` 中映射到的 `SKILL.md` 视为等价激活。
+→ 例如 `Skill(skill: "flow-fix-bug")` 等价于读取 `{skill 源目录}/flow-fix-bug/SKILL.md`。
+
+> session 文件的格式和恢复流程详见根目录 `checkpoint-reference.md`（需要读/写 checkpoint 时加载，不预加载）。
 
 ## 第三步：输出计划等待确认
 
 基于第二步的门禁结果，输出对应的计划（简化路径或完整路径）。不是凭直觉写，而是严格对应 flow skill 中的路径。
 
-**步骤不允许合并**。flow skill 中有几个步骤就展开几个，每步对应一条。例如 flow-fix-bug 完整路径有 10 步（复现→根因→方案→修复→回归→审查→防复燃→影响评估→集成→同步），计划就必须有 10 条，不能合并成 5 条。合并 = 丢失检查点 = 跳过风险。
+**步骤不允许合并**。flow skill 中有几个步骤就展开几个，每步对应一条。例如 flow-fix-bug 完整路径包含复现、根因、方案、方案架构校验、修复、回归、代码审查、防复燃、影响评估、集成、同步；计划必须逐项展开，不能合并成概要。合并 = 丢失检查点 = 跳过风险。
 
 输出格式必须展开每一步的**产出物和执行方式**。这不是概要，而是承诺清单——用户确认后，跳过任何一步都是违反承诺。
 
-主 agent 在此步骤中只做**项目管理**：输出计划、协调子 agent、验收产出。所有实际工作（设计、编码、测试、审查、同步）由子 agent 执行。
+主 agent 在此步骤中只做**项目管理**：输出计划、协调子 agent、验收产出。有可用子 agent 时，所有实际工作（设计、编码、测试、审查、同步）由子 agent 执行；无子 agent 平台按上方降级协议执行。
 
 ```
 📋 识别为：【{场景名}】
@@ -221,28 +246,8 @@ Skill(skill: "flow-documentation")
 
 用户确认后：
 1. 以上步骤成为**已承诺的执行计划**，后续必须按此执行，不得跳过
-2. 立即加载子 agent 调度规则：`Skill(skill: "comp-subagent-dispatch")`——这是主 agent 执行计划的前提，不加载就不知道怎么派子 agent
-3. 用 Write 工具创建 session 文件 `.tws/sessions/{flow-type}-{short-desc}.md`（支持多流程并行）
-   - 文件名示例：`fix-bug-plugin-stuck.md`、`add-feature-refresh-btn.md`、`refactor-auth.md`
-   - 内容格式：
-
-```markdown
-## 当前流程
-- 流程名：{场景名}
-- flow skill：{flow-fix-bug 等}
-- 模式：{Solo / Team}
-- 开始时间：{YYYY-MM-DD HH:MM}
-- 版本号：1
-
-## 进度
-- [ ] ① {步骤名}
-- [ ] ② {步骤名}
-（复制计划中的所有步骤）
-
-## 当前任务
-- 正在做：① {第一步名称}
-- 状态：进行中
-```
+2. 立即加载子 agent 调度规则：`Skill(skill: "comp-subagent-dispatch")`——这是主 agent 执行计划的前提；无原生 Skill loader 时，按 `.tws/platform-skills.md` 映射读取 `{skill 源目录}/comp-subagent-dispatch/SKILL.md`
+3. 用 Write 工具创建 session 文件 `.tws/sessions/{flow-type}-{short-desc}.md`（支持多流程并行）。格式按根目录 `checkpoint-reference.md`，进度项必须复制已确认计划中的所有步骤。
 
 4. 进入 flow skill 执行阶段——flow skill 已在第二步加载，门禁已通过，直接执行
 5. 计划中的步骤是承诺，flow skill 中的流程是约束，两者共同保证执行质量

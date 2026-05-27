@@ -1,6 +1,6 @@
 ﻿---
 name: flow-fix-bug
-description: 修复 Bug。复杂度门禁 → 简化或完整路径。完整：复现→根因→方案→修复→回归→审查→防复燃→影响评估→集成→同步
+description: 修复 Bug。复杂度门禁 → 简化或完整路径。完整：复现→根因→方案→方案架构校验→修复→回归→代码审查→防复燃→影响评估→集成→同步
 ---
 
 <SUBAGENT-STOP>
@@ -30,13 +30,13 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 
 ```
 根因 → 修复 → 验证 → 同步
-跳过：方案确认、回归、防复燃、集成测试
+省略完整路径中的方案确认、完整回归、防复燃、集成测试；不省略根因、验证和同步
 ```
 
 ### 完整路径
 
 ```
-复现 → 根因 → 方案 → 方案架构校验 → 修复 → 回归 → 防复燃 → 影响评估 → 集成 → 同步
+复现 → 根因 → 方案 → 方案架构校验 → 修复 → 回归 → 代码审查 → 防复燃 → 影响评估 → 集成 → 同步
 ```
 
 ---
@@ -106,6 +106,8 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 
 ### ⑤ 单元+回归
 
+子 agent 通过 Skill 工具加载 `comp-test`
+
 ```
 链式验证 → 检查修复已完成
 
@@ -143,6 +145,8 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 
 ### ⑨ 集成测试（原⑧）
 
+子 agent 通过 Skill 工具加载 `comp-test`（集成验证范围）
+
 ```
 链式验证 → 检查所有任务完成
 
@@ -163,10 +167,18 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 3. 验证 → Bug 不再复现 + 跑核心测试
 4. 同步 → 设计书同步
 
-简化跳过了：方案确认、完整回归、防复燃、集成测试。
-但「验证」不能跳——必须确认 Bug 不再出现。
+简化路径省略完整路径中的方案确认、完整回归、防复燃、集成测试。
+但「验证」和「同步」不能省略——必须确认 Bug 不再出现，并记录设计书变更。
 ```
 
 ## 完成依据
 
-- [ ] .tws/sessions/{当前流程文件} 已删除（流程完成，清理断点文件）
+标准完成依据见根目录 `checkpoint-reference.md`。
+
+## Rationalization Prevention
+
+| 想说的话 | 真相 |
+|---------|------|
+| 「先改了再找根因」 | 没有根因就无法判断修复是否完整 |
+| 「复现不了也能修」 | 复现不了就没有可靠的通过标准 |
+| 「小修复不用防复燃」 | 小 bug 常来自系统性缺口，至少要判断是否需要防复燃 |

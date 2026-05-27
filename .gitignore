@@ -1,1 +1,5 @@
 .claude/
+.tws/
+design-system/
+__pycache__/
+*.pyc
