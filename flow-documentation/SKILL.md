@@ -51,7 +51,7 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 
 ```
 如果文档变更涉及 API/接口/架构描述的修改，调用 design-sync 同步设计书。
-不涉及设计书的文档变更跳过此步。
+不涉及设计书的文档变更跳过此步，并在 session 当前步骤或阶段交接中记录跳过理由。
 ```
 
 ## ⑤ 发布
@@ -59,6 +59,7 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 ```
 1. 确认格式正确
 2. 更新文档索引
+3. 按 `checkpoint-reference.md` 检查公共完成依据
 ```
 
 ## 完成依据

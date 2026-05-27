@@ -57,6 +57,8 @@ This rule applies to agents that are considering splitting work into sub-agents.
 2. 按 skill 中的指引执行任务
 3. 完成后汇报：做了什么、改了哪些文件、发现了什么
 
+如果子 agent 发生上下文压缩或摘要恢复，先重新读取本任务指定的 comp skill、必要的 `.tws/project-map.md` / `.tws/platform-skills.md`，再继续；不得只凭压缩摘要执行。
+
 任务背景：{简要描述任务上下文}
 ```
 

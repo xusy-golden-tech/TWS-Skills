@@ -39,7 +39,7 @@ python comp-frontend-ui-design/scripts/search.py "<产品类型> <行业> <关�
 
 从仓库根目录运行时使用上面的路径；Windows 也可使用 `py -3 comp-frontend-ui-design/scripts/search.py ...`。如果已经进入本 skill 目录，则改用 `python scripts/search.py ...`。
 
-这一步会并行搜索产品、风格、配色、落地页、字体等数据源，输出布局模式、风格、配色、字体、动效和反模式。
+这一步会并行搜索产品、风格、配色、落地页、字体、UX 等数据源，输出布局模式、风格、配色、字体、动效和反模式。`--design-system` 输出不是完整 UX 审查；交付前仍必须按 UI Gate 检查，复杂 UI 再读取 references。
 
 ### Step 2b：持久化设计系统（推荐）
 

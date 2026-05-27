@@ -49,7 +49,7 @@ VSCode 或其他编辑器插件若要“导入 TWS_Skills 仓库后自动识别�
 
 1. 配置一个 `skill source root`，例如 `./vendor/TWS_Skills`
 2. 枚举 `{sourceRoot}/*/SKILL.md`，不递归进入任意深层目录作为 skill
-3. skill id 优先使用目录名；frontmatter `name` 用于展示和一致性校验
+3. canonical skill id 必须使用目录名；frontmatter `name` 只作展示/别名，不作为调用 ID，也不得要求它与目录名相同
 4. `/using-tws` 映射到 `{sourceRoot}/using-tws/SKILL.md`
 5. `/tws-init` 映射到 `{sourceRoot}/tws-init/SKILL.md`
 6. `Skill(skill: "x")` 映射到 `{sourceRoot}/{x}/SKILL.md`
@@ -69,11 +69,16 @@ Claude Code 项目建议在项目根 `CLAUDE.md` 保留以下 TWS 托管区块�
 
 - TWS version: {version}
 - skill source root: {skill source root}
-- 开发、修复、重构、排查、文档类多步骤工程任务，默认先调用 `/using-tws`。
+- skill source VERSION: {读取 {skill source root}/VERSION}
+- skill source root realpath: {解析后的 skill source root}
+- skill source commit: {短 commit；不可用则 unknown}
+- skill source fingerprint: {VERSION + commit/hash}
+- 开发、修复、重构、排查、文档类多步骤工程任务，默认先调用 `/using-tws`；不得只按本区块直接开发。
 - 如果 `.tws/project-map.md` 不存在，先调用 `/tws-init`。
 - 如果 `/using-tws` 不可用，读取 `{skill source root}/using-tws/SKILL.md` 并按其中流程执行。
 - 新会话开始时先读取 `.tws/project-map.md` 和 `.tws/platform-skills.md`；若 `.tws/sessions/` 有未完成流程，先询问是否续上。
-- 如果 `.tws/tws-version` 与本区块版本或 skill source root 不一致，先运行 `/tws-init` 更新 TWS 入口映射。
+- 发生上下文压缩、摘要恢复或新窗口续跑时，按 `using-tws/SKILL.md` 的“上下文压缩恢复协议”重新读取 TWS 文件，不得只凭摘要继续。
+- 如果 `.tws/tws-version` 与本区块或 `{skill source root}/VERSION` 的 version/root/realpath/commit/fingerprint 任一不一致，先运行 `/tws-init` 或读取当前 `tws-init/SKILL.md` 刷新入口映射。
 - 用户明确要求跳过 TWS 时才跳过。
 <!-- TWS:END -->
 ```
@@ -88,11 +93,16 @@ This project uses TWS.
 
 - TWS version: {version}
 - skill source root: {skill source root}
-- For development, fix, refactor, investigation, documentation, or other multi-step engineering tasks, start from `using-tws/SKILL.md`.
+- skill source VERSION: {read {skill source root}/VERSION}
+- skill source root realpath: {resolved skill source root}
+- skill source commit: {short commit or unknown}
+- skill source fingerprint: {VERSION + commit/hash}
+- For development, fix, refactor, investigation, documentation, or other multi-step engineering tasks, start from `using-tws/SKILL.md`; do not implement directly from this block.
 - If `.tws/project-map.md` is missing, run `tws-init/SKILL.md` first.
 - If native skills are unavailable, read `{skill source root}/using-tws/SKILL.md` directly and follow it.
 - At the beginning of a new session, read `.tws/project-map.md` and `.tws/platform-skills.md`; if `.tws/sessions/` contains unfinished flows, ask whether to resume.
-- If `.tws/tws-version` does not match this block's version or skill source root, run `tws-init/SKILL.md` to refresh TWS entry mappings before development work.
+- After context compaction, summary restore, or a new window continuation, follow the context recovery protocol in `using-tws/SKILL.md`; do not continue from summary alone.
+- If `.tws/tws-version` does not match this block or `{skill source root}/VERSION` on version/root/realpath/commit/fingerprint, run `tws-init/SKILL.md` to refresh TWS entry mappings before development work.
 - Skip TWS only when the user explicitly asks to skip it.
 <!-- TWS:END -->
 ```
@@ -101,7 +111,7 @@ VSCode 或其他编辑器插件没有统一的项目入口文件。兼容插件�
 
 `.tws/platform-skills.md` 是运行期映射文件，不是唯一 bootstrap 入口。首次使用且尚未生成 `.tws/platform-skills.md` 时，必须从已知的 `skill source root` 直接读取 `tws-init/SKILL.md`；初始化后再依赖 `.tws/platform-skills.md` 做流程内映射。
 
-若目标工程通过复制覆盖升级了 `vendor/TWS_Skills/`，还必须重新运行 `/tws-init` 或显式读取新版 `tws-init/SKILL.md`，刷新 `.tws/tws-version`、`.tws/platform-skills.md`、`CLAUDE.md` / `AGENTS.md` 的 TWS 托管区块。否则平台可能继续遵循旧项目入口说明。
+若目标工程通过复制覆盖升级了 `vendor/TWS_Skills/`，还必须重新运行 `/tws-init` 或显式读取新版 `tws-init/SKILL.md`，刷新 `.tws/tws-version`、`.tws/platform-skills.md`、`CLAUDE.md` / `AGENTS.md` 的 TWS 托管区块。否则平台可能继续遵循旧项目入口说明。即使旧 `.tws/tws-version` 与旧托管区块相互一致，只要 `{skill source root}/VERSION` 或 fingerprint 与当前源码不一致，也以当前源码为准先刷新。
 
 ## 初始化时生成的适配文件
 
@@ -121,6 +131,9 @@ VSCode 或其他编辑器插件没有统一的项目入口文件。兼容插件�
 - 当前平台：Claude Code / Codex / VSCode / Other
 - TWS version：{读取根目录 VERSION}
 - skill 源目录：{TWS-Skills 仓库路径或安装路径}
+- skill source root realpath：{解析后的真实路径}
+- skill source commit：{短 commit；不可用则 unknown}
+- skill source fingerprint：{VERSION + commit/hash}
 - updated_at：{YYYY-MM-DD HH:MM}
 - 所有映射路径基准：相对 skill 源目录解析
 - Claude Code 原生可发现：是/否（实际路径：{.claude/skills 路径或无}）
@@ -138,17 +151,26 @@ VSCode 或其他编辑器插件没有统一的项目入口文件。兼容插件�
 - 新会话先读取 `.tws/project-map.md` 和 `.tws/platform-skills.md`
 - 开发、修复、重构、排查、文档类多步骤任务默认进入 `using-tws/SKILL.md`
 - 若 `.tws/sessions/` 存在未完成流程，先询问是否续上
+- 上下文压缩、摘要恢复、新窗口续跑时，按 `using-tws/SKILL.md` 的恢复协议重新读取 `.tws/tws-version`、project-map、platform-skills、session、flow 和 dispatch
 - 若原生入口不可用，显式读取 `{skill 源目录}/using-tws/SKILL.md`
 
 ## 完整 skill 映射
 初始化时必须枚举 `{skill 源目录}/*/SKILL.md`，为每个 skill 生成一行映射；不得用 `...` 代替完整列表。至少包含：
 
-| skill | path |
-|-------|------|
-| using-tws | `{skill 源目录}/using-tws/SKILL.md` |
-| tws-init | `{skill 源目录}/tws-init/SKILL.md` |
-| flow-fix-bug | `{skill 源目录}/flow-fix-bug/SKILL.md` |
-| comp-test | `{skill 源目录}/comp-test/SKILL.md` |
+canonical_id 必须等于目录名；`display_name`/`aliases` 只辅助展示或兼容旧称，不能改变调用 ID。
+
+| canonical_id | path | display_name | aliases |
+|--------------|------|--------------|---------|
+| using-tws | `{skill 源目录}/using-tws/SKILL.md` | using-tws | - |
+| tws-init | `{skill 源目录}/tws-init/SKILL.md` | tws-init | - |
+| flow-fix-bug | `{skill 源目录}/flow-fix-bug/SKILL.md` | flow-fix-bug | - |
+| flow-refactor | `{skill 源目录}/flow-refactor/SKILL.md` | flow-refactor | - |
+| comp-subagent-dispatch | `{skill 源目录}/comp-subagent-dispatch/SKILL.md` | comp-subagent-dispatch | - |
+| comp-impact-assessment | `{skill 源目录}/comp-impact-assessment/SKILL.md` | comp-impact-assessment | - |
+| comp-migration-plan | `{skill 源目录}/comp-migration-plan/SKILL.md` | comp-migration-plan | migration-plan |
+| comp-implementation | `{skill 源目录}/comp-implementation/SKILL.md` | comp-implementation | implementation |
+| comp-test | `{skill 源目录}/comp-test/SKILL.md` | comp-test | test |
+| comp-design-sync | `{skill 源目录}/comp-design-sync/SKILL.md` | comp-design-sync | design-sync |
 
 ## 降级规则
 - 无原生 skill loader：显式读取对应 `SKILL.md`

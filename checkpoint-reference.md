@@ -29,6 +29,14 @@
 - 开始时间：YYYY-MM-DD HH:MM
 - 版本号：{整数，每次写入 +1}
 
+## 恢复所需文件
+- `.tws/tws-version`
+- `.tws/project-map.md`
+- `.tws/platform-skills.md`
+- `checkpoint-reference.md`
+- `{flow skill}/SKILL.md`
+- `comp-subagent-dispatch/SKILL.md`（计划确认后）
+
 ## 进度
 - [x] ① {已完成的步骤}
 - [ ] ② {当前步骤}
@@ -61,13 +69,17 @@
 ## 恢复流程
 
 ```
-下次会话启动时（using-tws 第一步）：
+下次会话启动、上下文压缩恢复、摘要恢复时（using-tws 第一步）：
 1. 用 Glob 检查 .tws/sessions/*.md
 2. 没有文件 → 正常路由
 3. 有 1 个文件 → 询问用户是否续上
 4. 有多个文件 → 列出所有，让用户选择续上哪个或开始新流程
-5. 用户选择续上 → 读取对应文件，加载 flow skill，从断点继续
+5. 用户选择续上 → 读取对应文件和“恢复所需文件”，重新加载 flow skill
+6. 若计划已确认或处于执行中 → 重新加载 comp-subagent-dispatch
+7. 从 session 的当前步骤继续；当前步骤所需 comp/found/team skill 必须重新加载
 ```
+
+压缩摘要只能当作线索，不能替代上述文件读取。无法完成恢复链时，不得声称 TWS 或对应 skill 仍完整生效。
 
 ## 保存时机
 
@@ -75,7 +87,7 @@
 流程启动时（用户确认后）→ Write 创建 .tws/sessions/{name}.md
 每完成一个步骤 → Edit 更新（[ ]→[x]，版本号+1）
 遇到阻塞时 → Edit 更新状态 + 标注阻塞原因
-流程完成时 → 删除对应 session 文件
+流程完成时 → 先检查标准完成依据，再删除对应 session 文件
 ```
 
 ## 标准完成依据
@@ -83,9 +95,9 @@
 所有 flow 默认满足以下条件才算完成：
 
 ```markdown
-- [ ] `.tws/sessions/{当前流程文件}` 已删除（流程完成，清理断点文件）
 - [ ] 已确认无阻塞项或阻塞项已转入 `.tws/deferred-issues.md`
 - [ ] 若流程产生待补事项，已写入 session / deferred 文件或用户已确认处理方式
+- [ ] `.tws/sessions/{当前流程文件}` 已删除（流程完成，清理断点文件）
 ```
 
 各 flow 的 `## 完成依据` 只写本流程额外要求，不重复以上公共项。

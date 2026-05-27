@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +15,10 @@ ERRORS: list[str] = []
 
 def fail(message: str) -> None:
     ERRORS.append(message)
+
+
+def read_text(rel_path: str) -> str:
+    return (ROOT / rel_path).read_text(encoding="utf-8-sig")
 
 
 def check_skill_files() -> None:
@@ -126,6 +132,150 @@ def check_platform_docs() -> None:
     }.items():
         if "无原生 Skill loader" not in text:
             fail(f"{rel} should define no-loader SKILL.md fallback")
+
+
+def check_platform_activation_fingerprint() -> None:
+    platform = read_text("PLATFORM-SUPPORT.md")
+    init_text = read_text("tws-init/SKILL.md")
+    using_text = read_text("using-tws/SKILL.md")
+    docs = {
+        "PLATFORM-SUPPORT.md": platform,
+        "tws-init/SKILL.md": init_text,
+    }
+    required = [
+        "skill source VERSION",
+        "skill source root realpath",
+        "skill source commit",
+        "skill source fingerprint",
+        "{skill source root}/VERSION",
+    ]
+    for rel, text in docs.items():
+        for phrase in required:
+            if phrase not in text:
+                fail(f"{rel} missing source refresh phrase: {phrase}")
+
+    for phrase in [
+        ".tws/tws-version",
+        "{skill source root}/VERSION",
+        "fingerprint",
+        "不得声称新版 TWS 已完整生效",
+    ]:
+        if phrase not in using_text:
+            fail(f"using-tws/SKILL.md missing activation refresh phrase: {phrase}")
+
+    for rel in ["README.md", "AGENTS.md", "CLAUDE.md"]:
+        text = read_text(rel)
+        for phrase in ["fingerprint", "tws-version"]:
+            if phrase not in text:
+                fail(f"{rel} should document managed entry refresh phrase: {phrase}")
+
+
+def check_skill_reference_resolution() -> None:
+    skill_dirs = {path.parent.name for path in ROOT.glob("*/SKILL.md")}
+    ignored = {"x", "xxx", "comp-xxx", "..."}
+    pattern = re.compile(r"Skill\(skill:\s*[\"']([^\"']+)[\"']\)")
+    for path in sorted(ROOT.glob("**/*.md")):
+        if ".git" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8-sig")
+        for match in pattern.finditer(text):
+            skill_id = match.group(1).strip()
+            if not skill_id or skill_id in ignored or "{" in skill_id or "*" in skill_id:
+                continue
+            if skill_id not in skill_dirs:
+                fail(f"{path.relative_to(ROOT)} references missing skill directory: {skill_id}")
+
+    for rel in ["PLATFORM-SUPPORT.md", "tws-init/SKILL.md"]:
+        text = read_text(rel)
+        for phrase in ["canonical_id", "frontmatter `name` 只作展示/别名"]:
+            if phrase not in text:
+                fail(f"{rel} missing canonical skill id rule: {phrase}")
+
+
+def check_flow_handoffs_and_closeout() -> None:
+    checks = {
+        "flow-fix-bug/SKILL.md": [
+            "无法确认",
+            "默认走完整路径",
+        ],
+        "flow-add-feature/SKILL.md": [
+            "comp-subagent-dispatch",
+            "comp-impact-assessment",
+            "comp-task-breakdown",
+            "主 agent 只整合和验收",
+        ],
+        "flow-hotfix/SKILL.md": [
+            "deferred-issues.md",
+            "删除 session 前",
+        ],
+        "checkpoint-reference.md": [
+            "先检查标准完成依据，再删除对应 session 文件",
+        ],
+        "flow-investigate/SKILL.md": [
+            "加载 `flow-fix-bug/SKILL.md`",
+            "阶段交接",
+            "不代表跳过 ③.5",
+            "已吸收报告内容",
+        ],
+        "flow-documentation/SKILL.md": [
+            "记录跳过理由",
+            "checkpoint-reference.md",
+            "检查公共完成依据",
+        ],
+    }
+    for rel, phrases in checks.items():
+        text = read_text(rel)
+        for phrase in phrases:
+            if phrase not in text:
+                fail(f"{rel} missing flow handoff/closeout phrase: {phrase}")
+
+
+def check_context_recovery_protocol() -> None:
+    checks = {
+        "using-tws/SKILL.md": [
+            "上下文压缩恢复协议",
+            "不得只凭摘要继续执行",
+            ".tws/tws-version",
+            "{skill source root}/VERSION",
+            "checkpoint-reference.md",
+            "comp-subagent-dispatch/SKILL.md",
+        ],
+        "checkpoint-reference.md": [
+            "恢复所需文件",
+            "上下文压缩恢复",
+            "压缩摘要只能当作线索",
+            "当前步骤所需 comp/found/team skill 必须重新加载",
+        ],
+        "PLATFORM-SUPPORT.md": [
+            "上下文压缩",
+            "摘要恢复",
+            "context recovery protocol",
+        ],
+        "tws-init/SKILL.md": [
+            "上下文压缩恢复协议",
+            "上下文压缩 / 摘要恢复 / 新窗口续跑恢复规则",
+        ],
+        "comp-subagent-dispatch/SKILL.md": [
+            "子 agent 发生上下文压缩",
+            ".tws/project-map.md",
+            ".tws/platform-skills.md",
+            "不得只凭压缩摘要执行",
+        ],
+        "README.md": [
+            "上下文压缩恢复",
+        ],
+        "AGENTS.md": [
+            "compacted-context resumptions",
+        ],
+        "CLAUDE.md": [
+            "compacted-context resumptions",
+        ],
+    }
+    for rel, phrases in checks.items():
+        text = read_text(rel)
+        for phrase in phrases:
+            if phrase not in text:
+                fail(f"{rel} missing context recovery phrase: {phrase}")
 
 
 def check_rule_clarity() -> None:
@@ -269,12 +419,27 @@ def check_frontend_ui_data() -> None:
     skill_dir = ROOT / "comp-frontend-ui-design"
     script = skill_dir / "scripts" / "search.py"
     core = skill_dir / "scripts" / "core.py"
+    design_system = skill_dir / "scripts" / "design_system.py"
     if not script.exists():
         fail("comp-frontend-ui-design/scripts/search.py missing")
         return
     if not core.exists():
         fail("comp-frontend-ui-design/scripts/core.py missing")
         return
+    if not design_system.exists():
+        fail("comp-frontend-ui-design/scripts/design_system.py missing")
+        return
+
+    design_system_text = design_system.read_text(encoding="utf-8-sig")
+    for phrase in [
+        '"ux": {"max_results": 3}',
+        "UI_GATE_CHECKLIST",
+        "loading/empty/error/normal states covered",
+        "forms have labels, error copy, and recovery path",
+        "charts/data views include labels, units, empty/error states",
+    ]:
+        if phrase not in design_system_text:
+            fail(f"comp-frontend-ui-design/scripts/design_system.py missing UI Gate phrase: {phrase}")
 
     spec = importlib.util.spec_from_file_location("frontend_ui_core", core)
     if spec is None or spec.loader is None:
@@ -320,9 +485,12 @@ def check_frontend_ui_data() -> None:
     for config in module.STACK_CONFIG.values():
         check_columns(config["file"], module._STACK_COLS["search_cols"] + module._STACK_COLS["output_cols"])
 
+    env = os.environ.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     result = subprocess.run(
         [sys.executable, "-B", str(script), "dashboard accessibility", "--domain", "ux", "-n", "1"],
         cwd=ROOT,
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -337,6 +505,10 @@ def main() -> int:
     check_stop_tags()
     check_index_paths()
     check_platform_docs()
+    check_platform_activation_fingerprint()
+    check_skill_reference_resolution()
+    check_flow_handoffs_and_closeout()
+    check_context_recovery_protocol()
     check_rule_clarity()
     check_context_budget_structure()
     check_entry_activation_chain()

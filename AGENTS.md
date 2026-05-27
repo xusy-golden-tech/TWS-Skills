@@ -16,6 +16,6 @@ For a target project to default to TWS in a new session, the target project need
 - Codex: add a TWS block to the target project `AGENTS.md`.
 - VSCode/editor plugins: put the same rule in the plugin workspace instruction or project prompt.
 
-That entry should tell new sessions to read `.tws/project-map.md` and `.tws/platform-skills.md`, route multi-step engineering work through `using-tws/SKILL.md`, run `tws-init/SKILL.md` when `.tws/project-map.md` is missing, and resume unfinished `.tws/sessions/` flows after user confirmation.
+That entry should tell new sessions or compacted-context resumptions to read `.tws/project-map.md` and `.tws/platform-skills.md`, route multi-step engineering work through `using-tws/SKILL.md`, run `tws-init/SKILL.md` when `.tws/project-map.md` is missing, compare `.tws/tws-version` with the current source `VERSION` / root / commit / fingerprint, and resume unfinished `.tws/sessions/` flows after user confirmation.
 
-Project entries should be TWS managed blocks delimited by `<!-- TWS:BEGIN managed by TWS Skills {version} -->` and `<!-- TWS:END -->`. When a target project overwrites or upgrades this repository, rerun `tws-init` so `.tws/tws-version`, `.tws/platform-skills.md`, and the target project's `AGENTS.md` / `CLAUDE.md` TWS block point at the new version and source root.
+Project entries should be TWS managed blocks delimited by `<!-- TWS:BEGIN managed by TWS Skills {version} -->` and `<!-- TWS:END -->`. When a target project overwrites or upgrades this repository, rerun `tws-init` so `.tws/tws-version`, `.tws/platform-skills.md`, and the target project's `AGENTS.md` / `CLAUDE.md` TWS block point at the new version, source root, realpath, commit, and fingerprint.

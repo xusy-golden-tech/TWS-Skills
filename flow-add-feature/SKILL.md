@@ -44,8 +44,7 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 
 > **说明：** ② Discuss 和 ③ Plan 是流程步骤而非独立组件。它们在 flow skill 中内联描述，agent 按文本指引直接执行，无需额外加载组件 skill。
 
-Plan 产出物：开发流程 + 需求列表 + 注意点 + 影响范围（调 `comp-impact-assessment`）。
-任务分解调 `comp-task-breakdown`。
+Plan 产出物：开发流程 + 需求列表 + 注意点 + 影响范围。影响评估和任务分解由 `comp-subagent-dispatch` 派出的子 agent 加载 `comp-impact-assessment` / `comp-task-breakdown` 完成；主 agent 只整合和验收。
 
 ### ⑤ 逐任务循环
 

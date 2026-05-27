@@ -226,7 +226,7 @@ TWS 模板补充：
 └── deferred-issues.md                    ← 延迟问题列表（审查中积累）
 ```
 
-同时生成或建议写入项目级持久入口，避免新会话只看到目标项目而看不到 TWS。完整模板以根目录 `PLATFORM-SUPPORT.md` 的“项目级持久入口”为准，本 skill 只规定写入责任和必填字段：
+同时必须写入或更新项目级持久入口，避免新会话只看到目标项目而看不到 TWS。只有平台没有项目级入口，或用户明确拒绝写入时，才改为输出可复制内容并声明无法默认主动生效。完整模板以根目录 `PLATFORM-SUPPORT.md` 的“项目级持久入口”为准，本 skill 只规定写入责任和必填字段：
 
 - Claude Code：项目根 `CLAUDE.md`
 - Codex：项目根 `AGENTS.md`
@@ -242,17 +242,22 @@ TWS 托管区块必须使用稳定边界：
 <!-- TWS:END -->
 ```
 
-TWS 区块必须包含：`TWS version`、`skill source root`、`using-tws/SKILL.md`、`tws-init/SKILL.md`、新会话读取 `.tws/project-map.md` 和 `.tws/platform-skills.md`、未完成 `.tws/sessions/` 的恢复规则、无原生 loader 的显式读取规则、用户可明确跳过 TWS。
+TWS 区块必须包含：`TWS version`、`skill source root`、`skill source VERSION`、`skill source root realpath`、`skill source commit`、`skill source fingerprint`、`using-tws/SKILL.md`、`tws-init/SKILL.md`、新会话读取 `.tws/project-map.md` 和 `.tws/platform-skills.md`、上下文压缩恢复协议、未完成 `.tws/sessions/` 的恢复规则、无原生 loader 的显式读取规则、用户可明确跳过 TWS。
 
 同时写入 `.tws/tws-version`：
 
 ```markdown
 version: {读取根目录 VERSION}
 skill_source_root: {TWS-Skills 仓库路径或安装路径}
+skill_source_root_realpath: {解析后的真实路径}
+skill_source_version: {读取 {skill_source_root}/VERSION}
+skill_source_commit: {git rev-parse --short HEAD；不可用则 unknown}
+skill_source_fingerprint: {skill_source_version + skill_source_commit；无 git 时用 VERSION + 目录内容 hash/时间戳}
 updated_at: {YYYY-MM-DD HH:MM}
 ```
 
 如果目标工程已经覆盖了新版 TWS Skills 仓库，`tws-init` 必须更新 `.tws/tws-version`、`.tws/platform-skills.md` 和项目级持久入口中的 TWS 托管区块，使 Claude Code / Codex 新会话读取的是新版入口，而不是旧的项目说明。
+刷新判断必须直接读取 `{skill source root}/VERSION`，不能只相信旧 `.tws/tws-version` 或旧托管区块。
 
 ### project-map.md 格式
 
@@ -287,7 +292,7 @@ updated_at: {YYYY-MM-DD HH:MM}
 □ 当前平台：Claude Code / Codex / VSCode / Other
 □ skill 源目录
 □ TWS version（读取根目录 VERSION）
-□ `.tws/tws-version` 的版本和 skill source root
+□ `.tws/tws-version` 的版本、skill source root、realpath、commit、fingerprint
 □ 所有映射路径基准
 □ Claude Code 原生可发现：是/否 + 实际路径
 □ Codex 原生可发现：是/否 + 实际路径
@@ -296,8 +301,12 @@ updated_at: {YYYY-MM-DD HH:MM}
 □ `/tws-init` → `tws-init/SKILL.md`
 □ `/using-tws` → `using-tws/SKILL.md`
 □ 新会话恢复规则
+□ 上下文压缩 / 摘要恢复 / 新窗口续跑恢复规则
 □ 无原生 skill loader / 无子 agent / 无隔离上下文的降级规则
 □ 完整 skill 映射表：枚举 `{skill 源目录}/*/SKILL.md`，不得用 `...` 代替
+□ 映射表列包含 `canonical_id`、`path`、`display_name`、`aliases`
+□ `canonical_id` 必须等于目录名；frontmatter `name` 只作展示/别名
+□ 至少覆盖 `using-tws`、`tws-init`、`flow-refactor`、`flow-fix-bug`、`comp-subagent-dispatch`、`comp-impact-assessment`、`comp-migration-plan`、`comp-implementation`、`comp-test`、`comp-design-sync`
 ```
 
 ### 规约的用途

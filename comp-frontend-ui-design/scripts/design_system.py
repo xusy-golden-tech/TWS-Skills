@@ -29,8 +29,24 @@ SEARCH_CONFIG = {
     "style": {"max_results": 3},
     "color": {"max_results": 2},
     "landing": {"max_results": 2},
-    "typography": {"max_results": 2}
+    "typography": {"max_results": 2},
+    "ux": {"max_results": 3}
 }
+
+UI_GATE_CHECKLIST = [
+    "[ ] Design system or page override generated/read",
+    "[ ] loading/empty/error/normal states covered",
+    "[ ] contrast: text 4.5:1; large/non-text UI 3:1",
+    "[ ] visible focus plus hover/pressed/disabled states",
+    "[ ] touch targets >=44x44px; no mobile horizontal scroll",
+    "[ ] icons share one vector set; no emoji as functional icons",
+    "[ ] color is not sole signal; status has text/icon",
+    "[ ] forms have labels, error copy, and recovery path",
+    "[ ] reduced motion respected; motion never blocks critical actions",
+    "[ ] fixed bars avoid safe areas and do not hide content",
+    "[ ] responsive checked at 375/768/1024/1440px",
+    "[ ] charts/data views include labels, units, empty/error states",
+]
 
 
 # ============ DESIGN SYSTEM GENERATOR ============
@@ -402,16 +418,7 @@ def format_ascii_box(design_system: dict) -> str:
 
     # Pre-Delivery Checklist section
     lines.append(section_header("PRE-DELIVERY CHECKLIST", BOX_WIDTH + 1))
-    checklist_items = [
-        "[ ] No emojis as icons (use SVG: Heroicons/Lucide)",
-        "[ ] cursor-pointer on all clickable elements",
-        "[ ] Hover states with smooth transitions (150-300ms)",
-        "[ ] Light mode: text contrast 4.5:1 minimum",
-        "[ ] Focus states visible for keyboard nav",
-        "[ ] prefers-reduced-motion respected",
-        "[ ] Responsive: 375px, 768px, 1024px, 1440px"
-    ]
-    for item in checklist_items:
+    for item in UI_GATE_CHECKLIST:
         lines.append(f"│     {item}".ljust(BOX_WIDTH) + "│")
 
     lines.append("└" + "─" * w + "┘")
@@ -868,16 +875,8 @@ def format_master_md(design_system: dict) -> str:
     lines.append("")
     lines.append("Before delivering any UI code, verify:")
     lines.append("")
-    lines.append("- [ ] No emojis used as icons (use SVG instead)")
-    lines.append("- [ ] All icons from consistent icon set (Heroicons/Lucide)")
-    lines.append("- [ ] `cursor-pointer` on all clickable elements")
-    lines.append("- [ ] Hover states with smooth transitions (150-300ms)")
-    lines.append("- [ ] Light mode: text contrast 4.5:1 minimum")
-    lines.append("- [ ] Focus states visible for keyboard navigation")
-    lines.append("- [ ] `prefers-reduced-motion` respected")
-    lines.append("- [ ] Responsive: 375px, 768px, 1024px, 1440px")
-    lines.append("- [ ] No content hidden behind fixed navbars")
-    lines.append("- [ ] No horizontal scroll on mobile")
+    for item in UI_GATE_CHECKLIST:
+        lines.append(f"- {item}")
     lines.append("")
     
     return "\n".join(lines)

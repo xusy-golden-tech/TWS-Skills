@@ -62,6 +62,10 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 4. 在 `.tws/sessions/{当前流程文件}` 中标记「待补完整 design-sync」
 ```
 
+## Closeout
+
+删除 session 前，若存在「待补完整 design-sync」或其他待补事项，必须先转写到 `.tws/deferred-issues.md`，或取得用户确认的处理方式。
+
 ## 完成依据
 
 标准完成依据见根目录 `checkpoint-reference.md`。

@@ -26,6 +26,8 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 任一不满足 → 完整路径
 ```
 
+如果仅凭用户描述无法确认“只改一行/一个表达式”且“不改模块结构、不改接口”同时成立，默认走完整路径；只在确认成本很低时问一个澄清问题。
+
 ### 简化路径（小修复）
 
 ```

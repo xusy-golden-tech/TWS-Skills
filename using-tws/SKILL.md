@@ -38,9 +38,10 @@ If you were dispatched as a subagent with a specific task, skip this skill.
 1. 读取 `.tws/project-map.md`
    - 不存在 → 先运行 `tws-init/SKILL.md` 或 `/tws-init`
    - 存在 → 读取技术栈、规约索引、路径映射
-2. 读取 `.tws/platform-skills.md`（存在时）
+2. 读取 `.tws/tws-version` 和 `{skill source root}/VERSION`，再读取 `.tws/platform-skills.md`（存在时）
    - 无原生 Skill loader 时，用它把 `Skill(skill: "x")` 映射到 `{skill 源目录}/x/SKILL.md`
-   - 若其中的 TWS 版本或 skill source root 与当前仓库不一致，先提醒用户运行 `tws-init` 更新入口映射
+   - 若 version、skill source root、realpath、commit 或 fingerprint 任一与当前仓库或项目托管区块不一致，先询问并运行 `/tws-init`，或显式读取当前 `tws-init/SKILL.md` 刷新入口映射
+   - 用户拒绝刷新时，继续前必须说明当前 TWS 入口可能是旧版，不得声称新版 TWS 已完整生效
 3. 按场景加载对应 `flow-*/SKILL.md`
    - 入口只输出计划，不能替代 flow skill
 4. 用户确认计划后，加载 `comp-subagent-dispatch/SKILL.md`
@@ -49,6 +50,21 @@ If you were dispatched as a subagent with a specific task, skip this skill.
 ```
 
 如果无法完成上述链路，必须明确报告缺失文件或不可用工具，不得假装 TWS 已完整生效。
+
+## 上下文压缩恢复协议
+
+发生上下文压缩、摘要恢复、新窗口续跑，或当前 agent 无法确认已加载完整 TWS 规则时，不得只凭摘要继续执行。必须先恢复规则链：
+
+```
+1. 重新读取 `.tws/tws-version`，并与 `{skill source root}/VERSION`、项目 TWS 托管区块比对
+2. 重新读取 `.tws/project-map.md` 和 `.tws/platform-skills.md`
+3. 若 `.tws/sessions/` 有 active session，读取当前 session 和根目录 `checkpoint-reference.md`
+4. 重新加载 session 记录的 `flow-*/SKILL.md`；没有 session 时按用户当前请求重新路由
+5. 若计划已确认或正在执行步骤，重新加载 `comp-subagent-dispatch/SKILL.md`
+6. 当前步骤需要哪个 `comp-*` / `found-*` / `team-*` skill，就按 `.tws/platform-skills.md` 重新加载哪个
+```
+
+如果任一恢复文件缺失、版本不一致、source root 不存在，先运行或显式读取当前 `tws-init/SKILL.md` 刷新；用户拒绝时必须说明 TWS 可能未完整生效。
 
 ## 第零步：强制模式检测 ⚠️ 不可跳过
 

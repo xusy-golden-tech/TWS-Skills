@@ -101,11 +101,11 @@ Unix 示例：
 2. 安装到 `.claude/skills/` 或 `.agents/skills/`：skill 可被平台发现，但是否自动触发取决于平台选择逻辑。
 3. 同时在目标项目根写入持久入口：新会话才能稳定默认进入 TWS。
 
-Claude Code 使用目标项目 `CLAUDE.md`，Codex 使用目标项目 `AGENTS.md`。两者都应说明：开发、修复、重构、排查、文档类多步骤工程任务默认先走 `using-tws/SKILL.md`；如果 `.tws/project-map.md` 不存在先走 `tws-init/SKILL.md`；新会话先读取 `.tws/project-map.md` 和 `.tws/platform-skills.md`；若 `.tws/sessions/` 有未完成流程，先询问是否续上。VSCode 或其他编辑器插件需要把同等说明放进插件配置、workspace instruction 或项目 prompt。
+Claude Code 使用目标项目 `CLAUDE.md`，Codex 使用目标项目 `AGENTS.md`。两者都应说明：开发、修复、重构、排查、文档类多步骤工程任务默认先走 `using-tws/SKILL.md`；如果 `.tws/project-map.md` 不存在先走 `tws-init/SKILL.md`；新会话或上下文压缩恢复时先读取 `.tws/tws-version`、`.tws/project-map.md` 和 `.tws/platform-skills.md`；若 `.tws/tws-version` 与当前 source `VERSION` / root / realpath / commit / fingerprint 不一致，先刷新入口；若 `.tws/sessions/` 有未完成流程，先询问是否续上。VSCode 或其他编辑器插件需要把同等说明放进插件配置、workspace instruction 或项目 prompt。
 
 首次无原生 loader 时，还没有 `.tws/platform-skills.md`。这时必须从已知的 `skill source root` 直接读取 `tws-init/SKILL.md` 完成初始化；之后再依赖 `.tws/platform-skills.md` 做 skill 映射。
 
-项目级入口使用 `<!-- TWS:BEGIN managed by TWS Skills {version} -->` / `<!-- TWS:END -->` 托管区块。升级或覆盖 TWS 后，应替换该区块而不是追加第二份。
+项目级入口使用 `<!-- TWS:BEGIN managed by TWS Skills {version} -->` / `<!-- TWS:END -->` 托管区块。升级或覆盖 TWS 后，应替换该区块而不是追加第二份，并同步 `.tws/tws-version` 中的 source root、realpath、commit 和 fingerprint。
 
 ## Codex 或其他平台使用
 

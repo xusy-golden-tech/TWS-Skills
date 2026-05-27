@@ -61,11 +61,13 @@ investigate 的排查报告应保存为 `.tws/investigate-report.md`，作为本
 转 fix-bug 时：
 
 ```
-1. 主 agent 读取 .tws/investigate-report.md
-2. 从步骤③修复方案开始，将报告内容作为 fix-bug 的输入
+0. 加载 `flow-fix-bug/SKILL.md`，按完整/简化门禁重新确认路径
+1. 主 agent 读取 `.tws/investigate-report.md`
+2. 从步骤③修复方案开始，将报告内容作为 fix-bug 的输入；这不代表跳过 ③.5 之后的质量步骤
 3. 子 agent 收到压缩后的排查结论（不读原始对话历史）
-4. 更新 `.tws/sessions/{当前流程文件}`：流程名改为 fix-bug，步骤从③开始
-5. 修复完成后清理 investigate-report.md
+4. 将报告的现象、复现、排查路径、根因、建议方案复制到 session 的「阶段交接」
+5. 更新 `.tws/sessions/{当前流程文件}`：流程名改为 fix-bug，步骤从③开始
+6. 修复完成且 fix-bug session / design-sync 已吸收报告内容后，清理 `investigate-report.md`
 ```
 
 ## 完成依据

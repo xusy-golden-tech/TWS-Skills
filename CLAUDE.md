@@ -34,7 +34,7 @@ Flow, entry, team orchestration, and selected component governance skills carry 
 ## Key Conventions
 
 ### Platform Equivalence
-TWS uses one canonical skill source across Claude Code, Codex, VSCode, and compatible clients: each skill directory's `SKILL.md`. Platform-specific differences belong in `PLATFORM-SUPPORT.md` and generated `.tws/platform-skills.md`, not in forked copies of skills.
+TWS uses one canonical skill source across Claude Code, Codex, VSCode, and compatible clients: each skill directory's `SKILL.md`. The callable skill id is the directory name; frontmatter `name` is a display alias. Platform-specific differences belong in `PLATFORM-SUPPORT.md` and generated `.tws/platform-skills.md`, not in forked copies of skills.
 
 ### Session State
 Active workflows are tracked in `.tws/sessions/{flow-type}-{short-desc}.md`. Each session file has a version number (incremented on every edit) and step-by-step progress. Multiple sessions can run in parallel.
@@ -65,7 +65,7 @@ See `SKILL-INDEX.md` for runtime lookup tables. The Mermaid dependency graph liv
 
 ## Target Project Entry Refresh
 
-Target projects should keep TWS instructions in managed blocks delimited by `<!-- TWS:BEGIN managed by TWS Skills {version} -->` and `<!-- TWS:END -->`. When a project overwrites or upgrades TWS Skills, rerun `tws-init` so `.tws/tws-version`, `.tws/platform-skills.md`, and the target `CLAUDE.md` / `AGENTS.md` managed block point at the new version and source root.
+Target projects should keep TWS instructions in managed blocks delimited by `<!-- TWS:BEGIN managed by TWS Skills {version} -->` and `<!-- TWS:END -->`. New sessions and compacted-context resumptions should reload `.tws/tws-version`, `.tws/project-map.md`, `.tws/platform-skills.md`, the active session, and the relevant flow before continuing. When a project overwrites or upgrades TWS Skills, rerun `tws-init` so `.tws/tws-version`, `.tws/platform-skills.md`, and the target `CLAUDE.md` / `AGENTS.md` managed block point at the new version, source root, realpath, commit, and fingerprint.
 
 ## File Structure Pattern
 
