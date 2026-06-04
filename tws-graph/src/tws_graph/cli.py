@@ -16,6 +16,7 @@ from typing import Optional
 
 import typer
 
+from . import __version__
 from .db.connection import DatabaseConnection
 from .db.queries import QueryBuilder
 from .indexer.orchestrator import ExtractionOrchestrator
@@ -30,6 +31,19 @@ app = typer.Typer(
     help="TWS Code Graph — 预建代码符号关系图，agent 查图而非搜索",
     no_args_is_help=True,
 )
+
+
+@app.callback()
+def _version_callback(
+    version: bool = typer.Option(
+        False, "--version", "-V",
+        help="Show version and exit",
+        is_eager=True,
+    ),
+):
+    if version:
+        print(f"tws-graph {__version__}")
+        raise typer.Exit()
 
 # Default paths
 DEFAULT_DB = ".tws/codegraph/index.db"
@@ -738,7 +752,8 @@ def unresolved(
 ):
     """列出所有未解析的引用。
 
-    适用于识别外部库依赖和跨文件调用。
+    大部分未解析引用是外部 SDK/库的符号（如 Android SDK、JDK、第三方库），
+    这些符号不在项目源码里，无法解析是正常的。关注项目内部未能解析的引用即可。
     """
     db = _get_db(db_path) if os.path.exists(db_path or DEFAULT_DB) else None
     if not db:
@@ -755,7 +770,28 @@ def unresolved(
     if json_output:
         typer.echo(json.dumps(_serialize(refs), ensure_ascii=False, indent=2))
     else:
+        # Classify: external (SDK/lib) vs internal (project-level)
+        ext_prefixes = (
+            "java.", "javax.", "android.", "androidx.", "kotlin.", "kotlinx.",
+            "org.junit", "org.jetbrains", "com.google.", "io.reactivex",
+            "org.slf4j", "ch.qos.logback", "com.fasterxml", "org.apache.",
+        )
+        ext_count = 0
+        int_count = 0
+        for r in refs:
+            ref_name = r.get("reference_name", "")
+            if ref_name.startswith(ext_prefixes):
+                ext_count += 1
+            else:
+                int_count += 1
+
         typer.echo(f"\n{len(refs)} 条未解析的引用:")
+        typer.echo(f"  外部 SDK/库: {ext_count} 条（正常，这些符号不在项目源码里）")
+        if int_count > 0:
+            typer.echo(f"  内部引用:   {int_count} 条（需要关注，项目内符号未能解析）")
+        else:
+            typer.echo(f"  内部引用:   0 条")
+
         # Group by file
         from collections import defaultdict
         by_file = defaultdict(list)
