@@ -2,7 +2,24 @@
 
 ## 前置条件
 
+### ① 配置 TWS Skills
+
 在 Claude Code 的 settings.json 中，把 TWS-Skills 仓库的路径配为 skill 搜索目录。
+
+### ② 安装 tws-graph（代码图引擎）
+
+tws-graph 是独立的 Python CLI 包，提供代码符号关系图查询能力。TWS 的影响分析、设计书同步、根因分析三个环节依赖它。
+
+```
+pip install -e /path/to/tws-graph
+```
+
+> **为什么需要单独安装？** tws-graph 不是 Claude Code skill，不放在 `.claude/skills/` 里。它依赖 tree-sitter 原生 C 扩展来解析源码，通过 `pip install` 安装编译好的二进制包。TWS 技能通过 bash 命令调用它。
+
+验证安装：
+```
+tws-graph --help
+```
 
 ## 第一步：初始化（每个项目做一次）
 
@@ -12,9 +29,11 @@
 /tws-init
 ```
 
-TWS 会扫描项目，推断技术栈和代码规约，在项目下生成 `.tws/` 目录。以后所有流程都依赖这个目录。
+TWS 会扫描项目，推断技术栈和代码规约，在项目下生成 `.tws/` 目录，并自动完成代码图初始化（索引所有源文件 + 创建基线快照），无需手动操作。
 
-如果跳过这步，后续流程会提醒你先初始化。
+目前已支持的语言：Python、TypeScript、Kotlin、Java、Go、Rust。
+
+> 后续代码变更时用 `tws-graph sync` 增量更新（stat 预筛选，秒级完成），无需每次全量重建。如果跳过这步，TWS 技能在需要查图时会自动补上索引。
 
 ## 第二步：日常使用
 
@@ -56,7 +75,10 @@ TWS 判断完场景后会输出一个执行计划，问你"要开始吗？"。�
 ├── design-conventions.md    ← 设计书格式规约
 ├── env-conventions.md       ← 环境规约
 ├── architecture-decisions.md ← 架构决策（使用中积累）
-└── sessions/                ← 运行中的流程状态（完成后自动清理）
+├── sessions/                ← 运行中的流程状态（完成后自动清理）
+└── codegraph/
+    ├── index.db             ← 代码符号关系图（SQLite）
+    └── index-*.db           ← 快照文件（before/after/initial）
 ```
 
 这个目录建议加到 `.gitignore`，不需要提交到仓库。
@@ -77,6 +99,21 @@ TWS 有 Solo 和 Team 两种模式。每次 `/using-tws` 时会自动检测，�
 2. 也可以手动创建 `CONTRACTS.md`，只要文件存在，TWS 就会进入团队模式
 
 团队模式会额外启用：分支管理规范、接口变更通知、跨模块影响上报等协作流程。
+
+## tws-graph 常用命令
+
+```
+tws-graph sync              ← 增量同步（日常使用）
+tws-graph index             ← 全量重建索引
+tws-graph impact <节点>     ← 查变更影响范围
+tws-graph calls <节点>      ← 查调用关系
+tws-graph trace <A> <B>     ← 查 A 到 B 的路径
+tws-graph search <关键词>   ← FTS5 全文搜索符号
+tws-graph lint              ← 校验 skill 文件完整性
+tws-graph hooks install     ← 安装 git hooks 自动同步
+tws-graph diff              ← 对比快照
+tws-graph snapshot <名称>   ← 创建快照
+```
 
 ## 几个要点
 

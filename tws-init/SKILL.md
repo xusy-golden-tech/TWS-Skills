@@ -191,7 +191,18 @@ TWS 模板补充：
 
 ---
 
-## ⑤ 保存
+## ⑤ 初始化代码图
+
+规约保存后，初始化项目的代码关系图：
+
+```
+调用 Skill(skill: "tws-graph-init")
+
+→ 安装 tws-graph CLI + 构建符号关系图 + 创建基线快照
+→ 后续 impact-assessment / design-sync / root-cause-analysis 直接从图查询
+```
+
+## ⑥ 保存
 
 ```
 .tws/

@@ -3,10 +3,6 @@ name: comp-subagent-dispatch
 description: 子 agent 调度规则（Solo 和 Team 模式通用）。主 agent 不写代码，所有编码/测试/同步由子 agent 执行。这是 TWS 的核心机制，不是团队模式专属
 ---
 
-<SUBAGENT-STOP>
-This rule applies to agents that are considering splitting work into sub-agents. If you are already a sub-agent, do not recursively spawn further sub-agents without explicit approval.
-</SUBAGENT-STOP>
-
 # 子 Agent 调度规则
 
 ## 核心原则
@@ -14,6 +10,8 @@ This rule applies to agents that are considering splitting work into sub-agents.
 **主 agent = 项目经理，子 agent = 执行者。**
 
 主 agent 不写代码。子 agent 只执行不决策。
+
+> **递归限制**: 子 agent 不应再派子 agent。如果你是被派来执行具体任务的子 agent，你的职责是执行，不是拆分。如需进一步拆分，汇报给主 agent，由主 agent 决定。
 
 ```
 主 agent（项目经理）：

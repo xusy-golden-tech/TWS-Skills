@@ -22,6 +22,16 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 2. 输出一句话项目定位 → 确认
 ```
 
+## ①.5 初始化代码图
+
+在架构设计开始前，初始化项目的代码关系图。后续所有技能（impact-assessment、design-sync、root-cause-analysis）
+都可以从图中查询，不必再 grep + read 手工遍历。
+
+调用 `Skill(skill: "tws-graph-init")` 执行完整的代码图初始化流程：
+安装 tws-graph → 构建项目符号关系图 → 创建基线快照。
+
+如果 tws-graph-init 执行失败，后续技能将自动降级到手工 grep/read。
+
 ## ② 架构设计
 
 ```

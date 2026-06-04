@@ -3,6 +3,10 @@ name: team-branch-flow
 description: 分支规范。所有模式强制从 develop 创建新分支，禁止直接在 develop/master 上开发
 ---
 
+<SUBAGENT-STOP>
+If you were dispatched as a subagent with a specific task, skip this skill.
+</SUBAGENT-STOP>
+
 # 分支规范
 
 ## 核心原则

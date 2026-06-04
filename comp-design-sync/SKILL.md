@@ -11,18 +11,64 @@ description: 设计书同步。每次改完代码后必须调用，确保设计�
 
 设计书同步不是编码完成后的可选项，不是「有空再做」的杂务，而是「完成任务」的必要条件。一份过时的设计书比没有设计书更危险——它会误导下一个人。
 
+## Step 0: 图快照对比（自动差异检测）
+
+在进入 Gate Function 之前，用代码图自动检测改了什么——diff 直接告诉你哪些符号变了，不用 agent 逐行去比对。
+
+**前置检查：**
+
+```
+0.0 tws-graph --version 2>&1
+    → 成功 → 继续 0.1
+    → 失败（"command not found" 等）→ Bash: pip install -e tws-graph/ 2>&1
+    → 安装成功 → 继续 0.1
+    → 安装失败（找不到 tws-graph/ 目录或 pip 报错）→ 「tws-graph 不可用，退回到手动比对模式」
+
+0.1 tws-graph index              ← 改后重新索引（生成最新 DB）
+
+**前置条件：** 改代码之前，impact-assessment 流程中应该已经保存了改前快照（`tws-graph snapshot before`）。如果没有 → 回退到手动比对模式。
+
+```
+0.2 tws-graph diff before after
+    输出直接告诉你：
+    ├─ 新增符号（qualified_name + 文件:行号 + 可见性 + 签名）
+    ├─ 删除符号
+    ├─ 签名变更（旧签名 → 新签名）
+    ├─ 新增调用关系
+    └─ 断开的调用关系
+
+0.3 如果 diff 输出 "(no differences)" → 跳到步骤 5（标记完成）
+```
+
+**hotfix / 紧急场景：**
+
+```
+使用 tws-graph diff before after --brief
+→ 仅输出 "changed" 或 "unchanged"
+→ 如果是 "changed"，仍然需要完整同步，但可延后
+→ 在设计书「变更履历」追加一行 + session-state.md 标记「待补完整 design-sync」
+```
+
+→ 以上 diff 输出是「**事实层**」——告诉你改了什么
+→ 以下 Gate Function 是「**判断层**」——判断需要同步哪个设计书
+
 ## The Gate Function
 
 ```
 AFTER code changes are complete, BEFORE marking task done:
 
-1. LIST all files you modified (code, config, tests)
-2. MATCH each modified file to its design doc
-3. COMPARE: does the design doc still match the code?
+1. LIST all files you modified (from diff output: affected_files)
+2. MATCH each affected file + changed symbol to its design doc
+   - diff 签名变更 → 对应设计书「接口定义」需更新
+   - diff 新增符号 → 是否需要创建新的设计书
+   - diff 删除符号 → 是否需要在设计书中标记 deprecated
+   - diff 调用关系变化 → 是否影响其他模块的设计书
+3. SYNC: 根据 diff 结果逐项同步设计书
    - Mismatch → UPDATE design doc to match code
    - Missing → CREATE design doc
    - Deprecated → MARK as deprecated
 4. VERIFY: re-read updated design doc — does it accurately describe the code?
+   - 可选：再次运行 tws-graph diff 确认无差异
 5. ONLY THEN: mark task as complete
 ```
 
@@ -141,6 +187,8 @@ AFTER code changes are complete, BEFORE marking task done:
 | 「下次改的时候一起同步」 | 下次不记得。现在就做 |
 | 「设计书跟代码差不多，不用改」 | 差不多 = 不一样。精准同步 |
 | 「这个模块没有设计书」 | 那就建一个，哪怕只有一段话 |
+| 「diff 返回 changed 但改动太小了」 | diff 说 changed 就是 changed。即使一行也记变更履历 |
+| 「diff 跑不了，没快照」 | 那就手动比对。下次记得在 impact-assessment 时拍快照 |
 
 ## 为什么重要
 

@@ -146,6 +146,13 @@ Mode 确定后写入后续所有输出。输出计划时必须带 `👥 模式�
 → 不存在 → 「项目规约尚未初始化。是否先运行 `init/SKILL.md` 初始化？」
   → 用户选「是」→ 调用 init
   → 用户选「跳过」→ 继续，但后续 skill 可能提醒
+
+检查 tws-graph 可用性：
+  Bash: tws-graph --version 2>&1
+  → 成功 → 后续 impact-assessment / design-sync / root-cause-analysis 可查图
+  → 失败 → 检查 tws-graph/ 目录是否存在
+    → 存在 → Bash: pip install -e tws-graph/ 2>&1，安装成功则继续
+    → 不存在 → 「tws-graph 未安装，后续影响分析/设计同步/根因分析将回退到 grep 模式」
 ```
 
 ### 2a-补充：MCP 工具审计

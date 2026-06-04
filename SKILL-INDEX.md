@@ -15,6 +15,13 @@ graph TD
     A --> G[documentation]
     A --> H[investigate]
 
+    subgraph Init[tws-init]
+        I1[规约推断] --> GI[tws-graph-init]
+        GI --> TWG[tws-graph]
+    end
+
+    E --> GI
+
     B --> I[design-doc]
     B --> J[impact-assessment]
     B --> K[task-breakdown]
@@ -72,6 +79,7 @@ graph TD
 |-------|------|------|
 | using-tws | `using-tws/SKILL.md` | 场景判断 + 路由 + 全局纠错 |
 | tws-init | `tws-init/SKILL.md` | 项目初始化，规约推断 |
+| tws-graph-init | `tws-graph-init/SKILL.md` | 代码图初始化。安装 tws-graph、全量索引、创建基线快照 |
 
 ---
 
@@ -155,3 +163,13 @@ graph TD
 | team-environment-gov | `team-environment-gov/SKILL.md` | 所有模式生效 |
 | team-impact-report | `team-impact-report/SKILL.md` | 所有模式生效 |
 | team-subagent-dispatch | `team-subagent-dispatch/SKILL.md` | 所有模式生效 |
+
+---
+
+## 外部工具
+
+| 工具 | 用途 | 相关技能 |
+|------|------|---------|
+| [tws-graph](https://pypi.org/project/tws-graph/) | 代码符号关系图引擎。预建 tree-sitter 索引 → agent 查图而非 grep。命令: index / calls / impact / trace / snapshot / diff | impact-assessment, design-sync, root-cause-analysis, flow-new-project |
+
+tws-graph 的索引数据库位于 `.tws/codegraph/index.db`，建议加入 `.gitignore`。
