@@ -15,45 +15,21 @@ description: 动手前评估改动的影响范围——事前检查。涉及哪�
 
 在进入 Gate Function 之前，先通过代码图获取客观调用关系——图告诉你「被谁调了、影响半径多大」，这些是事实，不需要 agent 推理。
 
-**前置检查：**
+**必须操作：** 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），按其中指引完成前置检查和以下查询：
 
 ```
-0.0 tws-graph --version 2>&1
-    → 成功 → 继续 0.1
-    → 失败（"command not found" 等）→ Bash: pip install -e tws-graph/ 2>&1
-    → 安装成功 → 继续 0.1
-    → 安装失败（找不到 tws-graph/ 目录或 pip 报错）→ 「tws-graph 不可用，本次退回到手动 grep/read」
+1. tws-graph impact <要改的符号> --depth 2
+   → 按模块分组的调用者列表，每个调用者的文件:行号、可见性
+   → 涉及路由节点时标注 API 端点
 
-0.1 tws-graph index
-    → 确保索引是根据最新代码构建的
-    → 如果解析有警告：继续，但标注「索引可能不完整」
+2. tws-graph calls <要改的符号> --inbound
+   → 直接调用者列表（精确到文件:行号）
+
+3. tws-graph snapshot before
+   → 保存改前快照（design-sync 需要 diff 到此快照）
 ```
 
-**客观事实查询：**
-
-```
-0.2 tws-graph impact <要改的符号> --depth 2
-    → 输出：按模块分组的调用者列表，每个调用者的文件:行号、可见性
-    → 如果涉及路由节点 → 标注 API 端点
-
-0.3 tws-graph calls <要改的符号> --inbound
-    → 输出：直接调用者列表（精确到文件:行号）
-
-0.4 tws-graph snapshot before
-    → 保存改前快照（design-sync 改后会 diff 到这个快照）
-```
-
-**错误处理：**
-
-```
-如果 tws-graph impact/calls 返回空：
-    → 可能是动态调度/闭包/回调 → 标注 provenance=heuristic
-    → agent 退回到手动 grep 补充
-
-如果符号未找到（tws-graph 返回 "未找到符号"）：
-    → 回退到 grep 确认符号名是否正确
-    → 可能是局部变量、lambda、动态生成 → 标注并跳过
-```
+错误处理详见 `found-tws-graph-usage`。空结果/符号未找到时的回退策略照旧（标注 provenance=heuristic，退回到 grep）。
 
 → 以上 Step 0 是「**客观事实层**」——图告诉你的，不需要推理
 → 以下 Gate Function 是「**主观判断层**」——agent 基于图输出做推理

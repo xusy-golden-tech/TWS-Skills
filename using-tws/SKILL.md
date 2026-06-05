@@ -97,11 +97,9 @@ If you were dispatched as a subagent with a specific task, skip this skill.
   → 用户选「跳过」→ 继续，但后续 skill 可能提醒
 
 检查 tws-graph 可用性：
-  Bash: tws-graph --version 2>&1
-  → 成功 → 后续 impact-assessment / design-sync / root-cause-analysis 可查图
-  → 失败 → 检查 tws-graph/ 目录是否存在
-    → 存在 → Bash: pip install -e tws-graph/ 2>&1，安装成功则继续
-    → 不存在 → 「tws-graph 未安装，后续影响分析/设计同步/根因分析将回退到 grep 模式」
+  通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），
+  按其中「前置检查」指引确认 tws-graph 已安装且索引已构建。
+  → 不可用时按 found-tws-graph-usage 中的降级策略处理。
 ```
 
 ### 2a-补充：MCP 工具审计
@@ -199,6 +197,10 @@ Skill(skill: "flow-documentation")
 ```
 
 4. 进入 flow skill 执行阶段——flow skill 已在第二步加载，门禁已通过，直接执行
+4.5. 派子 agent 时，如果任务涉及代码图查询（影响评估 / 设计同步 / 根因分析），
+     在 dispatch prompt 中明确要求子 agent 加载 found-tws-graph-usage：
+     「通过 Skill 工具加载 comp-impact-assessment 和 found-tws-graph-usage」
+
 5. 计划中的步骤是承诺，flow skill 中的流程是约束，两者共同保证执行质量
 
 ## 全局纠错——方向偏离时怎么办

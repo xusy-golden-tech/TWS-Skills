@@ -13,39 +13,23 @@ description: 定位 Bug 根因。追踪调用链，分析日志和数据，找�
 
 在手动追踪之前，先用代码图获取调用链——一条命令得到从入口到报错点的完整路径，每步标注文件:行号。
 
-**前置检查：**
+**必须操作：** 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），按其中指引完成前置检查和以下查询：
 
 ```
-0.0 tws-graph --version 2>&1
-    → 成功 → 继续 0.1
-    → 失败（"command not found" 等）→ Bash: pip install -e tws-graph/ 2>&1
-    → 安装成功 → 继续 0.1
-    → 安装失败（找不到 tws-graph/ 目录或 pip 报错）→ 「tws-graph 不可用，退回到手动 grep/read 追踪」
+1. tws-graph index              ← 确保索引是最新的
+
+2. 如果知道入口和报错点：
+   tws-graph trace <入口> <报错点>
+   → 完整调用链，每一步标注文件:行号
+   → 沿 trace 输出逐层读代码定位根因
+
+3. 如果只知道报错点不知道入口：
+   tws-graph calls <报错点> --inbound --depth 3
+   → 找到所有上游调用者，识别可能的入口
+   → 对每个可能的入口执行 tws-graph trace <入口> <报错点>
 ```
 
-```
-0.1 tws-graph index              ← 确保索引是最新的
-
-0.2 如果知道入口和报错点：
-    tws-graph trace <入口> <报错点>
-    → 完整调用链，每一步标注文件:行号
-    → 直接跳到下面步骤 1，沿 trace 输出逐层读代码
-
-0.3 如果只知道报错点不知道入口：
-    tws-graph calls <报错点> --inbound --depth 3
-    → 找到所有上游调用者，识别可能的入口
-    → 然后对每个可能的入口执行 tws-graph trace <入口> <报错点>
-```
-
-**静态分析边界：**
-
-```
-如果 tws-graph trace 返回 "未找到路径"：
-    → 可能是动态调度、闭包、回调、反射
-    → 标注 provenance=heuristic
-    → agent 退回到手动 grep + read 追踪
-    → 这不计入 3 次迭代上限（这是工具能力边界，不是 agent 能力问题）
-```
+错误处理详见 `found-tws-graph-usage`。trace 返回空时标注 provenance=heuristic，退回到手动 grep + read 追踪（不计入 3 次迭代上限）。
 
 ## The Gate Function
 

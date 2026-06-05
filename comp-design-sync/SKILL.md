@@ -15,39 +15,19 @@ description: 设计书同步。每次改完代码后必须调用，确保设计�
 
 在进入 Gate Function 之前，用代码图自动检测改了什么——diff 直接告诉你哪些符号变了，不用 agent 逐行去比对。
 
-**前置检查：**
+**必须操作：** 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），按其中指引完成前置检查和以下查询：
 
 ```
-0.0 tws-graph --version 2>&1
-    → 成功 → 继续 0.1
-    → 失败（"command not found" 等）→ Bash: pip install -e tws-graph/ 2>&1
-    → 安装成功 → 继续 0.1
-    → 安装失败（找不到 tws-graph/ 目录或 pip 报错）→ 「tws-graph 不可用，退回到手动比对模式」
-
-0.1 tws-graph index              ← 改后重新索引（生成最新 DB）
+1. tws-graph index              ← 改后重新索引（生成最新 DB）
+2. tws-graph diff before after
+   → 输出：新增符号 / 删除符号 / 签名变更 / 新增调用关系 / 断开的调用关系
+```
 
 **前置条件：** 改代码之前，impact-assessment 流程中应该已经保存了改前快照（`tws-graph snapshot before`）。如果没有 → 回退到手动比对模式。
 
-```
-0.2 tws-graph diff before after
-    输出直接告诉你：
-    ├─ 新增符号（qualified_name + 文件:行号 + 可见性 + 签名）
-    ├─ 删除符号
-    ├─ 签名变更（旧签名 → 新签名）
-    ├─ 新增调用关系
-    └─ 断开的调用关系
+**hotfix / 紧急场景：** 使用 `tws-graph diff before after --brief`，仅输出 changed/unchanged。changed 时仍需完整同步，但可延后（在设计书「变更履历」追加一行 + session-state.md 标记「待补完整 design-sync」）。
 
-0.3 如果 diff 输出 "(no differences)" → 跳到步骤 5（标记完成）
-```
-
-**hotfix / 紧急场景：**
-
-```
-使用 tws-graph diff before after --brief
-→ 仅输出 "changed" 或 "unchanged"
-→ 如果是 "changed"，仍然需要完整同步，但可延后
-→ 在设计书「变更履历」追加一行 + session-state.md 标记「待补完整 design-sync」
-```
+命令语法和错误处理详见 `found-tws-graph-usage`。
 
 → 以上 diff 输出是「**事实层**」——告诉你改了什么
 → 以下 Gate Function 是「**判断层**」——判断需要同步哪个设计书

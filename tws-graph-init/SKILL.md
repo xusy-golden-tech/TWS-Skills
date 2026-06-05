@@ -84,6 +84,11 @@ Bash: tws-graph snapshot initial 2>&1
 | tws-graph index 全部失败 | 标注失败，退回 grep |
 | tws-graph snapshot 失败 | 不阻塞，下次 design-sync 用最新 DB 比 |
 
+## 后续使用
+
+代码图初始化完成后，日常查询请参考 `found-tws-graph-usage` skill。
+任何需要查图的子 agent 应通过 Skill 工具加载它，获取准确的命令语法。
+
 ## 常规维护
 
 项目代码有大量变更后，重新索引：

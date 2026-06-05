@@ -32,6 +32,8 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 
 如果 tws-graph-init 执行失败，后续技能将自动降级到手工 grep/read。
 
+代码图就绪后，后续影响分析/设计同步/根因分析将通过 `found-tws-graph-usage` skill 查询。
+
 ## ② 架构设计
 
 ```
