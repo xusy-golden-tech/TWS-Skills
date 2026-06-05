@@ -25,7 +25,7 @@ Entry (using-tws) → Flows (flow-*) → Components (comp-*) → Foundation (fou
 - **Foundation**: Global rules (7 skills: core-principles, artifact-split, review-methodology, review-triage, branch-flow, environment-gov, impact-report)
 - **Init**: `tws-init` (project bootstrapping) and `tws-graph-init` (code graph setup)
 
-Full dependency graph is in `SKILL-INDEX.md`.
+Full dependency graph can be queried via `tws-graph search kind:skill`.
 
 ## Agent Hierarchy
 
@@ -38,7 +38,7 @@ Full dependency graph is in `SKILL-INDEX.md`.
 - `<SUBAGENT-STOP>` tags are **required** on entry/flow skills, **forbidden** on component/foundation skills
 - Every SKILL.md must have YAML frontmatter with `name` and `description`
 - Include a "Rationalization Prevention" table at the end of each skill
-- Update `SKILL-INDEX.md` when adding, removing, or renaming skills
+- Run `tws-graph lint` after adding, removing, or renaming skills to verify structural rules
 - Skills are written in Chinese — keep them in Chinese when editing
 - Skill directory name must match its layer prefix: `using-` / `flow-` / `comp-` / `found-`
 

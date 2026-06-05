@@ -4,7 +4,6 @@ Treats TWS skill .md files as a structured "language":
   - YAML frontmatter → node metadata
   - <SUBAGENT-STOP> → constraint flag
   - Body mentions of other skill names → reference edges
-  - SKILL-INDEX.md Mermaid graph → validated dependency edges
 """
 
 from __future__ import annotations
@@ -100,46 +99,6 @@ def _find_skill_refs(body: str, known_skill_names: set[str],
     return refs
 
 
-def _parse_mermaid_deps(content: str) -> list[tuple[str, str]]:
-    """Parse SKILL-INDEX.md Mermaid graph for explicit dependencies.
-
-    Returns list of (source_skill_name, target_skill_name) pairs.
-    """
-    deps: list[tuple[str, str]] = []
-
-    # Find mermaid code block
-    m = re.search(r'```mermaid\s*\n(.*?)\n```', content, re.DOTALL)
-    if not m:
-        return deps
-
-    mermaid = m.group(1)
-
-    # Maintain alias → label map for label→alias lookup
-    # Pattern: alias[label]
-    alias_to_short: dict[str, str] = {}
-    for am in re.finditer(r'(\w+)\[([^\]]+)\]', mermaid):
-        alias_to_short[am.group(1)] = am.group(2).strip()
-
-    # SHORT_NAME_TO_DIRNAME mapping (from SKILL-INDEX.md tables)
-    short_to_dir: dict[str, str] = {}
-    for alias, label in alias_to_short.items():
-        # Convert Chinese label to dir name (best-effort)
-        short_to_dir[alias] = label
-
-    # Parse edges: A[label] --> B[label] or A --> B
-    for em in re.finditer(r'(\w+)(?:\[[^\]]*\])?\s*-->\s*(\w+)(?:\[[^\]]*\])?', mermaid):
-        src_alias = em.group(1)
-        tgt_alias = em.group(2)
-
-        # Skip if self-reference or subgraph marker
-        if src_alias == tgt_alias:
-            continue
-
-        deps.append((src_alias, tgt_alias))
-
-    return deps
-
-
 def _build_node_id(name: str, file_path: str) -> str:
     qname = f"{file_path}::{name}"
     return _hash_id(qname, file_path)
@@ -228,48 +187,6 @@ def extract_skill_refs(file_path: str, content: str,
             "kind": "references",
             "source_loc": f"{file_path}:1",
             "provenance": "skill-reference",
-        })
-
-    return edges
-
-
-def extract_skill_index(file_path: str, content: str,
-                         known_skill_paths: dict[str, str]) -> list[dict]:
-    """Extract Mermaid dependency edges from SKILL-INDEX.md.
-
-    Validates that source and target skills exist in the project.
-    Returns list of edge dicts.
-    """
-    edges = []
-    deps = _parse_mermaid_deps(content)
-    if not deps:
-        return edges
-
-    for src_alias, tgt_alias in deps:
-        # Determine actual skill names from aliases or short names
-        # For SKILL-INDEX.md, aliases are used for Mermaid but may not
-        # directly match skill dir names. We try best-effort resolution.
-
-        # Skip non-skill nodes like GI, TWG, A, B, C...
-        if len(src_alias) <= 2 and src_alias.isalpha():
-            continue
-        if len(tgt_alias) <= 2 and tgt_alias.isalpha():
-            continue
-
-        src_path = known_skill_paths.get(src_alias, f"SKILL-INDEX.md")
-        tgt_path = known_skill_paths.get(tgt_alias, "")
-
-        source_id = _build_node_id(src_alias, src_path)
-        target_id = _build_node_id(tgt_alias, tgt_path) if tgt_path else \
-                   _hash_id(f"{tgt_path}::{tgt_alias}", tgt_path)
-
-        edges.append({
-            "source": source_id,
-            "target": target_id,
-            "target_text": tgt_alias,
-            "kind": "depends",
-            "source_loc": f"{file_path}:1",
-            "provenance": "mermaid-graph",
         })
 
     return edges

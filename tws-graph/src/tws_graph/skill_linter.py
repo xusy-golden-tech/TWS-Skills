@@ -6,7 +6,6 @@ Rules:
   3. Component/foundation skills must NOT have <SUBAGENT-STOP> tag
   4. Cross-references must resolve to existing skills
   5. No orphan skills (not referenced by any other skill or flow)
-  6. SKILL-INDEX.md must exist and be current
 """
 
 from __future__ import annotations
@@ -61,21 +60,6 @@ def lint_skills(root_dir: str) -> LintReport:
             severity="error",
         ))
         return report
-
-    # Check SKILL-INDEX.md exists
-    index_path = os.path.join(root_dir, "SKILL-INDEX.md")
-    index_content = None
-    if os.path.isfile(index_path):
-        index_content = _read_file(index_path)
-        report.files_checked += 1
-    else:
-        report.warnings.append(LintWarning(
-            skill_name="<project>",
-            file_path="SKILL-INDEX.md",
-            rule="missing-index",
-            message="SKILL-INDEX.md not found",
-            severity="warning",
-        ))
 
     # Check each skill file
     for dir_name, rel_path in sorted(known_paths.items()):
@@ -185,9 +169,6 @@ def lint_skills(root_dir: str) -> LintReport:
         if dir_name == "using-tws":
             continue
         if dir_name not in referenced:
-            # Check if it's referenced in SKILL-INDEX.md
-            if index_content and dir_name in (index_content or ""):
-                continue
             report.warnings.append(LintWarning(
                 skill_name=dir_name,
                 file_path=known_paths.get(dir_name, "?"),

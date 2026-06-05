@@ -67,25 +67,6 @@ class TestSkillRefs:
         assert len(refs) == 0
 
 
-class TestMermaidParsing:
-    def test_parse_simple_deps(self):
-        from tws_graph.indexer.skill_parser import _parse_mermaid_deps
-        content = """
-```mermaid
-graph TD
-    A[using-tws] --> B[add-feature]
-    B --> C[design-doc]
-```
-"""
-        deps = _parse_mermaid_deps(content)
-        assert len(deps) >= 2
-
-    def test_parse_no_mermaid(self):
-        from tws_graph.indexer.skill_parser import _parse_mermaid_deps
-        deps = _parse_mermaid_deps("No mermaid here")
-        assert len(deps) == 0
-
-
 class TestLayerClassification:
     def test_classify_flow(self):
         from tws_graph.indexer.skill_parser import _classify_layer
@@ -214,9 +195,6 @@ description: Does the work
 # Work skill
 """)
 
-        # Create SKILL-INDEX.md
-        (tmp_path / "SKILL-INDEX.md").write_text("# Index\n")
-
         report = lint_skills(str(tmp_path))
         assert report.ok
         assert len(report.errors) == 0
@@ -233,8 +211,6 @@ description: A flow
 # Flow without SUBAGENT-STOP
 """)
 
-        (tmp_path / "SKILL-INDEX.md").write_text("# Index\n")
-
         report = lint_skills(str(tmp_path))
         assert not report.ok
         assert any(w.rule == "missing-subagent-stop" for w in report.errors)
@@ -249,8 +225,6 @@ description: No name field
 
 # Body
 """)
-
-        (tmp_path / "SKILL-INDEX.md").write_text("# Index\n")
 
         report = lint_skills(str(tmp_path))
         assert not report.ok
@@ -274,8 +248,6 @@ description: I exist
 
 Load `comp-ghost` for ghost work.
 """)
-
-        (tmp_path / "SKILL-INDEX.md").write_text("# Index\n")
 
         report = lint_skills(str(tmp_path))
         warnings = [w for w in report.warnings if w.rule == "dangling-reference"]

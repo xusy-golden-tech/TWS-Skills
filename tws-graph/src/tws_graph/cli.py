@@ -148,7 +148,7 @@ def index(
 def _index_skills(root_dir: str, queries) -> int:
     """Index TWS skill .md files if the project contains them."""
     from .indexer.skill_parser import (
-        extract_skill_file, extract_skill_refs, extract_skill_index,
+        extract_skill_file, extract_skill_refs,
         collect_known_skills, _read_file,
     )
     import os as _os
@@ -177,20 +177,6 @@ def _index_skills(root_dir: str, queries) -> int:
         ref_edges = extract_skill_refs(rel_path, content, dir_names, skill_paths)
         if ref_edges:
             queries.insert_edges(ref_edges)
-
-    # Extract SKILL-INDEX.md dependencies
-    index_path = _os.path.join(root_dir, "SKILL-INDEX.md")
-    index_content = _read_file(index_path)
-    if index_content:
-        # Delete old index edges
-        queries._exec(
-            "DELETE FROM edges WHERE provenance = 'mermaid-graph'"
-        )
-        index_edges = extract_skill_index(
-            "SKILL-INDEX.md", index_content, skill_paths
-        )
-        if index_edges:
-            queries.insert_edges(index_edges)
 
     # Rebuild FTS after skill nodes
     queries.rebuild_fts()
