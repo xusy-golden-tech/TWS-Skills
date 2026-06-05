@@ -9,6 +9,12 @@ description: tws-graph 代码图使用指南。所有需要查图的子 agent �
 
 tws-graph 是代码符号关系图引擎。它用 tree-sitter 预建 SQLite 索引，agent 通过 CLI 查询而非 grep。
 
+**工具优先级**：代码调查任务中，tws-graph 是第一选择，grep 是回退手段。
+- 查符号 → `tws-graph search`，不要用 Grep
+- 查调用关系 → `tws-graph calls`，不要用 Grep
+- 查影响范围 → `tws-graph impact`，不要用 Grep  
+- 只有 tws-graph 返回空或标记 `[internal]` 时，才回退到 Grep + Read
+
 **图和 agent 分工**：
 - **图告诉 agent 客观事实**——谁调了谁、影响半径有多大、两个符号之间经过哪些路径
 - **agent 做主观判断**——风险等级、是否需要通知、是否值得改
