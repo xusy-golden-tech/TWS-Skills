@@ -13,6 +13,8 @@ tws-graph-init 把代码图工具链的安装和初始化封装成一个标准�
 
 ## 流程
 
+**执行前必须：** 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），获取准确的命令语法和错误处理策略。以下各步骤的命令仅为流程描述，实际执行以 found-tws-graph-usage 为准。
+
 ```
 ① 检测 tws-graph 是否可用 → ② 安装（如需要）→ ③ 构建索引 → ④ 创建基线快照
 ```
@@ -91,7 +93,7 @@ Bash: tws-graph snapshot initial 2>&1
 
 ## 常规维护
 
-项目代码有大量变更后，重新索引：
+项目代码有大量变更后，重新索引。具体命令语法以 `found-tws-graph-usage` 为准：
 
 ```
 tws-graph index    ← 增量索引（只处理修改过的文件）
