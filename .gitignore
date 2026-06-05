@@ -4,6 +4,7 @@ tws-graph/__pycache__/
 tws-graph/src/tws_graph.egg-info/
 tws-graph/build/
 tws-graph/htmlcov/
+.coverage
 tws-graph/.coverage
 *.pyc
 *.bak
