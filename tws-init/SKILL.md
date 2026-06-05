@@ -181,7 +181,7 @@ TWS 模板补充：
 调用 Skill(skill: "tws-graph-init")
 
 → 安装 tws-graph CLI + 构建符号关系图 + 创建基线快照
-→ 后续 impact-assessment / design-sync / root-cause-analysis 通过 found-tws-graph-usage skill 查询
+→ 后续 impact-assessment / design-sync / root-cause-analysis 需通过 Skill 工具加载 found-tws-graph-usage（Skill(skill: "found-tws-graph-usage")）查询
 ```
 
 ## ⑤ 保存

@@ -88,8 +88,8 @@ Bash: tws-graph snapshot initial 2>&1
 
 ## 后续使用
 
-代码图初始化完成后，日常查询请参考 `found-tws-graph-usage` skill。
-任何需要查图的子 agent 应通过 Skill 工具加载它，获取准确的命令语法。
+代码图初始化完成后，日常查询需通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")）。
+任何需要查图的子 agent 必须通过 Skill 工具加载它，获取准确的命令语法。
 
 ## 常规维护
 

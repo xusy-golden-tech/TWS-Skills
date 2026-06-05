@@ -64,12 +64,12 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
 
 ### 代码图查询任务补充
 
-当子任务涉及代码图查询（影响评估 / 设计同步 / 根因分析）时，dispatch prompt 中必须同时要求加载 `found-tws-graph-usage`：
+当子任务涉及代码图查询（影响评估 / 设计同步 / 根因分析）时，dispatch prompt 中必须同时要求子 agent 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")）：
 
 ```
 你是一个执行子 agent。请完成以下任务：
 
-1. 通过 Skill 工具加载 comp-impact-assessment 和 found-tws-graph-usage
+1. 通过 Skill 工具加载 comp-impact-assessment（Skill(skill: "comp-impact-assessment")）和 found-tws-graph-usage（Skill(skill: "found-tws-graph-usage")）
 2. 按 skill 中的指引执行影响评估
 ...
 ```
