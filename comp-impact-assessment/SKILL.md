@@ -56,7 +56,7 @@ description: 动手前评估改动的影响范围——事前检查。涉及哪�
 ```
 
 → 以上 Step 0 是「**客观事实层**」——图告诉你的，不需要推理
-→ 以下 Gate Function 是「**主观判断层**」——agent 基于图输出 + CONTRACTS 做推理
+→ 以下 Gate Function 是「**主观判断层**」——agent 基于图输出做推理
 
 ## The Gate Function
 
@@ -64,7 +64,7 @@ description: 动手前评估改动的影响范围——事前检查。涉及哪�
 BEFORE implementing any change, AFTER the design/root cause is clear:
 
 1. 查图输出 → 涉及哪些模块？—— 基于 impact 结果列出
-2. 改什么接口？—— 查 CONTRACTS.md（如果存在）+ diff 签名变更
+2. 改什么接口？—— 基于 tws-graph diff 签名变更
 3. 消费者是谁？—— 图 calls --inbound 输出 = 客观消费者列表
 4. 会不会有连锁影响？—— 图 impact --depth 2 展开传递依赖链
 5. 要不要回测？—— 哪些现有测试可能受影响
@@ -92,23 +92,12 @@ BEFORE implementing any change, AFTER the design/root cause is clear:
 | 中 | 改了一个接口，但有向后兼容 |
 | 高 | 改了接口且不向后兼容 / 改了核心模块 / 涉及数据迁移 |
 
-## 团队模式补充
-
-团队模式下（有 CONTRACTS.md）：
-
-```
-□ 在 CONTRACTS.md 中搜索所有涉及的接口
-□ 标记消费者 → 后续通知
-□ 接口变更 → 更新 CONTRACTS.md
-□ 高风险的改动 → 建议创建集成分支
-```
-
 ## Rationalization Prevention
 
 | 想说的话 | 真相 |
 |---------|------|
 | 「就改一个字段，不影响别的」 | 字段可能被其他模块引用。查了再说 |
-| 「这个接口没人用」 | 查 CONTRACTS.md。没查就是猜 |
+| 「这个接口没人用」 | 查 tws-graph impact。没查就是猜 |
 | 「影响范围很小」 | 说出具体影响哪些模块，而不是用「很小」概括 |
 | 「不用回测吧」 | 影响了 A 模块就必须跑 A 的测试 |
 | 「tws-graph 还没装，用 grep 也一样」 | grep 找不到跨文件间接调用。装 tws-graph |

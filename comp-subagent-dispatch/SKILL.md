@@ -1,6 +1,6 @@
 ﻿---
 name: comp-subagent-dispatch
-description: 子 agent 调度规则（Solo 和 Team 模式通用）。主 agent 不写代码，所有编码/测试/同步由子 agent 执行。这是 TWS 的核心机制，不是团队模式专属
+description: 子 agent 调度规则。主 agent 不写代码，所有编码/测试/同步由子 agent 执行。这是 TWS 的核心机制
 ---
 
 # 子 Agent 调度规则
@@ -96,10 +96,9 @@ description: 子 agent 调度规则（Solo 和 Team 模式通用）。主 agent 
 
 ## 并发数限制
 
-| 模式 | 最大并发 | 说明 |
+| 场景 | 最大并发 | 说明 |
 |------|---------|------|
-| 单人开发 | 2 | 个人环境资源有限 |
-| 团队开发 | 4 | 有 CI/CD 和环境支持 |
+| 代码改动 | 2 | 避免文件冲突 |
 | 纯文档/调查类 | 4 | 不涉及代码冲突 |
 
 **超出限制时排队执行，不新增子 agent。**
@@ -113,7 +112,7 @@ description: 子 agent 调度规则（Solo 和 Team 模式通用）。主 agent 
   using-tws（入口）
   add-feature / fix-bug / ...（当前流程）
   task-breakdown、impact-assessment（核心组件）
-  comp-subagent-dispatch（子 agent 调度，所有模式通用）
+  comp-subagent-dispatch（子 agent 调度）
   checkpoint-reference（状态管理）
   约 4-6 个文件，~300-400 行
 

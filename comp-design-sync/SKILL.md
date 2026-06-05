@@ -102,19 +102,6 @@ AFTER code changes are complete, BEFORE marking task done:
 - 记清楚「改了哪里 + 为什么改」
 - 没有履历的设计书 → 说明这是新创建的，加一行「初版创建」
 
-## CONTRACTS.md 同步
-
-如果改了跨模块接口，必须同步更新 CONTRACTS.md：
-
-```
-1. 改了 API 路由、事件或公共函数接口 → 更新 CONTRACTS.md
-2. 新增接口 → 在 CONTRACTS.md 添加新条目
-3. 废弃接口 → 标记 deprecated
-4. 改了接口定义 → 追加变更记录
-
-如果 CONTRACTS.md 不存在 → 调用 tws-init 生成初始版本
-```
-
 ## 架构决策上报
 
 同步设计书时，检查"决策记录"段中的决策。如果某个决策满足以下任一条件，标记为待审核：

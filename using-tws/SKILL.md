@@ -17,68 +17,17 @@ If you were dispatched as a subagent with a specific task, skip this skill.
 2. 增量实施，每步可验证，禁止跳过
 3. 测试通过是最低要求，还要检查边界和同步
 4. 改了代码必须同步设计书，不改 = 没改完
-5. **主 agent 不写代码**——所有编码、测试、同步由子 agent 执行（详见 `comp-subagent-dispatch`）。Solo 模式也一样
+5. **主 agent 不写代码**——所有编码、测试、同步由子 agent 执行（详见 `comp-subagent-dispatch`）
 6. **主 agent 不加载 comp skill**——comp skill（comp-reproduce、comp-implementation 等）是给子 agent 的工作手册。主 agent 的职责是派子 agent、告诉它加载哪个 comp skill、验收产出。主 agent 只加载 flow skill（如 flow-fix-bug）用于流程控制
-7. **所有改动必须从 develop 开新分支**——`git checkout develop && git checkout -b {type}/{description}`。禁止直接在 develop/master 上提交（详见 `team-branch-flow`）
+7. **所有改动必须从 develop 开新分支**——`git checkout develop && git checkout -b {type}/{description}`。禁止直接在 develop/master 上提交（详见 `found-branch-flow`）
 8. **子 agent 完成后必须 git commit**——每完成一个子任务立即 `git add` + `git commit`（不 push）。防止后续子 agent 误操作回滚已验收的改动。详见 `comp-subagent-dispatch` 的「结果合并」节
 9. **主 agent 关注上下文容量**——长流程中累积多个子 agent 汇报后，上下文会逐渐膨胀。自检信号：已派 5+ 子 agent / 汇报累积超 3 屏 / 下一个任务很复杂。偏重时减少汇报内联、考虑合并后续步骤；过载时 checkpoint 保存后建议用户开新会话续上。这不是精确计算，是纪律——防止在上下文紧张时做低质量编排决策
-
-## 第零步：强制模式检测 ⚠️ 不可跳过
-
-**在判断场景之前，必须先确定 Solo/Team 模式。不许猜，不许假设，必须执行以下检测。**
-
-### 检测流程（按顺序执行，每一项都必须实际运行命令）
-
-```
-第 1 项 — 检查 CONTRACTS.md：
-  Bash: ls CONTRACTS.md 2>/dev/null
-  → 文件存在 → Team Mode，直接跳到第 3 项确认
-  → 文件不存在 → 继续第 2 项
-
-第 2 项 — 检查 git log 多人提交：
-  Bash: git log --all --since="6 months ago" --format="%an" | sort -u | wc -l
-  → 作者数 >= 2 → Team Mode
-  → 作者数 == 1 → 继续第 2b 项
-  → 命令失败（不在 git repo 等）→ Solo Mode
-
-  第 2b 项 — 避免误判单人 repo：
-  Bash: git log --all --format="%an" | sort -u
-  → 历史上的所有唯一作者数 >= 2 → Team Mode
-  → 真的是一个人 → Solo Mode
-
-第 3 项 — 确认结果：
-  必须输出（二选一，不能省略）：
-  ✅ 检测结果：Team Mode（依据：CONTRACTS.md 存在 / git log 显示 {N} 个作者）
-  ✅ 检测结果：Solo Mode（依据：无 CONTRACTS.md 且 git log 仅 1 个作者）
-```
-
-### ⚠️ 反跳过护栏
-
-```
-以下想法出现时 STOP，回头执行检测：
-
-「这明显是单人项目，肯定是 Solo」
-  → 先跑 ls CONTRACTS.md && git log --all --format="%an" | sort -u
-
-「CONTRACTS.md 肯定不存在」
-  → 你猜的不算，ls 一下再说
-
-「之前的对话就是 Solo，这次也是」
-  → 状态可能变了。每次对话独立检测
-
-「我在之前的回复里已经判断过了」
-  → 每次新对话/新 skill 加载都必须重新检测
-```
-
-Mode 确定后写入后续所有输出。输出计划时必须带 `👥 模式：{Solo / Team}` 行。
-
----
 
 ## 第一步：判断场景
 
 ### 硬边界：此步骤只做判断，不做调查
 
-模式已在第零步确定。此处只判断流程类型（fix-bug / add-feature / ...）。
+此处只判断流程类型（fix-bug / add-feature / ...）。
 
 ```
 允许：
@@ -213,7 +162,6 @@ Skill(skill: "flow-documentation")
 ```
 📋 识别为：【{场景名}】
 📐 使用流程：【{流程名}】（{简化路径 / 完整路径}，门禁依据：{为什么}）
-👥 模式：{Solo / Team}
 
 🔄 执行计划：
 
@@ -237,7 +185,6 @@ Skill(skill: "flow-documentation")
 ## 当前流程
 - 流程名：{场景名}
 - flow skill：{flow-fix-bug 等}
-- 模式：{Solo / Team}
 - 开始时间：{YYYY-MM-DD HH:MM}
 - 版本号：1
 
@@ -294,6 +241,3 @@ Skill(skill: "flow-documentation")
 | 「这个很简单，几分钟搞定」 | 越简单越要走流程，出坑的往往是这种 |
 | 「我得先看看代码才能判断场景」 | 场景判断靠用户描述，看代码是子 agent 的事 |
 | 「我需要了解一下才能写计划」 | 计划写的是步骤承诺，不是技术方案。调查在 flow skill 里做 |
-| 「CONTRACTS.md 肯定不存在，直接 Solo」 | ls 和 git log 跑一遍再说。你没有权限跳过第零步 |
-| 「这是单人项目，不需要检查」 | 项目可能从 Solo 演进到 Team。每次都检测，不缓存 |
-| 「之前对话就是 Solo，沿用即可」 | 每次新对话独立检测，不继承上轮判断 | 
