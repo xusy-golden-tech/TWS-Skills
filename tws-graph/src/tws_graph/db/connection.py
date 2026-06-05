@@ -39,6 +39,7 @@ class DatabaseConnection:
             with open(schema_path, "r", encoding="utf-8") as f:
                 conn.conn.executescript(f.read())
 
+        cls._run_migrations(conn)
         return conn
 
     @classmethod
@@ -56,6 +57,21 @@ class DatabaseConnection:
             return False
         except sqlite3.OperationalError:
             return True
+
+    @staticmethod
+    def _run_migrations(conn: "DatabaseConnection") -> None:
+        """Apply any pending schema migrations."""
+        db = conn.conn
+        try:
+            db.execute("SELECT is_external FROM unresolved_refs LIMIT 1")
+        except sqlite3.OperationalError:
+            db.execute(
+                "ALTER TABLE unresolved_refs ADD COLUMN is_external INTEGER NOT NULL DEFAULT 0"
+            )
+        db.execute("""
+            INSERT OR IGNORE INTO schema_versions (version, applied_at, description)
+            VALUES (2, CAST(strftime('%s', 'now') AS INTEGER) * 1000, 'Add is_external to unresolved_refs')
+        """)
 
     def optimize(self):
         """Run maintenance after bulk writes (ported from CodeGraph)."""

@@ -161,6 +161,9 @@ class ExtractionOrchestrator:
         # Populate unresolved_refs from unresolved/ambiguous edges
         self._populate_unresolved_refs(result.resolve_result)
 
+        # Populate unresolved_refs from import edges with externality classification
+        self._populate_import_unresolved()
+
         # Rebuild FTS index (triggers handle incremental, but rebuild ensures consistency)
         self.queries.rebuild_fts()
 
@@ -194,3 +197,88 @@ class ExtractionOrchestrator:
                 "language": row["language"] or "",
             }
             self.queries.insert_unresolved_ref(ref)
+
+    def _populate_import_unresolved(self) -> None:
+        """Populate unresolved_refs from import edges, classifying external vs internal.
+
+        For each import edge whose target is not in the nodes table:
+          - Check if the imported module name maps to a project file
+          - If no project file matches → is_external=True (SDK/lib)
+          - If project file matches but not in nodes → is_external=False (index gap)
+        """
+        import os
+
+        project_files = {row["path"] for row in self.queries.get_all_files()}
+
+        rows = self.queries._exec("""
+            SELECT e.*, n.file_path, n.language
+            FROM edges e
+            JOIN nodes n ON e.source = n.id
+            WHERE e.kind = 'imports'
+              AND e.target NOT IN (SELECT id FROM nodes)
+              AND e.target_text IS NOT NULL
+        """).fetchall()
+
+        for row in rows:
+            full_name = row["target_text"]
+            source_file = row["file_path"]
+
+            # For "from X import Y" the target_text is "X.Y" but module is "X".
+            # Try progressively shorter prefixes to find the actual module.
+            parts = full_name.split(".")
+            is_external = True
+            for i in range(len(parts), 0, -1):
+                candidate = ".".join(parts[:i])
+                if _module_in_project(candidate, source_file, project_files):
+                    is_external = False
+                    break
+
+            ref = {
+                "from_node_id": row["source"],
+                "reference_name": full_name,
+                "reference_kind": "import",
+                "line": 0,
+                "col": 0,
+                "file_path": source_file,
+                "language": row["language"] or "",
+                "is_external": int(is_external),
+            }
+            self.queries.insert_unresolved_ref(ref)
+
+
+def _module_in_project(module_name: str, source_file: str, project_files: set[str]) -> bool:
+    """Check if a Python module name corresponds to a known project file."""
+    import os
+
+    module_path = module_name.replace(".", "/")
+
+    # Direct file: "mylib.utils" → "mylib/utils.py"
+    if f"{module_path}.py" in project_files:
+        return True
+
+    # Package init: "mylib.utils" → "mylib/utils/__init__.py"
+    if f"{module_path}/__init__.py" in project_files:
+        return True
+
+    # Relative imports: "from . import sibling" or "from ..parent import foo"
+    # . = current package (go up 0), .. = parent (go up 1), ... = grandparent (go up 2)
+    if module_name.startswith("."):
+        source_dir = os.path.dirname(source_file)
+        dot_count = 0
+        for c in module_name:
+            if c == ".":
+                dot_count += 1
+            else:
+                break
+        relative_rest = module_name[dot_count:]
+        levels_up = dot_count - 1  # 1 dot = current, 2 dots = parent, etc.
+        parts = source_dir.split("/")
+        if levels_up <= len(parts):
+            base = "/".join(parts[:len(parts)-levels_up]) if levels_up > 0 else source_dir
+            candidate = os.path.join(base, relative_rest.replace(".", "/")).replace("\\", "/")
+            if f"{candidate}.py" in project_files:
+                return True
+            if f"{candidate}/__init__.py" in project_files:
+                return True
+
+    return False

@@ -83,13 +83,15 @@ CREATE TABLE IF NOT EXISTS unresolved_refs (
     col             INTEGER NOT NULL DEFAULT 0,
     candidates      TEXT,                           -- JSON array of candidate node_ids
     file_path       TEXT NOT NULL,
-    language        TEXT NOT NULL
+    language        TEXT NOT NULL,
+    is_external     INTEGER NOT NULL DEFAULT 0   -- 0=internal (project), 1=external (SDK/lib)
 );
 
 CREATE INDEX IF NOT EXISTS idx_urefs_from_node ON unresolved_refs(from_node_id);
 CREATE INDEX IF NOT EXISTS idx_urefs_name ON unresolved_refs(reference_name);
 CREATE INDEX IF NOT EXISTS idx_urefs_file ON unresolved_refs(file_path);
 CREATE INDEX IF NOT EXISTS idx_urefs_lang ON unresolved_refs(language);
+CREATE INDEX IF NOT EXISTS idx_urefs_is_external ON unresolved_refs(is_external);
 
 -- =============================================================================
 -- FTS5: full-text search over node names, signatures, and docstrings

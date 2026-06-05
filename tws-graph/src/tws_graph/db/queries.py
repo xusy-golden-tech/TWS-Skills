@@ -403,14 +403,15 @@ class QueryBuilder:
         self._exec("""
             INSERT INTO unresolved_refs
                 (from_node_id, reference_name, reference_kind, line, col,
-                 candidates, file_path, language)
-            VALUES (?,?,?,?,?, ?,?,?)
+                 candidates, file_path, language, is_external)
+            VALUES (?,?,?,?,?, ?,?,?,?)
         """, (
             ref["from_node_id"], ref["reference_name"],
             ref.get("reference_kind", "call"),
             ref.get("line", 0), ref.get("col", 0),
             _to_json(ref.get("candidates")),
             ref.get("file_path", ""), ref.get("language", ""),
+            ref.get("is_external", 0),
         ))
 
     def insert_unresolved_refs(self, refs: list[dict]):

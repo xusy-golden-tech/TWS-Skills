@@ -219,11 +219,37 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
                     module = _node_text(child, source)
                     if node_stack:
                         target_id = _hash_id(f"{file_path}::{module}", file_path)
-                        add_edge(node_stack[-1], target_id, "imports", node.start_position().row + 1)
+                        add_edge(node_stack[-1], target_id, "imports", node.start_position().row + 1,
+                                 target_text=module)
 
         elif node_kind == "import_from_statement":
-            # Track imports (cross-file resolution deferred to Phase 3)
-            pass
+            module_name = None
+            module_node = node.child_by_field_name("module_name")
+            if module_node:
+                module_name = _node_text(module_node, source)
+
+            for child in _children(node):
+                imported_name = None
+                if child.kind() == "dotted_name":
+                    # Skip if this is the module_name node (the "from" part)
+                    if module_name and _node_text(child, source) == module_name:
+                        continue
+                    imported_name = _node_text(child, source)
+                elif child.kind() == "aliased_import":
+                    name_child = child.child_by_field_name("name")
+                    if name_child:
+                        imported_name = _node_text(name_child, source)
+                elif child.kind() == "wildcard_import":
+                    imported_name = "*"
+
+                if not imported_name:
+                    continue
+
+                full_name = f"{module_name}.{imported_name}" if module_name else imported_name
+                if node_stack:
+                    target_id = _hash_id(f"{file_path}::{full_name}", file_path)
+                    add_edge(node_stack[-1], target_id, "imports", node.start_position().row + 1,
+                             target_text=full_name)
 
         # --- Recurse into children ---
         _walk_children(node)

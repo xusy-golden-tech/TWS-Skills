@@ -771,26 +771,20 @@ def unresolved(
         typer.echo(json.dumps(_serialize(refs), ensure_ascii=False, indent=2))
     else:
         # Classify: external (SDK/lib) vs internal (project-level)
-        ext_prefixes = (
-            "java.", "javax.", "android.", "androidx.", "kotlin.", "kotlinx.",
-            "org.junit", "org.jetbrains", "com.google.", "io.reactivex",
-            "org.slf4j", "ch.qos.logback", "com.fasterxml", "org.apache.",
-        )
         ext_count = 0
         int_count = 0
         for r in refs:
-            ref_name = r.get("reference_name", "")
-            if ref_name.startswith(ext_prefixes):
+            if r["is_external"]:
                 ext_count += 1
             else:
                 int_count += 1
 
         typer.echo(f"\n{len(refs)} 条未解析的引用:")
-        typer.echo(f"  外部 SDK/库: {ext_count} 条（正常，这些符号不在项目源码里）")
+        typer.echo(f"  [external] 外部 SDK/库: {ext_count} 条（正常，这些符号不在项目源码里）")
         if int_count > 0:
-            typer.echo(f"  内部引用:   {int_count} 条（需要关注，项目内符号未能解析）")
+            typer.echo(f"  [internal] 内部引用:   {int_count} 条（需要关注，项目内符号未能解析）")
         else:
-            typer.echo(f"  内部引用:   0 条")
+            typer.echo(f"  [internal] 内部引用:   0 条")
 
         # Group by file
         from collections import defaultdict
@@ -800,7 +794,8 @@ def unresolved(
         for fpath, file_refs in sorted(by_file.items()):
             typer.echo(f"  [{fpath}] ({len(file_refs)} 条)")
             for r in file_refs[:5]:
-                typer.echo(f"    {r['reference_name']} ({r['reference_kind']})"
+                tag = "[external]" if r["is_external"] else "[internal]"
+                typer.echo(f"    {tag} {r['reference_name']} ({r['reference_kind']})"
                            f"  来自 {r['from_node_id'][:12]}...")
             if len(file_refs) > 5:
                 typer.echo(f"    ... 还有 {len(file_refs) - 5} 条")
