@@ -44,19 +44,19 @@ agent 不应该猜命令。加载此 skill 就是为了确保命令准确。
 
 ## 前置检查（每次查图前必做）
 
-以下检查必须在任何 tws-graph 查询命令之前完成：
-
 ```
 1. 检查可用性
    tws-graph --version
    → 如果报错 command not found 或返回非零：
      pip install -e tws-graph/
 
-2. 确保索引最新
-   tws-graph index
-   → 这会做增量索引（只重新扫描有变化的文件），通常很快
-   → 如果是全新项目或索引损坏，会走全量索引（较慢但只需一次）
-   → 跳过此步 = 用过期数据做判断，后果比索引等待时间严重得多
+2. 索引由 git hooks 自动维护
+   tws-graph hooks install 安装后，每次 commit/merge/checkout 自动增量同步。
+   通常不需要手动跑 tws-graph index。
+   只有在以下情况才需要手动 index：
+   - hooks 未安装（tws-graph hooks status 检查）
+   - 子 agent 刚修改了代码但还没 commit
+   - 怀疑索引损坏（查询结果明显不对）
 ```
 
 ## 命令参考
@@ -98,10 +98,11 @@ tws-graph search path:utils kind:method parse
 
 ## 常用查询模式
 
+> 索引由 git hooks 自动维护。以下模式省略了 `tws-graph index`。如果刚修改了代码还没 commit，需要先手动 `tws-graph index`。
+
 ### 影响分析前
 
 ```
-tws-graph index
 tws-graph impact <被改符号> --depth 2
 tws-graph calls <被改符号> --inbound
 tws-graph snapshot before
@@ -110,15 +111,12 @@ tws-graph snapshot before
 ### 设计同步时
 
 ```
-tws-graph index
-# ... 代码修改完成后 ...
 tws-graph diff before after
 ```
 
 ### 根因分析时
 
 ```
-tws-graph index
 tws-graph trace <入口函数> <报错函数>
 tws-graph calls <报错函数> --inbound --depth 3
 ```
@@ -142,7 +140,6 @@ tws-graph search kind:function <关键词>
 
 ```
 典型使用流程：
-tws-graph index
 tws-graph unresolved
 # → 看到 [external] → 忽略，这些是正常的
 # → 看到 [internal] → grep 搜索该符号，补全缺失的调用链
@@ -184,7 +181,7 @@ tws-graph unresolved
    - `tws-graph callees` — 正确命令是 `tws-graph calls`
    - `tws-graph references` — 不存在，用 `tws-graph search` 或 `tws-graph impact`
 
-2. **跳过 index 直接用过期数据查**。图不会自动更新，代码改了图还是旧的。
+2. **未 commit 的修改不跑 index 直接查图**。子 agent 刚改完代码还没 commit → hooks 没触发 → 索引是旧的。此时应先 `tws-graph index`。
 
 3. **改前不拍快照**。design-sync 需要 before/after 对比，没有 before 快照就等于白做。
 
@@ -196,7 +193,7 @@ tws-graph unresolved
 
 | 「用 grep 也一样」 | grep 找不到跨文件间接调用，也看不到多跳路径。图给你完整的依赖闭包 |
 | 「我记住命令了不用加载」 | 加载此 skill 正是为了防止命令拼错。`callers` 不是命令，`--inbound` 才是 |
-| 「先查再说，不跑 index 了」 | index 可能过期，旧数据会误导。索引一分钟，排错一小时 |
+| 「hooks 应该同步了，不用管」 | 刚改完代码还没 commit 时 hooks 不会触发，此时手动 `tws-graph index` 是必要的 |
 | 「返回空就是没调用关系」 | 动态调度、回调、闭包不会出现在静态分析中。标注 heuristic，回退 grep |
 | 「AppContainer 是类名，Grep 一下就行」 | 类名是符号，必须用 `tws-graph search kind:class`。Grep 只能看到文本出现，看不到结构化关系 |
 | 「这个参数应该存在」 | 不猜。此 skill 中的命令参考表是唯一权威，表上没有的就是不存在 |
