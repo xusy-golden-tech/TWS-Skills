@@ -50,7 +50,7 @@ agent 不应该猜命令。加载此 skill 就是为了确保命令准确。
 | `tws-graph diff <a> <b> --brief` | 简要对比（仅输出 changed/unchanged） | `tws-graph diff before after --brief` |
 | `tws-graph lint` | 校验 skill 文件结构 | `tws-graph lint` |
 | `tws-graph hooks install` | 安装 git hooks（自动增量索引） | `tws-graph hooks install` |
-| `tws-graph unresolved` | 列出未解析的跨文件引用 | `tws-graph unresolved` |
+| `tws-graph unresolved` | 列出未解析引用，自动标记 `[external]`/`[internal]` | `tws-graph unresolved` |
 
 ## search 命令 qualifier 参考
 
@@ -102,6 +102,23 @@ tws-graph calls <报错函数> --inbound --depth 3
 tws-graph search <关键词>
 # 如果结果太多，加 qualifier 缩小范围：
 tws-graph search kind:function <关键词>
+```
+
+## unresolved 引用分类与行动策略
+
+`tws-graph unresolved` 会自动将未解析引用分为两类：
+
+| 标签 | 含义 | 行动策略 |
+|------|------|---------|
+| `[external]` | 外部 SDK/库（如 `os`, `re`, `typer`, `fastapi`），不在项目源码中 | **停止追踪**，如需了解此依赖的作用，上网搜索文档 |
+| `[internal]` | 项目内符号，但因索引缺失/动态调用等原因未能解析 | **回退 grep**，用 Grep 工具在项目中搜索该符号名，手动追踪 |
+
+```
+典型使用流程：
+tws-graph index
+tws-graph unresolved
+# → 看到 [external] → 忽略，这些是正常的
+# → 看到 [internal] → grep 搜索该符号，补全缺失的调用链
 ```
 
 ## 错误处理
