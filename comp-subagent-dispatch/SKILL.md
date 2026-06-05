@@ -76,7 +76,7 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
 
 原因：comp skill 只描述「查什么」，found-tws-graph-usage 提供「怎么查」的正确命令语法，防止 agent 编造不存在的命令。
 
-这是我们在 G-Assistant 修复项目里验证过的模式：妈妈（主 agent）管规划和验收，小念（子 agent）管执行。效果好。
+主 agent 管规划和验收，子 agent 管执行。两者职责明确分离，避免主 agent 上下文膨胀。
 
 ---
 
