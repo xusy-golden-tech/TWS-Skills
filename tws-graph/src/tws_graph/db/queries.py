@@ -143,18 +143,21 @@ class QueryBuilder:
 
     @staticmethod
     def _build_fts_query(query: str) -> str:
-        """Build a safe FTS5 query string with prefix matching."""
-        # Split on whitespace; add * suffix for prefix matching on each term
+        """Build a safe FTS5 query string with prefix matching.
+
+        Bare terms use FTS5 default case-insensitive matching.
+        Double-quoted phrases ARE case-sensitive in FTS5, so we avoid them
+        for single-word prefix queries.
+        """
         terms = query.strip().split()
         escaped = []
         for t in terms:
-            # Strip field qualifiers for FTS
             if ":" in t:
                 t = t.split(":", 1)[1]
-            # Escape double-quotes and FTS5 special chars minimally
+            # Escape double-quotes (would trigger phrase mode)
             t = t.replace('"', '""')
             if t:
-                escaped.append(f'"{t}"*')
+                escaped.append(f'{t}*')
         return " AND ".join(escaped) if escaped else query
 
     def _search_fuzzy(self, query: str, limit: int) -> list[sqlite3.Row]:

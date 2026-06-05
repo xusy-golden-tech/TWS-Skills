@@ -714,7 +714,7 @@ def lint(
 
 @app.command()
 def search(
-    query: str = typer.Argument(..., help="搜索关键词。支持 field:value 限定语法"),
+    query: list[str] = typer.Argument(..., help="搜索关键词。支持 field:value 限定语法，多个词用空格分隔"),
     limit: int = typer.Option(20, "--limit", "-n", help="最大结果数"),
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
@@ -726,6 +726,7 @@ def search(
       tws-graph search kind:function api
       tws-graph search lang:python kind:class controller --limit 10
     """
+    query_str = " ".join(query)
     db = _get_db(db_path) if os.path.exists(db_path or DEFAULT_DB) else None
     if not db:
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
@@ -735,15 +736,15 @@ def search(
 
     # Detect if query has field qualifiers
     has_qualifiers = any(
-        f"{f}:" in query for f in ("kind:", "lang:", "language:", "path:", "visibility:", "framework:")
+        f in query_str for f in ("kind:", "lang:", "language:", "path:", "visibility:", "framework:")
     )
     if has_qualifiers:
-        results = queries.search_nodes_field_qualified(query, limit=limit)
+        results = queries.search_nodes_field_qualified(query_str, limit=limit)
     else:
-        results = queries.search_nodes(query, limit=limit)
+        results = queries.search_nodes(query_str, limit=limit)
 
     if not results:
-        typer.echo(f"未找到匹配: {query}")
+        typer.echo(f"未找到匹配: {query_str}")
         return
 
     if json_output:
