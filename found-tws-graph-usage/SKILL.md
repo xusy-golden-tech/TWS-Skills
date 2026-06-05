@@ -9,11 +9,32 @@ description: tws-graph 代码图使用指南。所有需要查图的子 agent �
 
 tws-graph 是代码符号关系图引擎。它用 tree-sitter 预建 SQLite 索引，agent 通过 CLI 查询而非 grep。
 
-**工具优先级**：代码调查任务中，tws-graph 是第一选择，grep 是回退手段。
-- 查符号 → `tws-graph search`，不要用 Grep
-- 查调用关系 → `tws-graph calls`，不要用 Grep
-- 查影响范围 → `tws-graph impact`，不要用 Grep  
-- 只有 tws-graph 返回空或标记 `[internal]` 时，才回退到 Grep + Read
+**工具优先级**：代码调查任务中，tws-graph 是第一选择，Grep 是回退手段。
+
+强制规则：
+- 查符号（类名、方法名、函数名）→ 必须先走 `tws-graph search`，不允许跳过直接 Grep
+- 查调用关系 → `tws-graph calls`，不允许直接 Grep
+- 查影响范围 → `tws-graph impact`，不允许直接 Grep
+- 只有以下情况才允许使用 Grep：
+  1. tws-graph 返回空结果或标记 `[internal]` 未解析
+  2. 搜索目标在 tws-graph 不索引的文件类型中（XML、YAML、JSON、.gradle、资源文件等）
+  3. 文件模式匹配（如查找 test 文件）
+  4. 搜索字面字符串/正则，而非已知符号名
+
+违规示例：
+```
+❌ Grep "AppContainer"              → 这是类名，应该用 tws-graph search kind:class AppContainer
+❌ Grep "readerSettingsStore"       → 这是符号名，应该用 tws-graph search
+❌ Grep "isPremium|setPremium"      → 这是方法名，应该用 tws-graph search kind:method
+```
+
+合规示例：
+```
+✅ tws-graph search kind:class AppContainer
+✅ tws-graph search readerSettingsStore
+✅ Grep "adContainer|FrameLayout" fragment_home.xml   （XML 文件，tws-graph 不索引）
+✅ Grep "**/test/**/*Test.kt"                          （文件模式匹配）
+```
 
 **图和 agent 分工**：
 - **图告诉 agent 客观事实**——谁调了谁、影响半径有多大、两个符号之间经过哪些路径
@@ -169,10 +190,13 @@ tws-graph unresolved
 
 4. **不检查可用性就假设已安装**。每次加载此 skill 时都必须先跑 `tws-graph --version`。
 
+5. **用 Grep 查已知符号名**。类名、方法名、函数名必须先用 `tws-graph search` 查。Grep 只允许用于 tws-graph 不索引的文件类型（XML、.gradle、资源文件）、文件模式匹配、或图返回空/`[internal]` 后的回退。
+
 ## Rationalization Prevention
 
 | 「用 grep 也一样」 | grep 找不到跨文件间接调用，也看不到多跳路径。图给你完整的依赖闭包 |
 | 「我记住命令了不用加载」 | 加载此 skill 正是为了防止命令拼错。`callers` 不是命令，`--inbound` 才是 |
 | 「先查再说，不跑 index 了」 | index 可能过期，旧数据会误导。索引一分钟，排错一小时 |
 | 「返回空就是没调用关系」 | 动态调度、回调、闭包不会出现在静态分析中。标注 heuristic，回退 grep |
+| 「AppContainer 是类名，Grep 一下就行」 | 类名是符号，必须用 `tws-graph search kind:class`。Grep 只能看到文本出现，看不到结构化关系 |
 | 「这个参数应该存在」 | 不猜。此 skill 中的命令参考表是唯一权威，表上没有的就是不存在 |
