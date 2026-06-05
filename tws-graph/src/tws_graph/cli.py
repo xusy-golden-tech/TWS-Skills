@@ -29,12 +29,12 @@ from .diff import (
 app = typer.Typer(
     name="tws-graph",
     help="TWS Code Graph — 预建代码符号关系图，agent 查图而非搜索",
-    no_args_is_help=True,
 )
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def _version_callback(
+    ctx: typer.Context,
     version: bool = typer.Option(
         False, "--version", "-V",
         help="Show version and exit",
@@ -43,6 +43,9 @@ def _version_callback(
 ):
     if version:
         print(f"tws-graph {__version__}")
+        raise typer.Exit()
+    if ctx.invoked_subcommand is None:
+        print(ctx.get_help())
         raise typer.Exit()
 
 # Default paths
@@ -507,8 +510,8 @@ def snapshot(
 
 @app.command()
 def diff(
-    before: str = typer.Argument(..., help="改前快照名称"),
-    after: str = typer.Argument(..., help="改后快照名称"),
+    before: Optional[str] = typer.Argument(None, help="改前快照名称"),
+    after: Optional[str] = typer.Argument(None, help="改后快照名称"),
     brief: bool = typer.Option(False, "--brief", "-b", help="精简输出：仅 changed/unchanged"),
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径（用于解析快照目录）"),
@@ -520,11 +523,28 @@ def diff(
     然后用此命令对比。
 
     示例：
+      tws-graph diff              # 列出所有快照
       tws-graph diff before after
       tws-graph diff before after --brief  # 仅输出 changed/unchanged
     """
     base = os.path.abspath(db_path or DEFAULT_DB)
     snapshots_dir = os.path.dirname(base)
+
+    # No arguments: list snapshots
+    if not before and not after:
+        available = list_snapshots(snapshots_dir)
+        if available:
+            typer.echo("可用快照:")
+            for s in available:
+                typer.echo(f"  {s}")
+        else:
+            typer.echo("无可用快照。请先运行 tws-graph snapshot <name>。")
+        return
+
+    if not before or not after:
+        typer.echo("错误: 需要同时提供 BEFORE 和 AFTER 快照名称。", err=True)
+        typer.echo("用法: tws-graph diff <before> <after>", err=True)
+        raise typer.Exit(1)
 
     before_path = os.path.join(snapshots_dir, f"index-{before}.db")
     after_path = os.path.join(snapshots_dir, f"index-{after}.db")
@@ -731,12 +751,12 @@ def search(
     else:
         typer.echo(f"\n找到 {len(results)} 个结果:")
         for row in results:
-            name = row.get("name", "?")
-            kind = row.get("kind", "?")
-            fpath = row.get("file_path", "?")
-            line = row.get("start_line", "?")
-            lang = row.get("language", "?")
-            sig = row.get("signature", "")
+            name = row["name"]
+            kind = row["kind"]
+            fpath = row["file_path"]
+            line = row["start_line"]
+            lang = row["language"]
+            sig = row["signature"] or ""
             sig_short = f"  ({sig[:50]}...)" if sig and len(sig) > 50 else f"  ({sig})" if sig else ""
             typer.echo(f"  {name} [{kind}] ({lang}) {fpath}:{line}{sig_short}")
 
