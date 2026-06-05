@@ -16,7 +16,7 @@ tws-graph-init 把代码图工具链的安装和初始化封装成一个标准�
 **执行前必须：** 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），获取准确的命令语法和错误处理策略。以下各步骤的命令仅为流程描述，实际执行以 found-tws-graph-usage 为准。
 
 ```
-① 检测 tws-graph 是否可用 → ② 安装（如需要）→ ③ 构建索引 → ④ 创建基线快照
+① 检测 tws-graph 是否可用 → ② 安装（如需要）→ ③ 构建索引 → ④ 创建基线快照 → ⑤ 安装 git hooks
 ```
 
 ## ① 检测 tws-graph 是否可用
@@ -63,12 +63,23 @@ Bash: tws-graph snapshot initial 2>&1
 → 后续 design-sync 可以 diff 到这个基线
 ```
 
+## ⑤ 安装 git hooks
+
+```
+Bash: tws-graph hooks install 2>&1
+
+→ 安装 post-commit / post-merge / post-checkout hooks
+→ 之后每次 commit/merge/checkout 自动增量同步索引
+→ 失败不阻塞，提示手动安装
+```
+
 ## 完成标准
 
 - [ ] tws-graph --version 正常输出
 - [ ] tws-graph index 成功运行
 - [ ] .tws/codegraph/index.db 文件存在且 > 0
 - [ ] tws-graph snapshot initial 已创建基线
+- [ ] tws-graph hooks install 已安装
 
 ## 在 TWS 流程中的位置
 
