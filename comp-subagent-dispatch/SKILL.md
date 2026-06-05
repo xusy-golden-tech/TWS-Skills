@@ -62,6 +62,20 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
 ❌ 主 agent 自己写调查 prompt 替代 comp skill 的工作
 ❌ 在 prompt 中写"读 xxx skill"——必须是"通过 Skill 工具加载 xxx skill"
 
+### 代码图查询任务补充
+
+当子任务涉及代码图查询（影响评估 / 设计同步 / 根因分析）时，dispatch prompt 中必须同时要求加载 `found-tws-graph-usage`：
+
+```
+你是一个执行子 agent。请完成以下任务：
+
+1. 通过 Skill 工具加载 comp-impact-assessment 和 found-tws-graph-usage
+2. 按 skill 中的指引执行影响评估
+...
+```
+
+原因：comp skill 只描述「查什么」，found-tws-graph-usage 提供「怎么查」的正确命令语法，防止 agent 编造不存在的命令。
+
 这是我们在 G-Assistant 修复项目里验证过的模式：妈妈（主 agent）管规划和验收，小念（子 agent）管执行。效果好。
 
 ---

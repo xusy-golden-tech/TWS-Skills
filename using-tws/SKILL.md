@@ -197,9 +197,6 @@ Skill(skill: "flow-documentation")
 ```
 
 4. 进入 flow skill 执行阶段——flow skill 已在第二步加载，门禁已通过，直接执行
-4.5. 派子 agent 时，如果任务涉及代码图查询（影响评估 / 设计同步 / 根因分析），
-     在 dispatch prompt 中明确要求子 agent 加载 found-tws-graph-usage：
-     「通过 Skill 工具加载 comp-impact-assessment 和 found-tws-graph-usage」
 
 5. 计划中的步骤是承诺，flow skill 中的流程是约束，两者共同保证执行质量
 
