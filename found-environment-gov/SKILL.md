@@ -1,11 +1,7 @@
-﻿---
-name: team-environment-gov
-description: 环境治理（全局规则，所有模式生效）。禁止擅自修改开发环境，先 mock 后请示
 ---
-
-<SUBAGENT-STOP>
-This rule applies to ALL modes, not just team mode. Skip only if instructed otherwise.
-</SUBAGENT-STOP>
+name: found-environment-gov
+description: 环境治理。禁止擅自修改开发环境，先 mock 后请示
+---
 
 # 环境治理
 

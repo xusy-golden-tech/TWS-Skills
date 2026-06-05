@@ -1,11 +1,7 @@
-﻿---
-name: team-impact-report
+---
+name: found-impact-report
 description: 测试异常和连锁影响上报。遇到任何异常或已知断链时必须报告，不允许过滤
 ---
-
-<SUBAGENT-STOP>
-If you were dispatched as a subagent for a specific task, skip this skill.
-</SUBAGENT-STOP>
 
 # 异常与影响上报
 
