@@ -125,7 +125,7 @@ graph TD
 
 ---
 
-## 基础（7 个）
+## 基础（8 个）
 
 | Skill | 路径 | 功能 |
 |-------|------|------|
@@ -136,6 +136,7 @@ graph TD
 | impact-report | `found-impact-report/SKILL.md` | 跨模块影响上报 |
 | review-methodology | `found-review-methodology/SKILL.md` | 审查方法论，审查必须新开子 agent |
 | review-triage | `found-review-triage/SKILL.md` | 审查报告分类和叫停规则 |
+| tws-graph-usage | `found-tws-graph-usage/SKILL.md` | tws-graph 代码图使用指南。所有需要查图的子 agent 必须加载，包含安装检查、命令语法、错误处理和最佳实践 |
 
 ---
 
@@ -157,6 +158,6 @@ graph TD
 
 | 工具 | 用途 | 相关技能 |
 |------|------|---------|
-| [tws-graph](https://pypi.org/project/tws-graph/) | 代码符号关系图引擎。预建 tree-sitter 索引 → agent 查图而非 grep。命令: index / calls / impact / trace / snapshot / diff | impact-assessment, design-sync, root-cause-analysis, flow-new-project |
+| [tws-graph](https://pypi.org/project/tws-graph/) | 代码符号关系图引擎。预建 tree-sitter 索引 → agent 查图而非 grep。命令: index / calls / impact / trace / snapshot / diff | tws-graph-usage（权威指南）, impact-assessment, design-sync, root-cause-analysis, flow-new-project |
 
 tws-graph 的索引数据库位于 `.tws/codegraph/index.db`，建议加入 `.gitignore`。

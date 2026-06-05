@@ -90,7 +90,7 @@ Tests use temporary SQLite databases (`tmp_path` fixture) — no external depend
 tws-graph lint       # runs all 5 rules: frontmatter, SUBAGENT-STOP, cross-refs, prefix, unreferenced
 ```
 
-The linter checks 40 skills across D:\TWS-Skills (root project). Currently: 0 errors, 0 warnings.
+The linter checks 41 skills across D:\TWS-Skills (root project). Currently: 0 errors, 0 warnings.
 
 ## Project Initialization (.tws/)
 
