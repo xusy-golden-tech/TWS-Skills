@@ -1,6 +1,6 @@
 ﻿---
 name: impact-assessment
-description: 动手前评估改动的影响范围——事前检查。涉及哪些模块、改什么接口、连锁影响。跟 team-impact-report（事后上报）是不同环节
+description: 动手前评估改动的影响范围——事前检查。涉及哪些模块、改什么接口、连锁影响。跟 found-impact-report（事后上报）是不同环节
 ---
 
 # 影响范围判断

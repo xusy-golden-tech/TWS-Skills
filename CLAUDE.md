@@ -6,26 +6,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 TWS (Thoughtful Workflow System) is a collection of structured AI skill prompts that enforce disciplined software development workflows. It has two parts:
 
-1. **Skill files** — 42 `SKILL.md` markdown files, each containing YAML frontmatter + instructions for Claude Code agents. These are the "product."
+1. **Skill files** — 40 `SKILL.md` markdown files, each containing YAML frontmatter + instructions for Claude Code agents. These are the "product."
 2. **tws-graph** — a Python CLI that pre-builds a tree-sitter-based code symbol graph (SQLite). Agents query it via bash instead of grep + read. Lives in `tws-graph/`.
 
 See `USAGE.md` for user-facing setup instructions.
 
 ## Architecture
 
-The skill system has five layers with strict call-direction rules:
+The skill system has four layers with strict call-direction rules:
 
 ```
 Entry (using-tws) → Flows (flow-*) → Components (comp-*) → Foundation (found-*)
-                                              ↕
-                                         Team (team-*)
 ```
 
-- **Entry**: Scene router — detects Solo/Team mode, loads the matching flow skill
+- **Entry**: Scene router — loads the matching flow skill
 - **Flows**: Workflow definitions (add-feature, fix-bug, hotfix, refactor, new-project, documentation, investigate)
 - **Components**: Executable units (design-doc, implementation, test, code-review, reproduce, root-cause-analysis, etc.) — loaded by sub-agents via the Skill tool
-- **Foundation**: Global rules (core-principles, artifact-split, review-methodology, review-triage)
-- **Team**: Multi-developer coordination (branch-flow, subagent-dispatch, etc.) — activated when CONTRACTS.md exists
+- **Foundation**: Global rules (7 skills: core-principles, artifact-split, review-methodology, review-triage, branch-flow, environment-gov, impact-report)
 - **Init**: `tws-init` (project bootstrapping) and `tws-graph-init` (code graph setup)
 
 Full dependency graph is in `SKILL-INDEX.md`.
@@ -38,12 +35,12 @@ Full dependency graph is in `SKILL-INDEX.md`.
 
 ## Key Rules for Skill Files
 
-- `<SUBAGENT-STOP>` tags are **required** on entry/flow/team skills, **forbidden** on component/foundation skills
+- `<SUBAGENT-STOP>` tags are **required** on entry/flow skills, **forbidden** on component/foundation skills
 - Every SKILL.md must have YAML frontmatter with `name` and `description`
 - Include a "Rationalization Prevention" table at the end of each skill
 - Update `SKILL-INDEX.md` when adding, removing, or renaming skills
 - Skills are written in Chinese — keep them in Chinese when editing
-- Skill directory name must match its layer prefix: `using-` / `flow-` / `comp-` / `found-` / `team-`
+- Skill directory name must match its layer prefix: `using-` / `flow-` / `comp-` / `found-`
 
 ## tws-graph
 
@@ -93,7 +90,7 @@ Tests use temporary SQLite databases (`tmp_path` fixture) — no external depend
 tws-graph lint       # runs all 5 rules: frontmatter, SUBAGENT-STOP, cross-refs, prefix, unreferenced
 ```
 
-The linter checks 42 skills across D:\TWS-Skills (root project). Currently: 0 errors, 0 warnings.
+The linter checks 40 skills across D:\TWS-Skills (root project). Currently: 0 errors, 0 warnings.
 
 ## Project Initialization (.tws/)
 
@@ -113,6 +110,3 @@ Session state is tracked in `.tws/sessions/` during active workflows. `.tws/` sh
 3. **Verify** — tests are the minimum; also check edge cases and design doc sync
 4. **Design Sync** — any code change must update the design doc, or it's incomplete
 
-## Mode Detection
-
-Every conversation: check (1) existence of `CONTRACTS.md`, (2) git author count > 1 → Team mode. Otherwise Solo mode. This check cannot be skipped or cached.

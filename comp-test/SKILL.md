@@ -58,7 +58,7 @@ default_retry_limit = 3  # 默认值，可在测试规约文件的 retry_limit �
 - 同一任务最多重试 retry_limit 次
 - 超过 → 标记为「阻塞」，上报开发者决策
 - 不隐藏失败，不跳过，不降级
-- 环境问题 → 走 team-environment-gov，不计入重试次数
+- 环境问题 → 走 found-environment-gov，不计入重试次数
 ```
 
 ### 配置示例

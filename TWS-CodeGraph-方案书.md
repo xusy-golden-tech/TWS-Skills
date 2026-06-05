@@ -229,7 +229,7 @@ tws-graph map
 ```
 改前（agent 自己推理）：
   1. 涉及哪些模块？→ agent 读文件判断
-  2. 改什么接口？→ agent 查 CONTRACTS.md
+  2. 改什么接口？→ agent 查 tws-graph impact
   3. 消费者是谁？→ agent 全局搜索引用
   4. 会不会有连锁影响？→ agent 追着读
   5. 要不要回测？→ agent 判断
@@ -239,7 +239,7 @@ tws-graph map
   1. tws-graph impact <改动的符号>
   2. tws-graph callers <改动的接口>
   3. 如果有路由变更 → tws-graph callees <路由handler>
-  4. agent 根据图输出 + 查 CONTRACTS.md → 形成完整报告
+  4. agent 根据图输出 → 形成完整报告
   5. tws-graph 拍快照（供改后 diff 用）
 
 原则：

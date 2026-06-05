@@ -68,8 +68,6 @@ graph TD
 
     A --> W[subagent-dispatch]
 
-    J --> X[contract-aware]
-    X --> Y[branch-flow]
 ```
 
 
@@ -127,12 +125,15 @@ graph TD
 
 ---
 
-## 基础（4 个）
+## 基础（7 个）
 
 | Skill | 路径 | 功能 |
 |-------|------|------|
 | artifact-split | `found-artifact-split/SKILL.md` | 文档/代码拆分规则，决定何时拆、怎么拆 |
+| branch-flow | `found-branch-flow/SKILL.md` | 分支管理规范 |
 | core-principles | `found-core-principles/SKILL.md` | TWS 全局规则详细说明，子 agent 按需读取 |
+| environment-gov | `found-environment-gov/SKILL.md` | 环境治理 |
+| impact-report | `found-impact-report/SKILL.md` | 跨模块影响上报 |
 | review-methodology | `found-review-methodology/SKILL.md` | 审查方法论，审查必须新开子 agent |
 | review-triage | `found-review-triage/SKILL.md` | 审查报告分类和叫停规则 |
 
@@ -146,23 +147,9 @@ graph TD
 |-----------------|-------------------|
 | 入口 skill（using-tws） | 所有组件 skill（design-doc, implementation, test 等）|
 | 流程 skill（flow-add-feature, flow-fix-bug 等） | 所有基础 skill（artifact-split, core-principles 等）|
-| 调度 skill（team-subagent-dispatch） | — |
-| 部分 team skill | — |
 | 组件 skill 中的人类专用（arch-decision） | — |
 
 设计意图：主 agent 管理流程编排，子 agent 只执行具体任务。SUBAGENT-STOP 在 flow/entry skill 上保护子 agent 不走错路，component/foundation skill 不加是因为子 agent 正需要它们。
-
----
-
-## 团队（5 个）
-
-| Skill | 路径 | 触发条件 |
-|-------|------|---------|
-| team-branch-flow | `team-branch-flow/SKILL.md` | CONTRACTS.md 存在 |
-| team-contract-aware | `team-contract-aware/SKILL.md` | CONTRACTS.md 存在 |
-| team-environment-gov | `team-environment-gov/SKILL.md` | 所有模式生效 |
-| team-impact-report | `team-impact-report/SKILL.md` | 所有模式生效 |
-| team-subagent-dispatch | `team-subagent-dispatch/SKILL.md` | 所有模式生效 |
 
 ---
 
