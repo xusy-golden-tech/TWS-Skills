@@ -64,6 +64,21 @@ class TestHooksInstall:
         assert "echo 'custom'" in content
         assert "tws-graph auto-sync" in content
 
+    def test_install_uses_unix_line_endings(self, tmp_path):
+        """Hook scripts must use LF, not CRLF. CRLF causes 'Exec format error' on Windows."""
+        from tws_graph.hooks import install_hooks
+
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "hooks").mkdir()
+
+        install_hooks(str(tmp_path))
+
+        hook_path = git_dir / "hooks" / "post-checkout"
+        content = hook_path.read_bytes()
+        assert b"\r" not in content, "Hook script contains CR (\\r) — use LF only"
+        assert b"#!/bin/bash\n" in content
+
     def test_install_worktree(self, tmp_path):
         from tws_graph.hooks import install_hooks
 

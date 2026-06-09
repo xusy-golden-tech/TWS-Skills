@@ -100,7 +100,7 @@ def install_hooks(project_root: str) -> tuple[int, int]:
             if existing:
                 content = f"{existing}\n\n{HOOK_SCRIPT}"
 
-        with open(hook_path, "w", encoding="utf-8") as f:
+        with open(hook_path, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
             f.write("\n")
 
@@ -154,7 +154,7 @@ def remove_hooks(project_root: str) -> int:
         new_content = re.sub(pattern, "", content, flags=re.DOTALL).strip()
 
         if new_content:
-            with open(hook_path, "w", encoding="utf-8") as f:
+            with open(hook_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(new_content)
                 f.write("\n")
         else:
