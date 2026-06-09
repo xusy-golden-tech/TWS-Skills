@@ -5,6 +5,24 @@ description: 后端测试。单元测试 + 集成测试 + API 测试。每层独
 
 # 后端测试
 
+## Step 0: 图中定位待测符号
+
+写测试之前，先用代码图定位待测的 public 方法和它们所属的类/模块。
+
+**必须操作：** 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），按其中指引完成前置检查和以下查询：
+
+```
+1. tws-graph --version              ← 检查可用性（不可用则 pip install -e tws-graph/）
+
+2. tws-graph search kind:class <模块名>     ← 定位待测类，标注文件:行号
+
+3. tws-graph calls <类名>                   ← 列出该类的所有 public 方法，确认测试覆盖范围
+
+4. tws-graph calls <方法> --inbound         ← 确认哪些调用者依赖此方法（回归测试范围）
+```
+
+错误处理详见 `found-tws-graph-usage`。图返回空时标注 provenance=heuristic，退回到 Grep + Read 手动追踪。
+
 ## 覆盖要求
 
 ```

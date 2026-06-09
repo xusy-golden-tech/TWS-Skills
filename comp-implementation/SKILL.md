@@ -11,6 +11,24 @@ description: 增量编码。按任务列表逐个实现，每步可验证。禁�
 
 编码不是自由创作，是按设计书和任务清单精准执行。
 
+## Step 0: 图中理解现有结构
+
+在动笔之前，先用代码图理解要修改的模块及其依赖关系。
+
+**必须操作：** 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），按其中指引完成前置检查和以下查询：
+
+```
+1. tws-graph --version              ← 检查可用性（不可用则 pip install -e tws-graph/）
+
+2. tws-graph search <模块/类名>      ← 定位要修改的符号，标注文件:行号
+
+3. tws-graph impact <符号> --depth 2 ← 查影响范围，确认改动会影响哪些调用者
+
+4. tws-graph calls <符号>            ← 查该符号的依赖，理解它调了谁
+```
+
+错误处理详见 `found-tws-graph-usage`。图返回空时标注 provenance=heuristic，退回到 Grep + Read 手动追踪。
+
 ## The Gate Function
 
 ```

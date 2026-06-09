@@ -64,17 +64,40 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
 
 ### 代码图查询任务补充
 
-当子任务涉及代码图查询（影响评估 / 设计同步 / 根因分析）时，dispatch prompt 中必须同时要求子 agent 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")）：
+**所有涉及代码调查的子任务**，dispatch prompt 中必须同时要求子 agent 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")）。
+
+覆盖以下所有 comp skill（这些 skill 的 Step 0 已强制要求加载 `found-tws-graph-usage`）：
+
+| 子任务 | comp skill | 图查询目的 |
+|--------|-----------|-----------|
+| 复现 | comp-reproduce | 定位相关符号、追踪调用链 |
+| 编码 | comp-implementation | 理解现有结构、确认影响范围 |
+| 代码审查 | comp-code-review | 验证接线完整性(D6)、架构健康度(D7) |
+| 测试 | comp-test | 确认回归测试范围 |
+| 后端编码(Python) | comp-backend-impl-python | 理解现有结构 |
+| 后端编码(Java) | comp-backend-impl-java | 理解现有结构 |
+| 前端编码 | comp-frontend-impl | 理解现有组件结构 |
+| 目标验证 | comp-goal-verify | 验证接线性(L3) |
+| 迁移计划 | comp-migration-plan | 分析依赖关系 |
+| 后端测试 | comp-backend-test | 定位待测符号 |
+| 前端测试 | comp-frontend-test | 定位待测组件 |
+| 影响评估 | comp-impact-assessment | 查影响范围 |
+| 设计同步 | comp-design-sync | 对比 before/after 快照 |
+| 根因分析 | comp-root-cause-analysis | 追踪调用链 |
+
+dispatch prompt 模板：
 
 ```
 你是一个执行子 agent。请完成以下任务：
 
-1. 通过 Skill 工具加载 comp-impact-assessment（Skill(skill: "comp-impact-assessment")）和 found-tws-graph-usage（Skill(skill: "found-tws-graph-usage")）
-2. 按 skill 中的指引执行影响评估
-...
+1. 通过 Skill 工具加载 {comp-skill-name}（Skill(skill: "{comp-skill-name}")）和 found-tws-graph-usage（Skill(skill: "found-tws-graph-usage")）
+2. 按 skill 中的指引执行任务
+3. 完成后汇报：做了什么、改了哪些文件、发现了什么
+
+任务背景：{简要描述任务上下文}
 ```
 
-原因：comp skill 只描述「查什么」，found-tws-graph-usage 提供「怎么查」的正确命令语法，防止 agent 编造不存在的命令。
+原因：comp skill 的 Step 0 描述「查什么」，found-tws-graph-usage 提供「怎么查」的正确命令语法，防止 agent 编造不存在的命令。两个 skill 缺一不可。
 
 主 agent 管规划和验收，子 agent 管执行。两者职责明确分离，避免主 agent 上下文膨胀。
 

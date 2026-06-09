@@ -9,6 +9,23 @@ description: 测试验证。运行测试、检查边界、报告异常。每次�
 
 **「看起来没问题」不是测试结果。测试输出才是。**
 
+## Step 0: 图中确认回归范围
+
+跑测试之前，先用代码图确认改动的影响范围，确保回归测试覆盖所有受影响的模块。
+
+**必须操作：** 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），按其中指引完成前置检查和以下查询：
+
+```
+1. tws-graph --version              ← 检查可用性（不可用则 pip install -e tws-graph/）
+
+2. tws-graph impact <修改的符号> --depth 2  ← 查哪些模块依赖了被修改的符号
+   → 这些模块的测试必须纳入回归范围
+
+3. tws-graph calls <修改的符号> --inbound    ← 确认所有调用者都被回归覆盖
+```
+
+错误处理详见 `found-tws-graph-usage`。图返回空时标注 provenance=heuristic，退回到 Grep + Read 手动追踪。
+
 ## The Gate Function
 
 ```

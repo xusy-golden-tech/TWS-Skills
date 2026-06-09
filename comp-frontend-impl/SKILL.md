@@ -9,6 +9,24 @@ description: 前端编码（React/Vue 等）。按设计书实现组件逻辑、
 
 **先搭骨架（组件 + 数据），再装血肉（样式 + 交互）。**
 
+## Step 0: 图中理解现有结构
+
+在动笔之前，先用代码图理解要修改的组件及其依赖关系。
+
+**必须操作：** 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），按其中指引完成前置检查和以下查询：
+
+```
+1. tws-graph --version              ← 检查可用性（不可用则 pip install -e tws-graph/）
+
+2. tws-graph search <组件/模块名>    ← 定位要修改的组件符号，标注文件:行号
+
+3. tws-graph impact <符号> --depth 2 ← 查影响范围，确认改动会影响哪些调用者
+
+4. tws-graph calls <符号>            ← 查该组件的依赖，理解它调了谁
+```
+
+错误处理详见 `found-tws-graph-usage`。图返回空时标注 provenance=heuristic，退回到 Grep + Read 手动追踪。
+
 ## The Gate Function
 
 ```

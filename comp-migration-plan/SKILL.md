@@ -9,6 +9,22 @@ description: 迁移/重构计划。把大改动拆成可独立验证的小步，
 
 **一步改完的不是重构，是重写。重构是一小步一小步走过去的。**
 
+## Step 0: 图中分析依赖
+
+制定迁移步骤之前，必须先用代码图理清模块间的依赖关系。
+
+**必须操作：** 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），按其中指引完成前置检查和以下查询：
+
+```
+1. tws-graph --version              ← 检查可用性（不可用则 pip install -e tws-graph/）
+
+2. tws-graph impact <待迁移模块> --depth 3  ← 查完整依赖树，识别所有受影响模块
+
+3. tws-graph calls <模块> --inbound         ← 查反向依赖，确认迁移不会断链
+```
+
+错误处理详见 `found-tws-graph-usage`。图返回空时标注 provenance=heuristic，退回到 Grep + Read 手动追踪。
+
 ## The Gate Function
 
 ```

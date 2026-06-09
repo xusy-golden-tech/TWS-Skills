@@ -17,6 +17,24 @@ description: 代码审查。检查逻辑正确性、测试覆盖、设计书同�
 
 规约是团队约定，不遵守规约 = 跟团队不一致。
 
+## Step 0: 图中验证调用链
+
+审查 D6（接线完整性）和 D7（架构健康度）时，必须用代码图验证调用关系和依赖结构，不能仅靠目视检查代码。
+
+**必须操作：** 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），按其中指引完成前置检查和以下查询：
+
+```
+1. tws-graph --version              ← 检查可用性（不可用则 pip install -e tws-graph/）
+
+2. tws-graph calls <新增符号>        ← 验证新增函数/方法是否被正确调用
+
+3. tws-graph impact <修改符号>       ← 检查修改是否引入了不必要的新耦合
+
+4. tws-graph trace <调用方> <被调方>  ← 验证接线路径是否完整
+```
+
+错误处理详见 `found-tws-graph-usage`。图返回空时标注 provenance=heuristic，退回到 Grep + Read 手动追踪。
+
 ## 审查清单
 
 审查代码时：

@@ -39,6 +39,24 @@ AFTER comp-test passes, BEFORE marking task done:
 4. ONLY THEN: 通过 → 标记完成；阻塞 → 上报主 agent
 ```
 
+## Step 0: 图中验证接线
+
+L3 接线性检查必须用代码图验证，不能仅靠 Grep 搜索字符串。
+
+**必须操作：** 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），按其中指引完成前置检查和以下查询：
+
+```
+1. tws-graph --version              ← 检查可用性（不可用则 pip install -e tws-graph/）
+
+2. tws-graph calls <新增API路由> --inbound  ← 验证前端是否调用了新路由
+
+3. tws-graph trace <前端组件> <后端路由>     ← 验证端到端接线路径完整
+
+4. tws-graph calls <新增模块>                ← 验证新增模块的导入和调用关系
+```
+
+错误处理详见 `found-tws-graph-usage`。图返回空时标注 provenance=heuristic，退回到 Grep + Read 手动追踪。
+
 ## 验证流程
 
 ### 第一步：提取目标
