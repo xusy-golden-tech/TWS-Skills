@@ -77,7 +77,7 @@ class TestHooksInstall:
         hook_path = git_dir / "hooks" / "post-checkout"
         content = hook_path.read_bytes()
         assert b"\r" not in content, "Hook script contains CR (\\r) — use LF only"
-        assert b"#!/usr/bin/env python3\n" in content
+        assert b"#!/usr/bin/env python\n" in content
 
     def test_install_worktree(self, tmp_path):
         from tws_graph.hooks import install_hooks

@@ -23,16 +23,18 @@ MARKER_END = "# <<< tws-graph auto-sync <<<"
 
 HOOK_SCRIPT = '''\
 # >>> tws-graph auto-sync >>>
-#!/usr/bin/env python3
+#!/usr/bin/env python
 import subprocess, sys
 try:
-    subprocess.Popen(
-        [sys.executable, "-m", "tws_graph", "sync", "."],
+    kwargs = dict(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
     )
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    subprocess.Popen([sys.executable, "-m", "tws_graph", "sync", "."], **kwargs)
 except Exception:
     pass
 # <<< tws-graph auto-sync <<<
