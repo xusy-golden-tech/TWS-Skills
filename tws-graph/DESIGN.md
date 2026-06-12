@@ -298,10 +298,12 @@ tws-graph search "kind:class AppContainer"
 
 ## 7. Git Hooks 自动同步
 
-安装 `tws-graph hooks install` 后，三个 git hook 会触发后台 `tws-graph sync`：
+安装 `tws-graph hooks install` 后，三个 git hook 会触发后台同步：
 - `post-commit`
 - `post-merge`
 - `post-checkout`
+
+Hook 脚本是纯 Python 脚本（无 bash 依赖），通过 `python -m tws_graph sync .` 调用 `__main__.py` 入口点。进程以独立会话/进程组后台运行：Unix 使用 `start_new_session=True`，Windows 使用 `CREATE_NEW_PROCESS_GROUP`。`stdout`/`stderr`/`stdin` 全部重定向到 `DEVNULL`，异常静默失败，不影响 git 操作。
 
 Hook 脚本用标记行（`# >>> tws-graph auto-sync >>>` / `# <<< ... <<<`）包裹，与其他 hook 内容共存。卸载时只删除 TWS 管理的块。
 
@@ -372,3 +374,7 @@ CLI 展示时直接读 `is_external` 列，打出 `[external]` 或 `[internal]` 
 | 不做 `watch`/`map` 命令 | 方案书中的原设计被 eval 后砍掉：hooks 替代了 watch，project-map 的手工维护已经够用 |
 | `calls --inbound` 替代 `callers` | 统一命令更易记，`--inbound` 语义明确 |
 | search 接受 list 参数 | 避免 shell 空格分割的引号问题 |
+
+## 13. 变更履历
+
+- 2026-06-12：Git Hook 机制从 bash 迁移到 Python — 消除 bash 依赖，提升跨平台可靠性；新增 `__main__.py` 入口，支持 `python -m tws_graph` 调用
