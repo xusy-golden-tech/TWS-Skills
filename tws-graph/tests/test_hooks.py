@@ -23,7 +23,7 @@ class TestHooksInstall:
             assert hook_path.is_file()
             content = hook_path.read_text()
             assert "tws-graph auto-sync" in content
-            assert "tws-graph sync" in content
+            assert "tws_graph" in content
 
     def test_install_is_idempotent(self, tmp_path):
         from tws_graph.hooks import install_hooks
@@ -77,7 +77,7 @@ class TestHooksInstall:
         hook_path = git_dir / "hooks" / "post-checkout"
         content = hook_path.read_bytes()
         assert b"\r" not in content, "Hook script contains CR (\\r) — use LF only"
-        assert b"#!/bin/bash\n" in content
+        assert b"#!/usr/bin/env python3\n" in content
 
     def test_install_worktree(self, tmp_path):
         from tws_graph.hooks import install_hooks
