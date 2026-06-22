@@ -45,6 +45,7 @@ from tws_graph.cypher.planner import (
     SortOperator,
     LimitOperator,
     DistinctOperator,
+    AggregateOperator,
 )
 from tws_graph.store.interface import Store
 
@@ -166,6 +167,8 @@ class Executor:
             return self._execute_limit(op)
         elif isinstance(op, DistinctOperator):
             return self._execute_distinct(op)
+        elif isinstance(op, AggregateOperator):
+            return self._execute_aggregate(op)
         else:
             raise CypherExecutionError(
                 f"Unknown operator type: {type(op).__name__}"
@@ -212,6 +215,10 @@ class Executor:
         edges (filtered by type and direction).  Each (source_row, edge)
         pair produces one output Row containing the original data plus the
         edge and target node.
+
+        If *op.optional* is True (OPTIONAL MATCH semantics), a source row
+        with no matching edges still produces one output Row with the target
+        and edge variables set to None (LEFT OUTER JOIN).
         """
         source_rows = self._execute_operator(op.source)
         result: list[Row] = []
@@ -219,6 +226,7 @@ class Executor:
 
         for row in source_rows:
             # Find node variables in the row (dicts with an "id" key).
+            found_any = False
             for _var_name, var_value in row.data.items():
                 if not (isinstance(var_value, dict) and "id" in var_value):
                     continue
@@ -228,6 +236,7 @@ class Executor:
                     kinds=kinds,
                     direction=op.direction,  # type: ignore[arg-type]
                 ):
+                    found_any = True
                     target_id = edge.get("target", "")
                     target_node = self._store.get_node_by_id(str(target_id))
                     if target_node is None:
@@ -237,6 +246,14 @@ class Executor:
                     if op.edge_variable:
                         new_data[op.edge_variable] = dict(edge)
                     result.append(Row(data=new_data))
+
+            # OPTIONAL MATCH: emit NULL row when no edges matched
+            if op.optional and not found_any:
+                new_data = dict(row.data)
+                new_data[op.target_variable] = None
+                if op.edge_variable:
+                    new_data[op.edge_variable] = None
+                result.append(Row(data=new_data))
 
         return result
 
@@ -331,6 +348,118 @@ class Executor:
                 seen.add(key)
                 result.append(row)
         return result
+
+    # ------------------------------------------------------------------
+    # AggregateOperator
+    # ------------------------------------------------------------------
+
+    def _execute_aggregate(self, op: AggregateOperator) -> list[Row]:
+        """Group source rows by *group_by* and compute aggregate functions.
+
+        Each aggregate is a tuple of ``(func_name, param_str, alias)``.
+        The parameter string is evaluated as a property path against each
+        row (e.g. ``"n.start_line"`` resolves to ``row["n"]["start_line"]``).
+        For COUNT(\"*\"), the parameter is ``"*"`` and the closure version
+        of the aggregate is used (no per-row value needed).
+        """
+        source_rows = self._execute_operator(op.source)
+        if not source_rows:
+            return []
+
+        # ------------------------------------------------------------------
+        # Group rows by group_by keys
+        # ------------------------------------------------------------------
+        groups: dict[tuple, list[Row]] = {}
+        for row in source_rows:
+            if op.group_by:
+                key = tuple(self._resolve_path(gb, row) for gb in op.group_by)
+            else:
+                key = ()  # single group for full aggregation
+            groups.setdefault(key, []).append(row)
+
+        # ------------------------------------------------------------------
+        # Compute aggregates per group
+        # ------------------------------------------------------------------
+        result: list[Row] = []
+        for group_key, group_rows in groups.items():
+            new_data: dict[str, object] = {}
+
+            # Emit group_by columns
+            for i, gb_col in enumerate(op.group_by):
+                new_data[gb_col] = group_key[i] if isinstance(group_key, tuple) else group_key
+
+            # Compute each aggregate
+            for func_name, param_str, alias in op.aggregates:
+                try:
+                    agg_func = get_aggregate(func_name)
+                except KeyError:
+                    raise CypherExecutionError(
+                        f"Unknown aggregate function: {func_name}"
+                    )
+
+                func_name_upper = func_name.upper()
+
+                if func_name_upper == "COUNT" and param_str == "*":
+                    # COUNT(*) — closure version (no per-row argument)
+                    total = 0
+                    for _ in group_rows:
+                        total += agg_func()
+                    new_data[alias] = total
+                else:
+                    # Accumulating aggregates: SUM, MIN, MAX, AVG, COLLECT
+                    # Determine initial accumulator
+                    if func_name_upper == "MIN" or func_name_upper == "MAX":
+                        acc = None
+                    elif func_name_upper == "COLLECT":
+                        acc = []
+                    elif func_name_upper == "AVG":
+                        acc = (0, 0)  # (sum, count)
+                    elif func_name_upper == "SUM":
+                        acc = 0
+                    else:
+                        # Custom aggregate — try with None initial
+                        acc = None
+
+                    first_row = True
+                    for r in group_rows:
+                        val = self._resolve_path(param_str, r)
+                        if first_row and acc is None and func_name_upper in ("MIN", "MAX"):
+                            acc = val
+                            first_row = False
+                        else:
+                            acc = agg_func(acc, val)
+
+                    # Finalize
+                    if func_name_upper == "AVG":
+                        new_data[alias] = acc[0] / acc[1] if acc[1] else None
+                    else:
+                        new_data[alias] = acc
+
+            result.append(Row(data=new_data))
+
+        return result
+
+    @staticmethod
+    def _resolve_path(path: str, row: Row) -> object:
+        """Resolve a dot-separated property path against a Row.
+
+        Examples:
+            ``"n"`` → ``row["n"]``
+            ``"n.name"`` → ``row["n"]["name"]``
+            ``"*"`` → ``"*"`` (pass-through for COUNT(*))
+        """
+        if not path or path == "*":
+            return "*"
+        parts = path.split(".")
+        val: object = row[parts[0]]
+        for part in parts[1:]:
+            if isinstance(val, dict):
+                val = val.get(part)
+            elif val is None:
+                return None
+            else:
+                val = getattr(val, part, None)
+        return val
 
     # ==================================================================
     # Expression Evaluator
@@ -457,6 +586,21 @@ class Executor:
                 return False
         elif op == "IN":
             return left_val in right_val
+        elif op == "XOR":
+            # Logical XOR: (left and not right) or (not left and right)
+            return (left_val and not right_val) or (not left_val and right_val)
+        elif op == "STARTS WITH":
+            if left_val is None or right_val is None:
+                return False
+            return str(left_val).startswith(str(right_val))
+        elif op == "ENDS WITH":
+            if left_val is None or right_val is None:
+                return False
+            return str(left_val).endswith(str(right_val))
+        elif op == "CONTAINS":
+            if left_val is None or right_val is None:
+                return False
+            return str(right_val) in str(left_val)
         else:
             raise CypherExecutionError(f"Unknown binary operator: {op}")
 

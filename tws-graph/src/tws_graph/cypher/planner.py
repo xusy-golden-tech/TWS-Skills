@@ -35,6 +35,7 @@ from tws_graph.cypher.ast import (
     StarExpression,
     Literal,
     Parameter,
+    Span,
 )
 from tws_graph.cypher.errors import CypherSemanticError
 
@@ -99,6 +100,7 @@ class EdgeExpandOperator(LogicalOperator):
         direction: ``"out"``, ``"in"``, or ``"both"``.
         edge_variable: Optional variable bound to the traversed edge.
         target_variable: Variable bound to the target node.
+        optional: If True, use LEFT OUTER JOIN semantics (OPTIONAL MATCH).
     """
 
     source: LogicalOperator
@@ -106,6 +108,7 @@ class EdgeExpandOperator(LogicalOperator):
     direction: str = "out"
     edge_variable: Optional[str] = None
     target_variable: str = ""
+    optional: bool = False
 
 
 @dataclass(frozen=True)
@@ -160,6 +163,24 @@ class DistinctOperator(LogicalOperator):
     source: LogicalOperator
 
 
+@dataclass(frozen=True)
+class AggregateOperator(LogicalOperator):
+    """Aggregation: GROUP BY + aggregate functions.
+
+    Attributes:
+        source: Upstream operator whose rows are aggregated.
+        group_by: GROUP BY field names (variable/property paths).
+                  An empty list means aggregate all rows into one group.
+        aggregates: List of ``(func_name, param_str, alias)`` tuples.
+                    func_name e.g. "COUNT", "SUM"; param_str e.g.
+                    ``"*"`` or ``"n.start_line"``; alias e.g. "cnt".
+    """
+
+    source: LogicalOperator
+    group_by: list[str] = field(default_factory=list)
+    aggregates: list[tuple[str, str, str]] = field(default_factory=list)
+
+
 # ============================================================================
 # Planner
 # ============================================================================
@@ -188,6 +209,8 @@ class Planner:
         Raises:
             CypherSemanticError: If the query is semantically invalid.
         """
+        from tws_graph.cypher.aggregates import list_aggregates
+
         query = statement.query
 
         # ── Guard clauses ───────────────────────────────────────────
@@ -203,6 +226,8 @@ class Planner:
 
         # ── Collect defined variables ───────────────────────────────
         defined_vars = self._collect_match_variables(query.match)
+        for om in query.optional_matches:
+            defined_vars |= self._collect_match_variables(om)
 
         # ── Semantic checks: variable references ────────────────────
         if query.where is not None:
@@ -218,15 +243,64 @@ class Planner:
         if query.where is not None:
             root = FilterOperator(source=root, predicate=query.where.expression)
 
-        # RETURN DISTINCT → DistinctOperator (before projection)
-        if query.return_clause.distinct:
-            root = DistinctOperator(source=root)
+        # OPTIONAL MATCH → EdgeExpandOperator with optional=True
+        for om in query.optional_matches:
+            root = self._build_match_scan_optional(om, root)
 
-        # RETURN → ProjectOperator
-        root = ProjectOperator(
-            source=root,
-            items=list(query.return_clause.items),
+        # ── Aggregate detection ─────────────────────────────────────
+        agg_names = set(list_aggregates())
+        has_aggregate, agg_items, non_agg_return_items = self._classify_return_items(
+            query.return_clause.items, agg_names
         )
+
+        if has_aggregate:
+            # Extract group_by from non-aggregate RETURN items.
+            # Use the full expression path (e.g. "n.kind") not just
+            # the root identifier, so the executor can resolve it
+            # correctly against rows.
+            group_by: list[str] = []
+            for ri in non_agg_return_items:
+                gb_path = self._expr_to_group_path(ri.expression)
+                if gb_path and gb_path not in group_by:
+                    group_by.append(gb_path)
+
+            # Build aggregate tuples
+            agg_tuples: list[tuple[str, str, str]] = []
+            for ri in agg_items:
+                fc = ri.expression
+                alias = ri.alias if ri.alias else self._expr_name_str(fc)
+                param_str = self._agg_param_str(fc)
+                agg_tuples.append((fc.name, param_str, alias))
+
+            root = AggregateOperator(
+                source=root,
+                group_by=group_by,
+                aggregates=agg_tuples,
+            )
+
+            # Build ProjectOperator with aggregate result references
+            proj_items: list[ReturnItem] = []
+            for gb in group_by:
+                proj_items.append(ReturnItem(
+                    expression=Identifier(name=gb, span=Span(0, 0, 0, 0)),
+                    alias=gb,
+                ))
+            for _fn, _ps, alias in agg_tuples:
+                proj_items.append(ReturnItem(
+                    expression=Identifier(name=alias, span=Span(0, 0, 0, 0)),
+                    alias=alias,
+                ))
+            root = ProjectOperator(source=root, items=proj_items)
+        else:
+            # RETURN DISTINCT → DistinctOperator (before projection)
+            if query.return_clause.distinct:
+                root = DistinctOperator(source=root)
+
+            # RETURN → ProjectOperator
+            root = ProjectOperator(
+                source=root,
+                items=list(query.return_clause.items),
+            )
 
         # ORDER BY → SortOperator
         if query.order_by is not None:
@@ -360,3 +434,146 @@ class Planner:
         elif isinstance(expr, (StarExpression, Literal, Parameter)):
             return set()
         return set()
+
+    # -----------------------------------------------------------------
+    # OPTIONAL MATCH helper
+    # -----------------------------------------------------------------
+
+    def _build_match_scan_optional(
+        self,
+        match: MatchClause,
+        source: LogicalOperator,
+    ) -> LogicalOperator:
+        """Build an EdgeExpandOperator chain for *match*, wrapping *source*.
+
+        Each EdgeExpandOperator is marked ``optional=True`` to produce
+        LEFT OUTER JOIN semantics.
+        """
+        # Build the entry ScanOperator for the optional pattern's start node
+        pattern = match.pattern
+        start = pattern.node
+        label = start.labels[0] if start.labels else None
+
+        # For OPTIONAL MATCH, scan the start node
+        opt_root: LogicalOperator = ScanOperator(
+            variable=start.name or "",
+            label=label,
+        )
+
+        # Chain through pattern elements — each marked optional
+        for elem in pattern.chain:
+            expand = self._build_edge_expand(opt_root, elem)
+            # Mark as optional
+            opt_root = EdgeExpandOperator(
+                source=expand.source,
+                edge_types=list(expand.edge_types),
+                direction=expand.direction,
+                edge_variable=expand.edge_variable,
+                target_variable=expand.target_variable,
+                optional=True,
+            )
+
+        # We cannot easily express a cross-join with optional semantics
+        # in the current operator model. For now, produce the OPTIONAL
+        # MATCH chain independently, linked to the source via the optional
+        # flag on EdgeExpandOperator built from the source.
+
+        # Build EdgeExpandOperator from *source* for each pattern element
+        for elem in pattern.chain:
+            source = EdgeExpandOperator(
+                source=source,
+                edge_types=list(elem.rel.types) if elem.rel and elem.rel.types else [],
+                direction={
+                    Direction.RIGHT: "out",
+                    Direction.LEFT: "in",
+                    Direction.BOTH: "both",
+                }.get(elem.rel.direction if elem.rel else Direction.RIGHT, "out"),
+                edge_variable=elem.rel.name if elem.rel else None,
+                target_variable=elem.node.name or "",
+                optional=True,
+            )
+
+        return source
+
+    # -----------------------------------------------------------------
+    # Aggregate detection helpers
+    # -----------------------------------------------------------------
+
+    def _classify_return_items(
+        self,
+        items: list[ReturnItem],
+        agg_names: set[str],
+    ) -> tuple:
+        """Separate RETURN items into aggregate and non-aggregate.
+
+        Returns:
+            (has_aggregate: bool, agg_items: list[ReturnItem], non_agg: list[ReturnItem])
+        """
+        agg_items: list[ReturnItem] = []
+        non_agg: list[ReturnItem] = []
+        for item in items:
+            if self._is_aggregate_expr(item.expression, agg_names):
+                agg_items.append(item)
+            else:
+                non_agg.append(item)
+        return bool(agg_items), agg_items, non_agg
+
+    def _is_aggregate_expr(self, expr: Expression, agg_names: set[str]) -> bool:
+        """Return True if *expr* is (or contains) an aggregate FunctionCall."""
+        if isinstance(expr, FunctionCall):
+            return expr.name.upper() in agg_names
+        return False
+
+    def _agg_param_str(self, fc: FunctionCall) -> str:
+        """Convert a FunctionCall's first argument to its string representation.
+
+        Examples:
+            COUNT(*) → "*"
+            SUM(n.start_line) → "n.start_line"
+            MIN(n.name) → "n.name"
+        """
+        if not fc.args:
+            return "*"
+        arg = fc.args[0]
+        if isinstance(arg, StarExpression):
+            return "*"
+        if isinstance(arg, PropertyAccess):
+            return f"{self._expr_name_str(arg.obj)}.{arg.key}"
+        if isinstance(arg, Identifier):
+            return arg.name
+        if isinstance(arg, Literal):
+            return str(arg.value)
+        return "*"
+
+    def _expr_name_str(self, expr: Expression) -> str:
+        """Derive a string name from an expression (for alias generation)."""
+        if isinstance(expr, Identifier):
+            return expr.name
+        elif isinstance(expr, PropertyAccess):
+            return f"{self._expr_name_str(expr.obj)}.{expr.key}"
+        elif isinstance(expr, Literal):
+            return str(expr.value)
+        elif isinstance(expr, FunctionCall):
+            args_str = ", ".join(
+                self._expr_name_str(a) for a in expr.args
+            ) if expr.args else "*"
+            return f"{expr.name}({args_str})"
+        elif isinstance(expr, BinaryOp):
+            return "expr"
+        elif isinstance(expr, UnaryOp):
+            return "expr"
+        return "col"
+
+    def _expr_to_group_path(self, expr: Expression) -> str:
+        """Convert an expression to a resolvable property path for GROUP BY.
+
+        Examples:
+            Identifier("n") → "n"
+            PropertyAccess(obj=Identifier("n"), key="kind") → "n.kind"
+        """
+        if isinstance(expr, Identifier):
+            return expr.name
+        elif isinstance(expr, PropertyAccess):
+            return f"{self._expr_to_group_path(expr.obj)}.{expr.key}"
+        # For anything else, derive a name
+        return self._expr_name_str(expr)
