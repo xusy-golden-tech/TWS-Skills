@@ -23,7 +23,7 @@ _KEYWORDS: set[str] = {
     "MATCH", "OPTIONAL", "WHERE", "RETURN", "ORDER", "BY",
     "SKIP", "LIMIT", "AS", "DISTINCT",
     "AND", "OR", "XOR", "NOT", "IS", "NULL", "TRUE", "FALSE",
-    "ASC", "DESC", "CONTAINS", "STARTS", "ENDS", "IN",
+    "ASC", "DESC", "CONTAINS", "STARTS", "ENDS", "WITH", "IN",
 }
 
 
