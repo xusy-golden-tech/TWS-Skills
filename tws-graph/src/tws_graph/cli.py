@@ -9,6 +9,7 @@ Commands:
     diff        Compare two snapshots
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -20,6 +21,17 @@ from . import __version__
 from .db.connection import DatabaseConnection
 from .db.queries import QueryBuilder
 from .indexer.orchestrator import ExtractionOrchestrator
+from .indexer.scanner import scan_directory
+from .indexer.language_detect import detect_language
+from .pipeline.engine import PipelineEngine
+from .pipeline.passes import (
+    StatFilterPass,
+    ParseExtractPass,
+    NodeInsertPass,
+    EdgeInsertPass,
+    CrossFileResolvePass,
+)
+from .store import SqliteStore
 from .graph.traversal import GraphTraverser
 from .diff import (
     save_snapshot, list_snapshots, compare_snapshots,
@@ -82,6 +94,123 @@ def _resolve_node(queries: QueryBuilder, symbol: str):
     return None
 
 
+def _get_store(db_path: str) -> SqliteStore:
+    """Open or create the index database via SqliteStore.
+
+    For new databases, runs the Store migration system to create the full
+    schema. For existing databases (potentially created by the old schema),
+    ensures the ``properties`` column exists on the ``nodes`` table.
+    """
+    import sqlite3 as _sqlite3
+
+    db_dir = os.path.dirname(db_path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
+    is_new = not os.path.exists(db_path)
+
+    if is_new:
+        # Fresh database: use the full migration system
+        from .store.migrations import MigrationRunner
+
+        conn = _sqlite3.connect(db_path, isolation_level=None)
+        conn.row_factory = _sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL")
+        runner = MigrationRunner(conn)
+        runner.migrate()
+        conn.close()
+    else:
+        # Existing database: ensure properties column exists
+        # (old schema created by DatabaseConnection.initialize() lacks it)
+        conn = _sqlite3.connect(db_path, isolation_level=None)
+        conn.row_factory = _sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL")
+        try:
+            conn.execute("SELECT properties FROM nodes LIMIT 1")
+        except _sqlite3.OperationalError:
+            conn.execute(
+                "ALTER TABLE nodes ADD COLUMN properties TEXT DEFAULT '{}'"
+            )
+        try:
+            conn.execute("SELECT properties FROM edges LIMIT 1")
+        except _sqlite3.OperationalError:
+            conn.execute(
+                "ALTER TABLE edges ADD COLUMN properties TEXT DEFAULT '{}'"
+            )
+        conn.close()
+
+    return SqliteStore(db_path)
+
+
+def _build_pipeline_engine(store: SqliteStore) -> PipelineEngine:
+    """Build the standard 5-Pass indexing pipeline.
+
+    Passes (in dependency order):
+        1. StatFilterPass    — mtime/size filtering
+        2. ParseExtractPass  — tree-sitter parse + extract
+        3. NodeInsertPass    — write symbol nodes to Store
+        4. EdgeInsertPass    — write call/ref edges to Store
+        5. CrossFileResolvePass — resolve cross-file dangling edges
+    """
+    engine = PipelineEngine(store=store)
+    engine.register_pass(StatFilterPass())
+    engine.register_pass(ParseExtractPass())
+    engine.register_pass(NodeInsertPass())
+    engine.register_pass(EdgeInsertPass())
+    engine.register_pass(CrossFileResolvePass())
+    return engine
+
+
+def _cleanup_deleted_files(store: SqliteStore, current_files: list[str]) -> None:
+    """Remove database records for files that no longer exist on disk."""
+    existing = {f["path"] for f in store.get_all_files()}
+    current = set(current_files)
+    removed = existing - current
+    for path in removed:
+        store.delete_file(path)
+
+
+def _upsert_file_records(
+    store: SqliteStore,
+    processed_files: list[str],
+    root_dir: str,
+) -> None:
+    """Upsert file records for files that passed through the pipeline.
+
+    This populates the file record table (path, content_hash, language, size,
+    modified_at) so that StatFilterPass can correctly skip unchanged files on
+    subsequent incremental runs.
+    """
+    for file_path in processed_files:
+        full_path = os.path.join(root_dir, file_path)
+        try:
+            stat = os.stat(full_path)
+        except OSError:
+            continue
+
+        # Read content and compute hash
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except OSError:
+            continue
+
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        language = detect_language(file_path)
+
+        # Count nodes for this file
+        node_count = sum(1 for _ in store.iter_nodes_by_file(file_path))
+
+        store.upsert_file(
+            path=file_path,
+            content_hash=content_hash,
+            language=language,
+            node_count=node_count,
+            size=stat.st_size,
+            modified_at=int(stat.st_mtime),
+        )
+
+
 # ============================================================================
 # index
 # ============================================================================
@@ -95,57 +224,84 @@ def index(
     """索引项目的所有源文件，构建代码关系图。"""
     root_dir = os.path.abspath(project_path)
     default_db = os.path.join(root_dir, DEFAULT_DB)
-    db = _get_db(db_path or default_db)
-    queries = QueryBuilder(db.conn)
+    db_path_resolved = db_path or default_db
 
-    orchestrator = ExtractionOrchestrator(
-        root_dir=root_dir,
-        queries=queries,
-    )
+    # 1. Scan source files
+    files = scan_directory(root_dir)
 
-    typer.echo(f"正在索引: {os.path.abspath(project_path)}")
-    result = orchestrator.index_all(force=force)
+    # 2. Create Store and clean up deleted files
+    store = _get_store(db_path_resolved)
+    _cleanup_deleted_files(store, files)
 
-    if result.files_indexed == 0 and result.files_skipped == 0:
+    if not files:
         from .indexer.registry import get_all_extensions
         exts = sorted(get_all_extensions())
         typer.echo(f"  警告: 未找到源文件 ({', '.join(exts)})", err=True)
+        store.close()
         raise typer.Exit(1)
 
-    db.optimize()
+    # 3. Build and execute pipeline
+    typer.echo(f"正在索引: {root_dir}")
+    engine = _build_pipeline_engine(store)
+    ctx = engine.execute(files=list(files), root_dir=root_dir, force=force)
 
-    typer.echo(f"  索引完成: {result.files_indexed} 个文件"
-               f"{f' (+{result.files_skipped} 跳过)' if result.files_skipped else ''},"
-               f" {result.nodes_created} 个符号,"
-               f" {result.edges_created} 条关系,"
-               f" 耗时 {result.duration_ms}ms")
+    # 4. Manage file records (for StatFilterPass on subsequent runs)
+    _upsert_file_records(store, ctx.files, root_dir)
 
-    if result.files_errored:
-        typer.echo(f"  {result.files_errored} 个文件解析失败", err=True)
-        for err in result.errors[:3]:
-            typer.echo(f"    - {err.get('file_path', '')}: {err.get('message', '')}", err=True)
+    # 5. Post-processing
+    store.rebuild_fts()
+    store.optimize()
 
-    # Also index skill files if present (before final stats)
-    skill_count = _index_skills(root_dir, queries)
+    # 6. Map pipeline context to output
+    files_indexed = len(ctx.files)
+    files_skipped = ctx.metadata.get("filtered_out", 0)
+    nodes_created = ctx.metadata.get("node_count", 0)
+    edges_created = ctx.metadata.get("edge_count", 0)
+    files_errored = sum(
+        1 for results in ctx.parsed_results.values()
+        if results.get("errors")
+    )
 
-    stats = queries.get_stats()
+    typer.echo(f"  索引完成: {files_indexed} 个文件"
+               f"{f' (+{files_skipped} 跳过)' if files_skipped else ''},"
+               f" {nodes_created} 个符号,"
+               f" {edges_created} 条关系,"
+               f" 耗时 {ctx.duration_ms}ms")
+
+    if files_errored:
+        typer.echo(f"  {files_errored} 个文件解析失败", err=True)
+        for err in ctx.errors[:3]:
+            err_file = err.get("file_path", "")
+            err_msg = err.get("error", str(err))
+            typer.echo(f"    - {err_file}: {err_msg}", err=True)
+
+    # 7. Skill indexing (uses store interface)
+    store.flush()
+    skill_count = _index_skills(root_dir, store)
+
+    # 8. Database stats
+    stats = store.stats()
     typer.echo(f"  数据库: {stats['node_count']} 节点, {stats['edge_count']} 边,"
                f" {stats['file_count']} 文件")
 
-    if result.resolve_result and result.resolve_result.total_checked > 0:
-        rr = result.resolve_result
-        typer.echo(f"  边解析: {rr.resolved} 补全, {rr.ambiguous} 歧义, {rr.unresolved} 未解析"
-                   f" (共检查 {rr.total_checked} 条)")
-
-    if result.framework_result and result.framework_result.frameworks_detected:
-        fr = result.framework_result
-        typer.echo(f"  框架检测: {', '.join(fr.frameworks_detected)}, {fr.routes_found} 路由")
+    # 9. Resolve stats
+    cross_file = ctx.metadata.get("cross_file_resolved", {})
+    if cross_file:
+        resolved = cross_file.get("resolved", 0)
+        ambiguous = cross_file.get("ambiguous", 0)
+        unresolved = cross_file.get("unresolved", 0)
+        total_checked = resolved + ambiguous + unresolved
+        if total_checked > 0:
+            typer.echo(f"  边解析: {resolved} 补全, {ambiguous} 歧义, {unresolved} 未解析"
+                       f" (共检查 {total_checked} 条)")
 
     if skill_count > 0:
         typer.echo(f"  技能索引: {skill_count} 个 TWS skill")
 
+    store.close()
 
-def _index_skills(root_dir: str, queries) -> int:
+
+def _index_skills(root_dir: str, store) -> int:
     """Index TWS skill .md files if the project contains them."""
     from .indexer.skill_parser import (
         extract_skill_file, extract_skill_refs,
@@ -164,22 +320,23 @@ def _index_skills(root_dir: str, queries) -> int:
         if not content:
             continue
 
-        # Delete old skill data
-        queries._exec("DELETE FROM nodes WHERE file_path = ? AND kind = 'skill'", (rel_path,))
+        # Delete old skill data via Store interface
+        store.delete_nodes_by_file(rel_path, kind="skill")
 
         # Extract skill node
         extraction = extract_skill_file(rel_path, content)
         if extraction.nodes:
-            queries.insert_nodes(extraction.nodes)
+            store.insert_nodes(extraction.nodes)
             count += 1
 
         # Extract reference edges from body (using dir_names for matching)
         ref_edges = extract_skill_refs(rel_path, content, dir_names, skill_paths)
         if ref_edges:
-            queries.insert_edges(ref_edges)
+            store.insert_edges(ref_edges)
 
-    # Rebuild FTS after skill nodes
-    queries.rebuild_fts()
+    # Flush buffered writes, then rebuild FTS after skill nodes
+    store.flush()
+    store.rebuild_fts()
 
     return count
 
@@ -593,36 +750,59 @@ def sync(
     """
     root_dir = os.path.abspath(project_path)
     default_db = os.path.join(root_dir, DEFAULT_DB)
-    db = _get_db(db_path or default_db)
-    queries = QueryBuilder(db.conn)
+    db_path_resolved = db_path or default_db
 
-    orchestrator = ExtractionOrchestrator(
-        root_dir=root_dir,
-        queries=queries,
-    )
+    # 1. Scan source files
+    files = scan_directory(root_dir)
 
-    result = orchestrator.index_all(force=False)
+    # 2. Create Store and clean up deleted files
+    store = _get_store(db_path_resolved)
+    _cleanup_deleted_files(store, files)
 
-    if result.files_indexed == 0 and result.files_skipped == 0:
+    if not files:
         from .indexer.registry import get_all_extensions
         exts = sorted(get_all_extensions())
         typer.echo(f"  警告: 未找到源文件 ({', '.join(exts)})", err=True)
+        store.close()
         raise typer.Exit(1)
 
-    db.optimize()
+    # 3. Build and execute pipeline (force=False for incremental stat filter)
+    engine = _build_pipeline_engine(store)
+    ctx = engine.execute(files=list(files), root_dir=root_dir, force=False)
 
-    if result.files_indexed == 0:
-        typer.echo(f"  同步完成: 无变化 ({result.files_skipped} 个文件无需更新)"
-                   f" 耗时 {result.duration_ms}ms")
+    # 4. Manage file records for changed files
+    _upsert_file_records(store, ctx.files, root_dir)
+
+    # 5. Post-processing
+    store.rebuild_fts()
+    store.optimize()
+
+    # 6. Map pipeline context to output
+    files_indexed = len(ctx.files)
+    files_skipped = ctx.metadata.get("filtered_out", 0)
+    nodes_created = ctx.metadata.get("node_count", 0)
+    edges_created = ctx.metadata.get("edge_count", 0)
+
+    if files_indexed == 0:
+        typer.echo(f"  同步完成: 无变化 ({files_skipped} 个文件无需更新)"
+                   f" 耗时 {ctx.duration_ms}ms")
     else:
-        typer.echo(f"  同步完成: {result.files_indexed} 个文件更新"
-                   f"{f' (+{result.files_skipped} 跳过)' if result.files_skipped else ''},"
-                   f" {result.nodes_created} 符号, {result.edges_created} 关系,"
-                   f" 耗时 {result.duration_ms}ms")
+        typer.echo(f"  同步完成: {files_indexed} 个文件更新"
+                   f"{f' (+{files_skipped} 跳过)' if files_skipped else ''},"
+                   f" {nodes_created} 符号, {edges_created} 关系,"
+                   f" 耗时 {ctx.duration_ms}ms")
 
-    if result.resolve_result and result.resolve_result.total_checked > 0:
-        rr = result.resolve_result
-        typer.echo(f"  边解析: {rr.resolved} 补全, {rr.ambiguous} 歧义, {rr.unresolved} 未解析")
+    # 7. Resolve stats
+    cross_file = ctx.metadata.get("cross_file_resolved", {})
+    if cross_file:
+        resolved = cross_file.get("resolved", 0)
+        ambiguous = cross_file.get("ambiguous", 0)
+        unresolved = cross_file.get("unresolved", 0)
+        total_checked = resolved + ambiguous + unresolved
+        if total_checked > 0:
+            typer.echo(f"  边解析: {resolved} 补全, {ambiguous} 歧义, {unresolved} 未解析")
+
+    store.close()
 
 
 # ============================================================================
