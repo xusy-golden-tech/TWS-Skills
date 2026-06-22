@@ -709,12 +709,12 @@ class Parser:
         # Integer literal
         if self._check(TokenType.INTEGER):
             tok = self._lexer.next()
-            return Literal(value=tok.value, span=self._span(tok, tok))
+            return Literal(value=int(tok.value), span=self._span(tok, tok))
 
         # Float literal
         if self._check(TokenType.FLOAT):
             tok = self._lexer.next()
-            return Literal(value=tok.value, span=self._span(tok, tok))
+            return Literal(value=float(tok.value), span=self._span(tok, tok))
 
         # Boolean TRUE
         if self._check_kw("TRUE"):

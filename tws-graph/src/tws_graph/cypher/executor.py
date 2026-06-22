@@ -30,6 +30,7 @@ from tws_graph.cypher.ast import (
     PropertyAccess,
     StarExpression,
     UnaryOp,
+    CaseExpression,
     Expression,
     ReturnItem,
 )
@@ -46,6 +47,9 @@ from tws_graph.cypher.planner import (
     LimitOperator,
     DistinctOperator,
     AggregateOperator,
+    UnionOperator,
+    UnwindOperator,
+    SubqueryFilterOperator,
 )
 from tws_graph.store.interface import Store
 
@@ -128,6 +132,7 @@ class Executor:
         """
         self._store = store
         self._result_columns: list[str] = []
+        self._correlation_row: Optional[Row] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -169,6 +174,12 @@ class Executor:
             return self._execute_distinct(op)
         elif isinstance(op, AggregateOperator):
             return self._execute_aggregate(op)
+        elif isinstance(op, UnionOperator):
+            return self._execute_union(op)
+        elif isinstance(op, UnwindOperator):
+            return self._execute_unwind(op)
+        elif isinstance(op, SubqueryFilterOperator):
+            return self._execute_subquery_filter(op)
         else:
             raise CypherExecutionError(
                 f"Unknown operator type: {type(op).__name__}"
@@ -179,7 +190,31 @@ class Executor:
     # ------------------------------------------------------------------
 
     def _execute_scan(self, op: ScanOperator) -> list[Row]:
-        """Iterate all nodes, optionally filtering by label (kind)."""
+        """Iterate all nodes, optionally filtering by label (kind).
+
+        Virtual scan (variable="" and label=None) produces a single
+        empty row — used as the source for UNWIND or WITH without MATCH.
+
+        Correlated scan: if a correlation row is set and the scan variable
+        matches, use the correlation row's value instead of scanning.
+        """
+        # Virtual scan for UNWIND/WITH without MATCH
+        if not op.variable and op.label is None:
+            return [Row()]
+
+        # Correlated scan: use outer row's value for the variable
+        if (
+            self._correlation_row is not None
+            and op.variable
+            and op.variable in self._correlation_row.data
+        ):
+            val = self._correlation_row[op.variable]
+            if isinstance(val, dict) and "id" in val:
+                # Filter by label if needed
+                if op.label and val.get("kind") != op.label:
+                    return []
+                return [Row(data={op.variable: val})]
+
         rows: list[Row] = []
         for node in self._store.iter_all_nodes():
             if op.label and node.get("kind") != op.label:
@@ -461,6 +496,89 @@ class Executor:
                 val = getattr(val, part, None)
         return val
 
+    # ------------------------------------------------------------------
+    # Plan-level execution (for sub-plans)
+    # ------------------------------------------------------------------
+
+    def _execute_plan(self, plan: LogicalPlan) -> list[Row]:
+        """Execute a full LogicalPlan and return its rows.
+
+        Used by UnionOperator and SubqueryFilterOperator to execute
+        independent sub-plans.
+        """
+        return self._execute_operator(plan.root)
+
+    # ------------------------------------------------------------------
+    # UnionOperator
+    # ------------------------------------------------------------------
+
+    def _execute_union(self, op: UnionOperator) -> list[Row]:
+        """Execute UNION [ALL] by combining left and right plan results."""
+        left_rows = self._execute_plan(op.left)
+        right_rows = self._execute_plan(op.right)
+        combined = left_rows + right_rows
+
+        if op.all:
+            # UNION ALL — keep all rows
+            return combined
+
+        # UNION — deduplicate by all column values
+        seen: set[tuple] = set()
+        result: list[Row] = []
+        # Determine columns from the combined rows
+        columns: list[str] = []
+        if combined:
+            columns = list(combined[0].data.keys())
+
+        for row in combined:
+            key = tuple(str(row.get(c, "")) for c in columns)
+            if key not in seen:
+                seen.add(key)
+                result.append(row)
+        return result
+
+    # ------------------------------------------------------------------
+    # UnwindOperator
+    # ------------------------------------------------------------------
+
+    def _execute_unwind(self, op: UnwindOperator) -> list[Row]:
+        """Unwind a list expression: expand each row's list into multiple rows."""
+        source_rows = self._execute_operator(op.source)
+        result: list[Row] = []
+        for row in source_rows:
+            val = self._evaluate(op.expression, row)
+            if isinstance(val, list):
+                for item in val:
+                    new_row = Row(data={**row.data, op.variable: item})
+                    result.append(new_row)
+        return result
+
+    # ------------------------------------------------------------------
+    # SubqueryFilterOperator
+    # ------------------------------------------------------------------
+
+    def _execute_subquery_filter(self, op: SubqueryFilterOperator) -> list[Row]:
+        """For each upstream row, execute subquery and filter by EXISTS/NOT EXISTS.
+
+        Uses correlation: outer row data is available to the subquery so
+        that variables like ``n`` in ``EXISTS { MATCH (n)-[:calls]->(m) }``
+        refer to the outer ``n`` value, not a fresh scan.
+        """
+        source_rows = self._execute_operator(op.source)
+        result: list[Row] = []
+        for row in source_rows:
+            # Set correlation context so subquery ScanOperator uses outer values
+            old_correlation = self._correlation_row
+            self._correlation_row = row
+            try:
+                sub_result = self._execute_plan(op.subquery_plan)
+            finally:
+                self._correlation_row = old_correlation
+            has_match = len(sub_result) > 0
+            if (op.exists and has_match) or (not op.exists and not has_match):
+                result.append(row)
+        return result
+
     # ==================================================================
     # Expression Evaluator
     # ==================================================================
@@ -513,6 +631,9 @@ class Executor:
             if expr_val is None:
                 return False
             return expr_val in list_val
+
+        elif isinstance(expr, CaseExpression):
+            return self._evaluate_case(expr, row)
 
         elif isinstance(expr, Parameter):
             raise CypherExecutionError(
@@ -658,6 +779,38 @@ class Executor:
             )
         args = [self._evaluate(a, row) for a in expr.args]
         return func(*args)
+
+    # ------------------------------------------------------------------
+    # CASE expression
+    # ------------------------------------------------------------------
+
+    def _evaluate_case(self, expr: CaseExpression, row: Row) -> object:
+        """Evaluate a CASE expression.
+
+        Two forms:
+          - Simple CASE (expression is not None):
+            CASE expr WHEN val1 THEN res1 WHEN val2 THEN res2 [ELSE default] END
+          - Search CASE (expression is None):
+            CASE WHEN cond1 THEN res1 WHEN cond2 THEN res2 [ELSE default] END
+        """
+        if expr.expression is not None:
+            # Simple CASE: evaluate the test expression once
+            test_val = self._evaluate(expr.expression, row)
+            for when_expr, then_expr in expr.cases:
+                when_val = self._evaluate(when_expr, row)
+                if when_val == test_val:
+                    return self._evaluate(then_expr, row)
+        else:
+            # Search CASE: evaluate each WHEN condition as a boolean
+            for when_expr, then_expr in expr.cases:
+                cond = self._evaluate(when_expr, row)
+                if cond:
+                    return self._evaluate(then_expr, row)
+
+        # No match — return ELSE default or None
+        if expr.default is not None:
+            return self._evaluate(expr.default, row)
+        return None
 
     # ------------------------------------------------------------------
     # Column-name derivation

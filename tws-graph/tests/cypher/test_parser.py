@@ -163,7 +163,7 @@ class TestWhereClause:
         expr = stmt.query.where.expression
         assert expr.op == ">"
         assert isinstance(expr.right, Literal)
-        assert expr.right.value == "18"
+        assert expr.right.value == 18
 
     def test_where_less_than(self):
         stmt = _parse("MATCH (n) WHERE n.age < 65 RETURN n")
@@ -485,13 +485,13 @@ class TestExpressions:
         stmt = _parse("MATCH (n) WHERE n.x = 42 RETURN n")
         lit = stmt.query.where.expression.right
         assert isinstance(lit, Literal)
-        assert lit.value == "42"
+        assert lit.value == 42
 
     def test_float_literal(self):
         stmt = _parse("MATCH (n) WHERE n.x = 3.14 RETURN n")
         lit = stmt.query.where.expression.right
         assert isinstance(lit, Literal)
-        assert lit.value == "3.14"
+        assert lit.value == 3.14
 
     def test_boolean_true(self):
         stmt = _parse("MATCH (n) WHERE n.flag = true RETURN n")
@@ -626,7 +626,7 @@ class TestExpressions:
         assert isinstance(expr, UnaryOp)
         assert expr.op == "-"
         assert isinstance(expr.operand, Literal)
-        assert expr.operand.value == "42"
+        assert expr.operand.value == 42
 
     def test_parenthesized_expression(self):
         stmt = _parse("MATCH (n) RETURN (1 + 2) * 3")
@@ -970,12 +970,12 @@ class TestCaseExpression:
         assert len(expr.cases) == 2
         # Case 1: WHEN 1 THEN 'one'
         assert isinstance(expr.cases[0][0], Literal)
-        assert expr.cases[0][0].value == "1"
+        assert expr.cases[0][0].value == 1
         assert isinstance(expr.cases[0][1], Literal)
         assert expr.cases[0][1].value == "one"
         # Case 2: WHEN 2 THEN 'two'
         assert isinstance(expr.cases[1][0], Literal)
-        assert expr.cases[1][0].value == "2"
+        assert expr.cases[1][0].value == 2
         assert isinstance(expr.cases[1][1], Literal)
         assert expr.cases[1][1].value == "two"
         # No ELSE clause
@@ -1040,7 +1040,7 @@ class TestUnwind:
         uw_expr = q.unwind.expression
         assert isinstance(uw_expr, ListLiteral)
         assert len(uw_expr.elements) == 3
-        assert uw_expr.elements[0].value == "1"
+        assert uw_expr.elements[0].value == 1
 
     def test_unwind_with_match(self):
         """MATCH (n) UNWIND n.labels AS label RETURN n, label"""

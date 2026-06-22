@@ -35,6 +35,8 @@ from tws_graph.cypher.ast import (
     StarExpression,
     Literal,
     Parameter,
+    SubqueryExpression,
+    CaseExpression,
     Span,
 )
 from tws_graph.cypher.errors import CypherSemanticError
@@ -181,6 +183,55 @@ class AggregateOperator(LogicalOperator):
     aggregates: list[tuple[str, str, str]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class UnionOperator(LogicalOperator):
+    """UNION [ALL] — combines results of two logical plans.
+
+    Attributes:
+        left: Left-side logical plan (independent query).
+        right: Right-side logical plan (independent query).
+        all: If True, UNION ALL (keep duplicates); if False, UNION (dedup).
+    """
+
+    left: LogicalPlan
+    right: LogicalPlan
+    all: bool = False
+
+
+@dataclass(frozen=True)
+class UnwindOperator(LogicalOperator):
+    """UNWIND expr AS var — expand a list expression into multiple rows.
+
+    Attributes:
+        source: Upstream operator providing input rows.
+        expression: The list expression to unwind.
+        variable: The variable name bound to each list element.
+    """
+
+    source: LogicalOperator
+    expression: Expression
+    variable: str
+
+
+@dataclass(frozen=True)
+class SubqueryFilterOperator(LogicalOperator):
+    """EXISTS / NOT EXISTS subquery filtering.
+
+    For each upstream row, execute the subquery_plan and keep the row
+    only if the subquery result matches the ``exists`` flag.
+
+    Attributes:
+        source: Upstream operator whose rows are filtered.
+        subquery_plan: Logical plan for the subquery.
+        exists: True = EXISTS (keep if subquery returns rows),
+                False = NOT EXISTS (keep if subquery returns no rows).
+    """
+
+    source: LogicalOperator
+    subquery_plan: LogicalPlan
+    exists: bool = True
+
+
 # ============================================================================
 # Planner
 # ============================================================================
@@ -209,14 +260,27 @@ class Planner:
         Raises:
             CypherSemanticError: If the query is semantically invalid.
         """
+        # ── UNION chain handling ────────────────────────────────────
+        if statement.union is not None:
+            left_plan = self._plan_single_query(statement.query)
+            right_plan = self.plan(statement.union.right)
+            return LogicalPlan(root=UnionOperator(
+                left=left_plan,
+                right=right_plan,
+                all=statement.union.all,
+            ))
+
+        return self._plan_single_query(statement.query)
+
+    def _plan_single_query(self, query: Query) -> LogicalPlan:
+        """Plan a single Query (without UNION chain)."""
         from tws_graph.cypher.aggregates import list_aggregates
 
-        query = statement.query
-
         # ── Guard clauses ───────────────────────────────────────────
-        if query.match is None:
+        # Relax MATCH requirement: UNWIND or WITH can serve as row source
+        if query.match is None and query.unwind is None and query.with_clause is None:
             raise CypherSemanticError(
-                "Query must have a MATCH clause"
+                "Query must have a MATCH, UNWIND, or WITH clause"
             )
 
         if not query.return_clause.items:
@@ -225,27 +289,59 @@ class Planner:
             )
 
         # ── Collect defined variables ───────────────────────────────
-        defined_vars = self._collect_match_variables(query.match)
-        for om in query.optional_matches:
-            defined_vars |= self._collect_match_variables(om)
-
-        # ── Semantic checks: variable references ────────────────────
-        if query.where is not None:
-            self._check_variables(query.where.expression, defined_vars)
-
-        for item in query.return_clause.items:
-            self._check_variables(item.expression, defined_vars)
+        defined_vars: set[str] = set()
+        if query.match is not None:
+            defined_vars = self._collect_match_variables(query.match)
+            for om in query.optional_matches:
+                defined_vars |= self._collect_match_variables(om)
 
         # ── Build operator chain bottom-up ──────────────────────────
-        root: LogicalOperator = self._build_match_scan(query.match)
+        root: LogicalOperator
+        if query.match is not None:
+            root = self._build_match_scan(query.match)
 
-        # WHERE → FilterOperator
-        if query.where is not None:
-            root = FilterOperator(source=root, predicate=query.where.expression)
+            # WHERE → SubqueryFilterOperator or FilterOperator
+            if query.where is not None:
+                self._check_variables(query.where.expression, defined_vars)
+                root = self._build_where(query.where.expression, root)
 
-        # OPTIONAL MATCH → EdgeExpandOperator with optional=True
-        for om in query.optional_matches:
-            root = self._build_match_scan_optional(om, root)
+            # OPTIONAL MATCH → EdgeExpandOperator with optional=True
+            for om in query.optional_matches:
+                root = self._build_match_scan_optional(om, root)
+
+            # UNWIND (after MATCH and WHERE)
+            if query.unwind is not None:
+                root = UnwindOperator(
+                    source=root,
+                    expression=query.unwind.expression,
+                    variable=query.unwind.variable,
+                )
+                defined_vars.add(query.unwind.variable)
+
+            # WITH → intermediate projection
+            if query.with_clause is not None:
+                self._check_variables_with_clause(query.with_clause, defined_vars)
+                root = self._build_with_clause(query.with_clause, root)
+                # After WITH, defined vars change to WITH output names
+                defined_vars = self._collect_with_output_vars(query.with_clause)
+        elif query.unwind is not None:
+            # No MATCH, UNWIND as row source
+            root = ScanOperator(variable="", label=None)
+            root = UnwindOperator(
+                source=root,
+                expression=query.unwind.expression,
+                variable=query.unwind.variable,
+            )
+            defined_vars.add(query.unwind.variable)
+        elif query.with_clause is not None:
+            # WITH without MATCH - unlikely but handle defensively
+            root = ScanOperator(variable="", label=None)
+            root = self._build_with_clause(query.with_clause, root)
+            defined_vars = self._collect_with_output_vars(query.with_clause)
+
+        # ── Check RETURN variables ──────────────────────────────────
+        for item in query.return_clause.items:
+            self._check_variables(item.expression, defined_vars)
 
         # ── Aggregate detection ─────────────────────────────────────
         agg_names = set(list_aggregates())
@@ -255,9 +351,6 @@ class Planner:
 
         if has_aggregate:
             # Extract group_by from non-aggregate RETURN items.
-            # Use the full expression path (e.g. "n.kind") not just
-            # the root identifier, so the executor can resolve it
-            # correctly against rows.
             group_by: list[str] = []
             for ri in non_agg_return_items:
                 gb_path = self._expr_to_group_path(ri.expression)
@@ -304,6 +397,13 @@ class Planner:
 
         # ORDER BY → SortOperator
         if query.order_by is not None:
+            # Add RETURN aliases to defined_vars so ORDER BY can reference them
+            order_by_vars = set(defined_vars)
+            for item in query.return_clause.items:
+                if item.alias:
+                    order_by_vars.add(item.alias)
+            for item in query.order_by.items:
+                self._check_variables(item.expression, order_by_vars)
             root = SortOperator(source=root, items=list(query.order_by.items))
 
         # SKIP / LIMIT → LimitOperator
@@ -433,6 +533,20 @@ class Planner:
             return result
         elif isinstance(expr, (StarExpression, Literal, Parameter)):
             return set()
+        elif isinstance(expr, SubqueryExpression):
+            # SubqueryExpression has its own variable scope;
+            # its inner MATCH variables are independent of the outer query.
+            return set()
+        elif isinstance(expr, CaseExpression):
+            result = set()
+            if expr.expression is not None:
+                result |= self._collect_identifiers(expr.expression)
+            for when_expr, then_expr in expr.cases:
+                result |= self._collect_identifiers(when_expr)
+                result |= self._collect_identifiers(then_expr)
+            if expr.default is not None:
+                result |= self._collect_identifiers(expr.default)
+            return result
         return set()
 
     # -----------------------------------------------------------------
@@ -577,3 +691,103 @@ class Planner:
             return f"{self._expr_to_group_path(expr.obj)}.{expr.key}"
         # For anything else, derive a name
         return self._expr_name_str(expr)
+
+    # -----------------------------------------------------------------
+    # WHERE clause building (P3: SubqueryExpression detection)
+    # -----------------------------------------------------------------
+
+    def _build_where(
+        self,
+        expr: Expression,
+        source: LogicalOperator,
+    ) -> LogicalOperator:
+        """Build a FilterOperator or SubqueryFilterOperator from a WHERE expression.
+
+        Detects EXISTS / NOT EXISTS subquery patterns and creates the
+        appropriate operator.
+        """
+        # EXISTS { MATCH ... }
+        if isinstance(expr, SubqueryExpression):
+            sub_plan = self._plan_subquery(expr.query)
+            return SubqueryFilterOperator(
+                source=source,
+                subquery_plan=sub_plan,
+                exists=expr.exists,
+            )
+
+        # NOT EXISTS { MATCH ... } → UnaryOp(NOT, SubqueryExpression)
+        if (
+            isinstance(expr, UnaryOp)
+            and expr.op == "NOT"
+        ):
+            if isinstance(expr.operand, SubqueryExpression):
+                sub_plan = self._plan_subquery(expr.operand.query)
+                return SubqueryFilterOperator(
+                    source=source,
+                    subquery_plan=sub_plan,
+                    exists=False,
+                )
+
+        # Regular WHERE expression
+        return FilterOperator(source=source, predicate=expr)
+
+    def _plan_subquery(self, query: Query) -> LogicalPlan:
+        """Plan a subquery (used by EXISTS / NOT EXISTS).
+
+        Subqueries may not have a RETURN clause; the plan includes
+        MATCH scan and optional WHERE filter.
+        """
+        root = self._build_match_scan(query.match)
+
+        if query.where is not None:
+            defined_vars = self._collect_match_variables(query.match)
+            self._check_variables(query.where.expression, defined_vars)
+            root = FilterOperator(source=root, predicate=query.where.expression)
+
+        return LogicalPlan(root=root)
+
+    # -----------------------------------------------------------------
+    # WITH clause helpers (P3)
+    # -----------------------------------------------------------------
+
+    def _check_variables_with_clause(
+        self,
+        with_clause: "WithClause",
+        defined_vars: set[str],
+    ) -> None:
+        """Check variable references in a WITH clause against *defined_vars*."""
+        for item in with_clause.items:
+            self._check_variables(item.expression, defined_vars)
+
+    def _collect_with_output_vars(self, with_clause: "WithClause") -> set[str]:
+        """Return the set of variable names output by a WITH clause."""
+        vars_: set[str] = set()
+        for item in with_clause.items:
+            if item.alias:
+                vars_.add(item.alias)
+            else:
+                name = self._expr_name_str(item.expression)
+                vars_.add(name)
+        return vars_
+
+    def _build_with_clause(
+        self,
+        with_clause: "WithClause",
+        source: LogicalOperator,
+    ) -> LogicalOperator:
+        """Build the operator chain for a WITH clause: ProjectOperator + optional FilterOperator."""
+        root: LogicalOperator = ProjectOperator(
+            source=source,
+            items=list(with_clause.items),
+        )
+
+        # WITH ... WHERE → FilterOperator on projected columns
+        if with_clause.where is not None:
+            with_vars = self._collect_with_output_vars(with_clause)
+            self._check_variables(with_clause.where.expression, with_vars)
+            root = FilterOperator(
+                source=root,
+                predicate=with_clause.where.expression,
+            )
+
+        return root
