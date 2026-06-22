@@ -1044,6 +1044,133 @@ def hooks(
         raise typer.Exit(1)
 
 
+# ============================================================================
+# query
+# ============================================================================
+
+@app.command()
+def query(
+    query_str: str = typer.Argument(..., help="Cypher 查询字符串（如 'MATCH (n) RETURN n'）"),
+    limit: int = typer.Option(100, "--limit", "-n", help="最大结果行数"),
+    json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
+    db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+):
+    """用 Cypher 语法查询代码图。
+
+    支持 MATCH / WHERE / RETURN / ORDER BY / SKIP / LIMIT。
+
+    示例：
+      tws-graph query "MATCH (n) RETURN n LIMIT 10"
+      tws-graph query "MATCH (n:Function) RETURN n.name, n.file_path"
+      tws-graph query "MATCH (n) WHERE n.name = 'main' RETURN n"
+      tws-graph query "MATCH (n) RETURN n ORDER BY n.name ASC LIMIT 5"
+    """
+    from .cypher import CypherEngine
+    from .cypher.errors import (
+        CypherLexerError,
+        CypherSyntaxError,
+        CypherSemanticError,
+        CypherExecutionError,
+    )
+
+    resolved_db = os.path.abspath(db_path) if db_path else os.path.abspath(DEFAULT_DB)
+
+    # Check if database exists before trying to open
+    if not os.path.exists(resolved_db):
+        typer.echo(
+            f"错误: 索引数据库不存在 ({resolved_db})。"
+            f"请先运行 tws-graph index。",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    store = _get_store(resolved_db)
+    try:
+        engine = CypherEngine()
+        result = engine.execute(query_str, store)
+
+        if json_output:
+            rows_data = []
+            for row in result.rows:
+                row_dict = {}
+                for k, v in row.data.items():
+                    row_dict[k] = _serialize(v)
+                rows_data.append(row_dict)
+            typer.echo(json.dumps({
+                "columns": result.columns,
+                "rows": rows_data,
+                "total_count": result.total_count,
+            }, ensure_ascii=False, indent=2))
+        else:
+            if not result.rows:
+                typer.echo("(无结果)")
+            else:
+                _print_query_table(result, limit)
+    except CypherLexerError as e:
+        typer.echo(f"词法错误: {e}", err=True)
+        raise typer.Exit(1)
+    except CypherSyntaxError as e:
+        typer.echo(f"语法错误: {e}", err=True)
+        raise typer.Exit(1)
+    except CypherSemanticError as e:
+        typer.echo(f"语义错误: {e}", err=True)
+        raise typer.Exit(1)
+    except CypherExecutionError as e:
+        typer.echo(f"执行错误: {e}", err=True)
+        raise typer.Exit(1)
+    finally:
+        store.close()
+
+
+def _print_query_table(result, limit: int) -> None:
+    """Print query result as an aligned text table.
+
+    Args:
+        result: The ResultSet to print.
+        limit: Maximum number of rows to display.
+    """
+    rows_to_print = result.rows[:limit]
+    cols = result.columns
+
+    if not cols:
+        typer.echo(f"(结果列: {result.total_count} 行)")
+        return
+
+    # Calculate column widths (capped at 60 for readability)
+    widths: dict[str, int] = {}
+    for col in cols:
+        widths[col] = len(col)
+    for row in rows_to_print:
+        for col in cols:
+            val = row.data.get(col)
+            if val is None:
+                val_str = "None"
+            else:
+                val_str = str(val)
+            widths[col] = max(widths[col], min(len(val_str), 60))
+
+    # Print header
+    header = " | ".join(col.ljust(widths[col]) for col in cols)
+    typer.echo(header)
+    typer.echo("-" * min(len(header), 120))
+
+    # Print rows (truncate long values for display)
+    for row in rows_to_print:
+        parts: list[str] = []
+        for col in cols:
+            val = row.data.get(col, "")
+            val_str = str(val) if val is not None else "None"
+            if len(val_str) > widths[col]:
+                val_str = val_str[:widths[col] - 3] + "..."
+            parts.append(val_str.ljust(widths[col]))
+        typer.echo(" | ".join(parts))
+
+    remaining = result.total_count - len(rows_to_print)
+    if remaining > 0:
+        typer.echo(f"\n(显示前 {len(rows_to_print)} 行，共 {result.total_count} 行)"
+                   f"{'，使用 --limit 调整' if limit == 100 else ''}")
+
+
 def main():
     app()
 
