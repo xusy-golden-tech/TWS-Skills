@@ -7,6 +7,8 @@ Commands:
     trace       Find call path between two symbols
     snapshot    Save a named copy of the current index
     diff        Compare two snapshots
+    analyze     Run graph analysis algorithms (clone/community/centrality/cycle)
+    watch       Watch directory for changes and auto-sync the index
 """
 
 import hashlib
@@ -33,6 +35,13 @@ from .pipeline.passes import (
 )
 from .store import SqliteStore
 from .graph.traversal import GraphTraverser
+from .graph.algorithms.similarity import CloneDetector
+from .graph.algorithms.community import CommunityDetector
+from .graph.algorithms.centrality import CentralityComputer
+from .graph.algorithms.cycle_detect import CycleDetector
+from .watcher.interface import FileChangeEvent
+from .watcher.polling_watcher import PollingFileWatcher
+from .watcher.debounce import DebounceQueue, DebounceConfig
 from .diff import (
     save_snapshot, list_snapshots, compare_snapshots,
     format_diff_report, DiffReport,
@@ -1042,6 +1051,270 @@ def hooks(
     else:
         typer.echo(f"未知动作: {action}。可用: install, remove, status", err=True)
         raise typer.Exit(1)
+
+
+# ============================================================================
+# analyze
+# ============================================================================
+
+@app.command()
+def analyze(
+    algorithm: str = typer.Option("all", help="Algorithm: clone/community/centrality/cycle/all"),
+    edge_kinds: str = typer.Option("calls", help="Edge kinds to consider (comma-separated)"),
+    threshold: float = typer.Option(0.8, help="Clone detection similarity threshold"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+):
+    """Run graph analysis algorithms on the indexed code graph.
+
+    示例：
+      tws-graph analyze --algorithm clone
+      tws-graph analyze --algorithm community --edge-kinds calls,imports
+      tws-graph analyze --algorithm all --json
+    """
+    resolved_db = os.path.abspath(db_path) if db_path else os.path.abspath(DEFAULT_DB)
+
+    if not os.path.exists(resolved_db):
+        typer.echo(
+            f"错误: 索引数据库不存在 ({resolved_db})。"
+            f"请先运行 tws-graph index。",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    edge_kinds_list = [k.strip() for k in edge_kinds.split(",") if k.strip()]
+
+    algorithms_map: dict[str, object] = {
+        "clone": CloneDetector(threshold=threshold),
+        "community": CommunityDetector(edge_kinds=edge_kinds_list),
+        "centrality": CentralityComputer(algorithm="pagerank", edge_kinds=edge_kinds_list),
+        "cycle": CycleDetector(),
+    }
+
+    if algorithm == "all":
+        to_run = algorithms_map
+    elif algorithm in algorithms_map:
+        to_run = {algorithm: algorithms_map[algorithm]}
+    else:
+        typer.echo(
+            f"未知算法: {algorithm}。可用: clone, community, centrality, cycle, all",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    store = _get_store(resolved_db)
+    try:
+        if json_output:
+            results: dict[str, object] = {}
+            for algo_name, algo in to_run.items():
+                result = algo.run(store)
+                results[algo_name] = {
+                    "algorithm": result.algorithm,
+                    "success": result.success,
+                    "data": result.data,
+                    "errors": result.errors,
+                    "duration_ms": result.duration_ms,
+                }
+            typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
+        else:
+            for algo_name, algo in to_run.items():
+                result = algo.run(store)
+                typer.echo(f"\n--- {algo.description} ---")
+                typer.echo(f"Duration: {result.duration_ms:.0f}ms")
+                _print_algorithm_result(algo_name, result)
+    finally:
+        store.close()
+
+
+def _print_algorithm_result(algo_name: str, result) -> None:
+    """Format algorithm result for terminal display."""
+    data = result.data
+
+    if algo_name == "clone":
+        pairs = data.get("similar_pairs", [])
+        total = data.get("total_functions_checked", 0)
+        thr = data.get("threshold", 0.0)
+        typer.echo(f"  Functions checked: {total}")
+        typer.echo(f"  Threshold: {thr}")
+        typer.echo(f"  Similar pairs found: {len(pairs)}")
+        for pair in pairs[:10]:
+            typer.echo(
+                f"    {pair['name_a']} <-> {pair['name_b']} "
+                f"(similarity: {pair['similarity']:.4f})"
+            )
+        if len(pairs) > 10:
+            typer.echo(f"    ... and {len(pairs) - 10} more pairs")
+
+    elif algo_name == "community":
+        communities = data.get("communities", [])
+        mod = data.get("modularity", 0.0)
+        typer.echo(f"  Communities: {len(communities)}")
+        typer.echo(f"  Modularity: {mod:.4f}")
+        for comm in communities[:5]:
+            size = comm.get("size", 0)
+            members = comm.get("members", [])
+            preview = ", ".join(m[:40] for m in members[:5])
+            typer.echo(f"    {comm['id']}: {size} members [{preview}...]")
+        if len(communities) > 5:
+            typer.echo(f"    ... and {len(communities) - 5} more communities")
+
+    elif algo_name == "centrality":
+        scores = data.get("scores", {})
+        method = data.get("method", "pagerank")
+        typer.echo(f"  Method: {method}")
+        typer.echo(f"  Nodes scored: {len(scores)}")
+        items = list(scores.items())[:10]
+        for nid, score in items:
+            typer.echo(f"    {nid[:32]}...: {score:.6f}")
+        if len(scores) > 10:
+            typer.echo(f"    ... and {len(scores) - 10} more nodes")
+
+    elif algo_name == "cycle":
+        cycles = data.get("cycles", [])
+        total = data.get("total_cycles", 0)
+        typer.echo(f"  Cycles found: {total}")
+        for c in cycles[:5]:
+            names = c.get("cycle", [])
+            length = c.get("length", 0)
+            typer.echo(f"    Length {length}: {' -> '.join(names[:5])}")
+        if len(cycles) > 5:
+            typer.echo(f"    ... and {len(cycles) - 5} more cycles")
+        if data.get("max_cycles_reached"):
+            typer.echo(f"  (result capped at max_cycles limit)")
+
+
+# ============================================================================
+# watch
+# ============================================================================
+
+@app.command()
+def watch(
+    path: str = typer.Option(".", help="Directory to watch"),
+    interval: float = typer.Option(2.0, help="Polling interval in seconds"),
+    debounce_ms: int = typer.Option(300, help="Debounce window in milliseconds"),
+    json_output: bool = typer.Option(False, "--json", help="JSON Lines 格式输出"),
+    db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+):
+    """Watch directory for changes and auto-sync the index.
+
+    Uses file polling to detect changes, with debounce to avoid
+    repeated indexing.  Changed files are re-indexed via ``tws-graph sync``.
+
+    示例：
+      tws-graph watch
+      tws-graph watch --path /path/to/project --interval 3.0
+      tws-graph watch --debounce-ms 500 --json
+    """
+    import signal
+    import subprocess
+    import threading
+    from datetime import datetime
+
+    root_dir = os.path.abspath(path)
+    resolved_db = db_path if db_path else os.path.join(root_dir, DEFAULT_DB)
+
+    if not os.path.exists(resolved_db):
+        typer.echo(
+            f"错误: 索引数据库不存在 ({resolved_db})。"
+            f"请先运行 tws-graph index。",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Track changed files for debounced sync
+    changed_files: list[str] = []
+    changed_files_lock = threading.Lock()
+
+    def _on_file_change(event: FileChangeEvent) -> None:
+        """Handler called after debounce window expires."""
+        nonlocal changed_files
+        with changed_files_lock:
+            changed_files.append(event.path)
+
+    def _on_debounce_flush(event: FileChangeEvent) -> None:
+        """Handler called when debounce queue flushes."""
+        nonlocal changed_files
+        with changed_files_lock:
+            if event.path not in changed_files:
+                changed_files.append(event.path)
+
+    # Create debounce queue
+    debounce_config = DebounceConfig(window_ms=debounce_ms, max_wait_ms=2000)
+    debounce = DebounceQueue(debounce_config, callback=_on_debounce_flush)
+
+    def _handle_raw_event(event: FileChangeEvent) -> None:
+        """Raw file change event from watcher."""
+        if json_output:
+            record = {
+                "timestamp": datetime.now().isoformat(),
+                "event": "changed",
+                "path": event.path,
+                "change_type": event.change_type,
+            }
+            typer.echo(json.dumps(record, ensure_ascii=False))
+        else:
+            ts = datetime.now().strftime("%H:%M:%S")
+            typer.echo(f"[{ts}] [{event.change_type}] {event.path}")
+
+        # Attempt incremental sync via subprocess for robustness
+        try:
+            subprocess.run(
+                ["tws-graph", "sync", root_dir, "--db", resolved_db],
+                capture_output=True,
+                timeout=30,
+            )
+        except Exception:
+            pass
+
+        debounce.push(event)
+
+    # Create watcher (polling-based, no external dependencies)
+    watcher = PollingFileWatcher(polling_interval=interval)
+
+    # Signal handling
+    stop_event = threading.Event()
+
+    def _signal_handler(signum, frame):
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    try:
+        signal.signal(signal.SIGTERM, _signal_handler)
+    except ValueError:
+        pass  # Not in main thread
+
+    if json_output:
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "event": "started",
+            "backend": "polling",
+            "debounce_ms": debounce_ms,
+            "interval": interval,
+            "root_dir": root_dir,
+        }
+        typer.echo(json.dumps(record, ensure_ascii=False))
+    else:
+        ts = datetime.now().strftime("%H:%M:%S")
+        typer.echo(f"[{ts}] Watcher started (backend: polling, interval: {interval}s, debounce: {debounce_ms}ms)")
+        typer.echo(f"[{ts}] Watching {root_dir} for changes... (Ctrl+C to stop)")
+
+    watcher.start(root_dir, callback=_handle_raw_event)
+
+    try:
+        stop_event.wait()
+    finally:
+        debounce.stop()
+        watcher.stop()
+
+        if json_output:
+            record = {
+                "timestamp": datetime.now().isoformat(),
+                "event": "stopped",
+            }
+            typer.echo(json.dumps(record, ensure_ascii=False))
+        else:
+            ts = datetime.now().strftime("%H:%M:%S")
+            typer.echo(f"[{ts}] Watcher stopped.")
 
 
 # ============================================================================
