@@ -50,8 +50,10 @@ def _make_mock_adapter(
     All five abstract methods are implemented so the instance can be created.
     The ``available`` flag controls ``check_availability()``.
     """
+    _language = language
+
     class MockAdapter(LspLanguageAdapter):
-        language = language
+        language = _language
 
         def get_server_command(self, workspace_root: str) -> list[str]:
             return [binary, "--stdio"]
