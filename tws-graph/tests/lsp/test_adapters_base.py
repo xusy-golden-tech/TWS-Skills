@@ -91,9 +91,12 @@ class TestLspLanguageAdapterIsAbstract:
             "get_file_extensions",
             "check_availability",
         }
-        actual_abstract_methods = {
-            name for name, method in LspLanguageAdapter.__abstractmethods__.items()
-        } if hasattr(LspLanguageAdapter, '__abstractmethods__') else set()
+        # __abstractmethods__ is a frozenset in Python 3.12+
+        actual_abstract_methods = (
+            set(LspLanguageAdapter.__abstractmethods__)
+            if hasattr(LspLanguageAdapter, '__abstractmethods__')
+            else set()
+        )
 
         # The ABC mechanism tracks these differently between Python versions.
         # Validate via __abstractmethods__ if available, otherwise via instantiation
