@@ -32,6 +32,10 @@ from tws_graph.cypher.ast import (
     StarExpression,
     OrderByClause,
     OrderByItem,
+    CaseExpression,
+    UnwindClause,
+    SubqueryExpression,
+    WithClause,
     Expression,
 )
 
@@ -205,6 +209,31 @@ class TestQuery:
         q = Query(return_clause=rc, span=_span())
         with pytest.raises(FrozenInstanceError):
             q.skip = 5  # type: ignore[misc]
+
+    def test_with_clause_default(self):
+        rc = ReturnClause(items=[], span=_span())
+        q = Query(return_clause=rc, span=_span())
+        assert q.with_clause is None
+
+    def test_unwind_default(self):
+        rc = ReturnClause(items=[], span=_span())
+        q = Query(return_clause=rc, span=_span())
+        assert q.unwind is None
+
+    def test_with_clause_and_unwind_set(self):
+        rc = ReturnClause(items=[], span=_span())
+        wc = WithClause(
+            items=[ReturnItem(expression=Identifier(name="n", span=_span()), span=_span())],
+            span=_span(),
+        )
+        uw = UnwindClause(
+            expression=ListLiteral(elements=[], span=_span()),
+            variable="x",
+            span=_span(),
+        )
+        q = Query(return_clause=rc, with_clause=wc, unwind=uw, span=_span())
+        assert q.with_clause is wc
+        assert q.unwind is uw
 
 
 # ============================================================================
@@ -611,7 +640,7 @@ class TestOrderByClause:
 # ============================================================================
 
 class TestExpressionUnion:
-    """Verify that all 10 expression node types are valid members of Expression."""
+    """Verify that all 12 expression node types are valid members of Expression."""
 
     def test_identifier_is_expression(self):
         node = Identifier(name="x", span=_span())
@@ -661,6 +690,20 @@ class TestExpressionUnion:
 
     def test_star_expression_is_expression(self):
         node = StarExpression(span=_span())
+        self._accept_expression(node)
+
+    def test_case_expression_is_expression(self):
+        node = CaseExpression(
+            cases=[(Identifier(name="x", span=_span()), Literal(value=1, span=_span()))],
+            span=_span(),
+        )
+        self._accept_expression(node)
+
+    def test_subquery_expression_is_expression(self):
+        node = SubqueryExpression(
+            query=Query(return_clause=ReturnClause(items=[], span=_span()), span=_span()),
+            span=_span(),
+        )
         self._accept_expression(node)
 
     @staticmethod
@@ -843,3 +886,210 @@ class TestNestedStructure:
         )
         assert rc.distinct is True
         assert rc.items[0].alias == "funcName"
+
+
+# ============================================================================
+# CaseExpression
+# ============================================================================
+
+class TestCaseExpression:
+    """CaseExpression: CASE WHEN ... THEN ... ELSE ... END"""
+
+    def test_construct_search_case(self):
+        """CASE WHEN n.val > 0 THEN 'pos' ELSE 'neg' END — expression=None search case"""
+        when_cond = BinaryOp(
+            op=">",
+            left=PropertyAccess(obj=Identifier(name="n", span=_span()), key="val", span=_span()),
+            right=Literal(value=0, span=_span()),
+            span=_span(),
+        )
+        then_result = Literal(value="pos", span=_span())
+        default = Literal(value="neg", span=_span())
+        ce = CaseExpression(
+            expression=None,
+            cases=[(when_cond, then_result)],
+            default=default,
+            span=_span(),
+        )
+        assert ce.expression is None
+        assert len(ce.cases) == 1
+        assert ce.cases[0][0] is when_cond
+        assert ce.cases[0][1] is then_result
+        assert ce.default is default
+
+    def test_construct_simple_case(self):
+        """CASE n.val WHEN 1 THEN 'one' WHEN 2 THEN 'two' END — expression-based case"""
+        expr = PropertyAccess(obj=Identifier(name="n", span=_span()), key="val", span=_span())
+        when1 = Literal(value=1, span=_span())
+        then1 = Literal(value="one", span=_span())
+        when2 = Literal(value=2, span=_span())
+        then2 = Literal(value="two", span=_span())
+        ce = CaseExpression(
+            expression=expr,
+            cases=[(when1, then1), (when2, then2)],
+            default=None,
+            span=_span(),
+        )
+        assert ce.expression is expr
+        assert len(ce.cases) == 2
+        assert ce.cases[0][0] is when1
+        assert ce.cases[0][1] is then1
+        assert ce.cases[1][0] is when2
+        assert ce.cases[1][1] is then2
+        assert ce.default is None
+
+    def test_construct_without_default(self):
+        """CASE WHEN x THEN y END — no ELSE clause"""
+        when = Literal(value=True, span=_span())
+        then = Identifier(name="y", span=_span())
+        ce = CaseExpression(
+            expression=None,
+            cases=[(when, then)],
+            span=_span(),
+        )
+        assert ce.default is None
+
+    def test_default_fields(self):
+        """Default values for optional fields."""
+        ce = CaseExpression(
+            cases=[(Literal(value=True, span=_span()), Identifier(name="x", span=_span()))],
+            span=_span(),
+        )
+        assert ce.expression is None
+        assert ce.default is None
+
+    def test_frozen(self):
+        ce = CaseExpression(
+            cases=[(Identifier(name="x", span=_span()), Identifier(name="y", span=_span()))],
+            span=_span(),
+        )
+        with pytest.raises(FrozenInstanceError):
+            ce.cases = []  # type: ignore[misc]
+
+
+# ============================================================================
+# UnwindClause
+# ============================================================================
+
+class TestUnwindClause:
+    """UnwindClause: UNWIND list AS var"""
+
+    def test_construct(self):
+        lst = ListLiteral(
+            elements=[Literal(value=1, span=_span()), Literal(value=2, span=_span()), Literal(value=3, span=_span())],
+            span=_span(),
+        )
+        uw = UnwindClause(expression=lst, variable="x", span=_span())
+        assert uw.expression is lst
+        assert uw.variable == "x"
+
+    def test_construct_with_identifier(self):
+        """UNWIND $list AS item"""
+        param = Parameter(name="$list", span=_span())
+        uw = UnwindClause(expression=param, variable="item", span=_span())
+        assert uw.expression is param
+        assert uw.variable == "item"
+
+    def test_frozen(self):
+        lst = ListLiteral(elements=[], span=_span())
+        uw = UnwindClause(expression=lst, variable="x", span=_span())
+        with pytest.raises(FrozenInstanceError):
+            uw.variable = "y"  # type: ignore[misc]
+
+
+# ============================================================================
+# SubqueryExpression
+# ============================================================================
+
+class TestSubqueryExpression:
+    """SubqueryExpression: EXISTS { MATCH ... }"""
+
+    def test_construct_exists(self):
+        """EXISTS { MATCH (n) RETURN n }"""
+        inner_q = Query(
+            match=MatchClause(
+                pattern=PatternPart(node=NodePattern(name="n", span=_span()), span=_span()),
+                span=_span(),
+            ),
+            return_clause=ReturnClause(
+                items=[ReturnItem(expression=Identifier(name="n", span=_span()), span=_span())],
+                span=_span(),
+            ),
+            span=_span(),
+        )
+        sqe = SubqueryExpression(query=inner_q, exists=True, span=_span())
+        assert sqe.query is inner_q
+        assert sqe.exists is True
+
+    def test_construct_bare_subquery(self):
+        """{ MATCH (n) RETURN n } — bare subquery without EXISTS"""
+        inner_q = Query(
+            match=MatchClause(
+                pattern=PatternPart(node=NodePattern(span=_span()), span=_span()),
+                span=_span(),
+            ),
+            return_clause=ReturnClause(items=[], span=_span()),
+            span=_span(),
+        )
+        sqe = SubqueryExpression(query=inner_q, exists=False, span=_span())
+        assert sqe.exists is False
+        assert sqe.query is inner_q
+
+    def test_default_exists(self):
+        """Default exists is True."""
+        inner_q = Query(
+            return_clause=ReturnClause(items=[], span=_span()),
+            span=_span(),
+        )
+        sqe = SubqueryExpression(query=inner_q, span=_span())
+        assert sqe.exists is True
+
+    def test_frozen(self):
+        inner_q = Query(
+            return_clause=ReturnClause(items=[], span=_span()),
+            span=_span(),
+        )
+        sqe = SubqueryExpression(query=inner_q, span=_span())
+        with pytest.raises(FrozenInstanceError):
+            sqe.exists = False  # type: ignore[misc]
+
+
+# ============================================================================
+# WithClause
+# ============================================================================
+
+class TestWithClause:
+    """WithClause: WITH ... AS ... [WHERE ...]"""
+
+    def test_construct_minimal(self):
+        items = [
+            ReturnItem(expression=Identifier(name="n", span=_span()), alias="name", span=_span()),
+        ]
+        wc = WithClause(items=items, span=_span())
+        assert wc.items == items
+        assert wc.where is None
+
+    def test_construct_with_where(self):
+        items = [
+            ReturnItem(expression=Identifier(name="n", span=_span()), span=_span()),
+        ]
+        where_expr = BinaryOp(
+            op="=",
+            left=Identifier(name="n", span=_span()),
+            right=Literal(value=42, span=_span()),
+            span=_span(),
+        )
+        where_clause = WhereClause(expression=where_expr, span=_span())
+        wc = WithClause(items=items, where=where_clause, span=_span())
+        assert wc.where is where_clause
+
+    def test_default_items_and_where(self):
+        """Default values: items=[], where=None."""
+        wc = WithClause(span=_span())
+        assert wc.items == []
+        assert wc.where is None
+
+    def test_frozen(self):
+        wc = WithClause(span=_span())
+        with pytest.raises(FrozenInstanceError):
+            wc.items = []  # type: ignore[misc]

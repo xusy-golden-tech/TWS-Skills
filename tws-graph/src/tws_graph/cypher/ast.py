@@ -67,6 +67,8 @@ class Query(Node):
     match: Optional[MatchClause] = None
     optional_matches: list[MatchClause] = field(default_factory=list)
     where: Optional[WhereClause] = None
+    with_clause: Optional[WithClause] = None
+    unwind: Optional[UnwindClause] = None
     order_by: Optional[OrderByClause] = None
     skip: Optional[int] = None
     limit: Optional[int] = None
@@ -248,11 +250,65 @@ class OrderByClause(Node):
 
 
 # ---------------------------------------------------------------------------
+# CASE expression
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CaseExpression(Node):
+    """CASE WHEN x THEN y ELSE z END.
+
+    Two forms:
+      - Search CASE: expression=None, cases=[(when_cond, then_result), ...]
+      - Simple CASE: expression=<expr>, cases=[(when_val, then_result), ...]
+    """
+    expression: Optional[Expression] = None
+    cases: list[tuple[Expression, Expression]] = field(default_factory=list)
+    default: Optional[Expression] = None
+    span: Span = field(default_factory=lambda: Span(0, 0, 0, 0))
+
+
+# ---------------------------------------------------------------------------
+# Subquery expression
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SubqueryExpression(Node):
+    """EXISTS { MATCH ... }  or  { MATCH ... } (bare subquery)."""
+    query: "Query"
+    exists: bool = True
+    span: Span = field(default_factory=lambda: Span(0, 0, 0, 0))
+
+
+# ---------------------------------------------------------------------------
+# UNWIND clause
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class UnwindClause(Node):
+    """UNWIND list AS var."""
+    expression: Expression
+    variable: str
+    span: Span = field(default_factory=lambda: Span(0, 0, 0, 0))
+
+
+# ---------------------------------------------------------------------------
+# WITH clause
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class WithClause(Node):
+    """WITH ... AS ... [WHERE ...]"""
+    items: list[ReturnItem] = field(default_factory=list)
+    where: Optional["WhereClause"] = None
+    span: Span = field(default_factory=lambda: Span(0, 0, 0, 0))
+
+
+# ---------------------------------------------------------------------------
 # Expression union type
 # ---------------------------------------------------------------------------
 
 Expression = Union[
     Identifier, Literal, ListLiteral, FunctionCall, Parameter,
     BinaryOp, UnaryOp, PropertyAccess, InExpression,
-    StarExpression,
+    StarExpression, CaseExpression, SubqueryExpression,
 ]

@@ -12,6 +12,7 @@ from .ast import (
     Span,
     Direction,
     Statement,
+    UnionClause,
     Query,
     MatchClause,
     PatternPart,
@@ -33,6 +34,10 @@ from .ast import (
     StarExpression,
     OrderByClause,
     OrderByItem,
+    CaseExpression,
+    UnwindClause,
+    SubqueryExpression,
+    WithClause,
     Expression,
 )
 from .errors import CypherSyntaxError
@@ -60,7 +65,33 @@ class Parser:
 
     def parse(self) -> Statement:
         """Parse a complete Cypher query and return the Statement AST."""
-        stmt = self._parse_statement()
+        # Parse all statements separated by UNION
+        statements: list[Statement] = [self._parse_statement()]
+        union_flags: list[bool] = []
+
+        while self._check_kw("UNION"):
+            self._lexer.next()  # consume UNION
+            all_union = self._match_kw("ALL")
+            union_flags.append(all_union)
+            statements.append(self._parse_statement())
+
+        # Build nested UNION structure (left-associative)
+        if union_flags:
+            result = statements[-1]
+            for i in range(len(statements) - 2, -1, -1):
+                result = Statement(
+                    query=statements[i].query,
+                    union=UnionClause(
+                        all=union_flags[i],
+                        right=result,
+                        span=result.span,
+                    ),
+                    span=self._span(statements[i].span, result.span),
+                )
+            stmt = result
+        else:
+            stmt = statements[0]
+
         # Check that we consumed all input
         if not self._check(TokenType.EOF):
             tok = self._lexer.peek()
@@ -84,21 +115,36 @@ class Parser:
         return Statement(query=query, span=query.span)
 
     def _parse_query(self) -> Query:
-        """Parse Query → MATCH Pattern [WHERE Expression] RETURN ReturnBody [ORDER BY OrderBy] [SKIP Integer] [LIMIT Integer]."""
+        """Parse Query → [MATCH Pattern] [WHERE Expression] [UNWIND ...] [WITH ...] RETURN ReturnBody [ORDER BY OrderBy] [SKIP Integer] [LIMIT Integer].
+
+        MATCH is optional. When omitted, UNWIND or WITH may start the query.
+        """
         start_tok = self._lexer.peek()
 
-        # Parse MATCH or OPTIONAL MATCH
-        match = self._parse_match()
-
-        # Parse additional OPTIONAL MATCH clauses
+        # Parse MATCH or OPTIONAL MATCH (optional)
+        match = None
         optional_matches: list[MatchClause] = []
-        while self._check_kw("OPTIONAL"):
-            optional_matches.append(self._parse_match())
+
+        if self._check_kw("MATCH") or self._check_kw("OPTIONAL"):
+            match = self._parse_match()
+            # Parse additional OPTIONAL MATCH clauses
+            while self._check_kw("OPTIONAL"):
+                optional_matches.append(self._parse_match())
 
         # Parse WHERE (optional)
         where = None
         if self._check_kw("WHERE"):
             where = self._parse_where()
+
+        # Parse UNWIND (optional)
+        unwind = None
+        if self._check_kw("UNWIND"):
+            unwind = self._parse_unwind()
+
+        # Parse WITH (optional)
+        with_clause = None
+        if self._check_kw("WITH"):
+            with_clause = self._parse_with()
 
         # Parse RETURN (required)
         return_clause = self._parse_return()
@@ -126,6 +172,8 @@ class Parser:
             match=match,
             optional_matches=optional_matches,
             where=where,
+            with_clause=with_clause,
+            unwind=unwind,
             return_clause=return_clause,
             order_by=order_by,
             skip=skip,
@@ -649,7 +697,7 @@ class Parser:
         return self._parse_atom()
 
     def _parse_atom(self) -> Expression:
-        """AtomExpr → Literal | Identifier | FunctionCall | (Expression) | Parameter | ListLiteral.
+        """AtomExpr → Literal | Identifier | FunctionCall | (Expression) | Parameter | ListLiteral | CASE | EXISTS.
 
         Also handles postfix property access (.identifier) chaining.
         """
@@ -682,6 +730,22 @@ class Parser:
         if self._check_kw("NULL"):
             tok = self._lexer.next()
             return Literal(value=None, span=self._span(tok, tok))
+
+        # CASE expression
+        if self._check_kw("CASE"):
+            return self._parse_case_expression()
+
+        # EXISTS subquery: EXISTS { MATCH ... }
+        if self._check_kw("EXISTS"):
+            exists_tok = self._lexer.next()  # consume EXISTS
+            self._consume(TokenType.LBRACE, "expected '{' after EXISTS")
+            inner_query = self._parse_subquery()
+            end = self._consume(TokenType.RBRACE, "expected '}' after subquery")
+            return SubqueryExpression(
+                query=inner_query,
+                exists=True,
+                span=self._span(exists_tok, end),
+            )
 
         # Parameter: $name
         if self._check(TokenType.PARAMETER):
@@ -773,6 +837,127 @@ class Parser:
 
         end = self._consume(TokenType.RBRACKET, "expected ']'")
         return ListLiteral(elements=elements, span=self._span(start, end))
+
+    # ------------------------------------------------------------------
+    # CASE expression
+    # ------------------------------------------------------------------
+
+    def _parse_case_expression(self) -> CaseExpression:
+        """Parse CASE [expr] WHEN cond THEN result [...] [ELSE default] END."""
+        start = self._consume_kw("CASE", "expected CASE")
+
+        # Optional expression: if the next token is WHEN, it's a search CASE
+        expression = None
+        if not self._check_kw("WHEN"):
+            expression = self._parse_expression()
+
+        # WHEN ... THEN ... (at least one pair)
+        if not self._check_kw("WHEN"):
+            raise self._error("expected WHEN in CASE expression", "WHEN")
+
+        cases: list[tuple[Expression, Expression]] = []
+        while self._check_kw("WHEN"):
+            self._lexer.next()  # consume WHEN
+            when_expr = self._parse_expression()
+            self._consume_kw("THEN", "expected THEN after WHEN")
+            then_expr = self._parse_expression()
+            cases.append((when_expr, then_expr))
+
+        # Optional ELSE
+        default = None
+        if self._check_kw("ELSE"):
+            self._lexer.next()  # consume ELSE
+            default = self._parse_expression()
+
+        end = self._consume_kw("END", "expected END")
+        return CaseExpression(
+            expression=expression,
+            cases=cases,
+            default=default,
+            span=self._span(start, end),
+        )
+
+    # ------------------------------------------------------------------
+    # Subquery
+    # ------------------------------------------------------------------
+
+    def _parse_subquery(self) -> Query:
+        """Parse a subquery: MATCH ... [WHERE ...] [RETURN ...]
+
+        Used inside EXISTS { ... } or bare { ... } expressions.
+        RETURN is optional inside a subquery.
+        """
+        start_tok = self._lexer.peek()
+
+        # Parse MATCH or OPTIONAL MATCH
+        match = self._parse_match()
+
+        # Parse additional OPTIONAL MATCH clauses
+        optional_matches: list[MatchClause] = []
+        while self._check_kw("OPTIONAL"):
+            optional_matches.append(self._parse_match())
+
+        # Parse WHERE (optional)
+        where = None
+        if self._check_kw("WHERE"):
+            where = self._parse_where()
+
+        # RETURN is optional in subquery
+        return_clause: ReturnClause
+        if self._check_kw("RETURN"):
+            return_clause = self._parse_return()
+        else:
+            return_clause = ReturnClause(items=[], span=Span(0, 0, 0, 0))
+
+        return Query(
+            match=match,
+            optional_matches=optional_matches,
+            where=where,
+            return_clause=return_clause,
+            span=self._span(start_tok, self._lexer.peek()),
+        )
+
+    # ------------------------------------------------------------------
+    # UNWIND clause
+    # ------------------------------------------------------------------
+
+    def _parse_unwind(self) -> UnwindClause:
+        """Parse UNWIND expression AS variable."""
+        start = self._consume_kw("UNWIND", "expected UNWIND")
+        expression = self._parse_expression()
+        self._consume_kw("AS", "expected AS after UNWIND expression")
+        var_tok = self._consume(TokenType.IDENTIFIER, "expected variable name after AS")
+        end = self._lexer.peek()
+        return UnwindClause(
+            expression=expression,
+            variable=var_tok.value,
+            span=self._span(start, var_tok),
+        )
+
+    # ------------------------------------------------------------------
+    # WITH clause
+    # ------------------------------------------------------------------
+
+    def _parse_with(self) -> WithClause:
+        """Parse WITH ReturnItem [, ReturnItem]* [WHERE Expression]."""
+        start = self._consume_kw("WITH", "expected WITH")
+
+        items: list[ReturnItem] = []
+        items.append(self._parse_return_item())
+        while self._check(TokenType.COMMA):
+            self._lexer.next()
+            items.append(self._parse_return_item())
+
+        where = None
+        if self._check_kw("WHERE"):
+            where = self._parse_where()
+
+        end = self._lexer.peek()
+        return WithClause(
+            items=items,
+            where=where,
+            span=self._span(start, end),
+        )
 
     # ------------------------------------------------------------------
     # Helper methods

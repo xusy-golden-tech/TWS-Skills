@@ -10,6 +10,7 @@ from tws_graph.cypher.ast import (
     Span,
     Direction,
     Statement,
+    UnionClause,
     Query,
     MatchClause,
     PatternPart,
@@ -31,6 +32,10 @@ from tws_graph.cypher.ast import (
     StarExpression,
     OrderByClause,
     OrderByItem,
+    CaseExpression,
+    UnwindClause,
+    SubqueryExpression,
+    WithClause,
 )
 from tws_graph.cypher.errors import CypherSyntaxError
 
@@ -696,9 +701,10 @@ class TestParserErrors:
         with pytest.raises(CypherSyntaxError):
             _parse("MATCH (n)")
 
-    def test_missing_match(self):
+    def test_missing_return_after_with(self):
+        """WITH without RETURN is an error."""
         with pytest.raises(CypherSyntaxError):
-            _parse("RETURN n")
+            _parse("MATCH (n) WITH n")
 
     def test_unclosed_parenthesis(self):
         with pytest.raises(CypherSyntaxError):
@@ -889,3 +895,242 @@ class TestComplexQueries:
         stmt = _parse(query)
         assert stmt.query.match is not None
         assert stmt.query.return_clause is not None
+
+
+# ============================================================================
+# UNION
+# ============================================================================
+
+class TestUnion:
+    """UNION and UNION ALL parsing."""
+
+    def test_simple_union(self):
+        stmt = _parse("MATCH (n) RETURN n UNION MATCH (m) RETURN m")
+        assert stmt.union is not None
+        assert stmt.union.all is False
+        right = stmt.union.right
+        assert right.query.match is not None
+        assert right.query.match.pattern.node.name == "m"
+        assert right.query.return_clause.items[0].expression.name == "m"
+
+    def test_union_all(self):
+        stmt = _parse("MATCH (n) RETURN n UNION ALL MATCH (m) RETURN m")
+        assert stmt.union is not None
+        assert stmt.union.all is True
+        right = stmt.union.right
+        assert right.query.match.pattern.node.name == "m"
+
+    def test_union_chain(self):
+        stmt = _parse("MATCH (a) RETURN a UNION MATCH (b) RETURN b UNION MATCH (c) RETURN c")
+        # First level: a UNION (b UNION c)
+        assert stmt.union is not None
+        assert stmt.union.right.query.match.pattern.node.name == "b"
+        # Second level: b UNION c
+        right = stmt.union.right
+        assert right.union is not None
+        assert right.union.right.query.match.pattern.node.name == "c"
+        assert right.union.all is False
+
+
+# ============================================================================
+# CASE WHEN expression
+# ============================================================================
+
+class TestCaseExpression:
+    """CASE WHEN ... THEN ... ELSE ... END parsing."""
+
+    def test_search_case(self):
+        """CASE WHEN n.val > 0 THEN 'pos' ELSE 'neg' END"""
+        stmt = _parse("RETURN CASE WHEN n.val > 0 THEN 'pos' ELSE 'neg' END AS result")
+        expr = stmt.query.return_clause.items[0].expression
+        assert isinstance(expr, CaseExpression)
+        assert expr.expression is None
+        assert len(expr.cases) == 1
+        # Condition: n.val > 0
+        cond = expr.cases[0][0]
+        assert isinstance(cond, BinaryOp)
+        assert cond.op == ">"
+        # Then: 'pos'
+        then_expr = expr.cases[0][1]
+        assert isinstance(then_expr, Literal)
+        assert then_expr.value == "pos"
+        # Default: 'neg'
+        assert isinstance(expr.default, Literal)
+        assert expr.default.value == "neg"
+
+    def test_simple_case(self):
+        """CASE n.val WHEN 1 THEN 'one' WHEN 2 THEN 'two' END"""
+        stmt = _parse("RETURN CASE n.val WHEN 1 THEN 'one' WHEN 2 THEN 'two' END")
+        expr = stmt.query.return_clause.items[0].expression
+        assert isinstance(expr, CaseExpression)
+        # expression = n.val
+        assert isinstance(expr.expression, PropertyAccess)
+        assert expr.expression.key == "val"
+        # 2 cases
+        assert len(expr.cases) == 2
+        # Case 1: WHEN 1 THEN 'one'
+        assert isinstance(expr.cases[0][0], Literal)
+        assert expr.cases[0][0].value == "1"
+        assert isinstance(expr.cases[0][1], Literal)
+        assert expr.cases[0][1].value == "one"
+        # Case 2: WHEN 2 THEN 'two'
+        assert isinstance(expr.cases[1][0], Literal)
+        assert expr.cases[1][0].value == "2"
+        assert isinstance(expr.cases[1][1], Literal)
+        assert expr.cases[1][1].value == "two"
+        # No ELSE clause
+        assert expr.default is None
+
+    def test_simple_case_with_default(self):
+        """CASE n.val WHEN 1 THEN 'one' ELSE 'other' END"""
+        stmt = _parse("RETURN CASE n.val WHEN 1 THEN 'one' ELSE 'other' END")
+        expr = stmt.query.return_clause.items[0].expression
+        assert isinstance(expr, CaseExpression)
+        assert isinstance(expr.expression, PropertyAccess)
+        assert len(expr.cases) == 1
+        assert isinstance(expr.default, Literal)
+        assert expr.default.value == "other"
+
+    def test_case_with_single_when_then_no_else(self):
+        """CASE WHEN n.active THEN 'yes' END"""
+        stmt = _parse("RETURN CASE WHEN n.active THEN 'yes' END")
+        expr = stmt.query.return_clause.items[0].expression
+        assert isinstance(expr, CaseExpression)
+        assert expr.expression is None
+        assert len(expr.cases) == 1
+        assert isinstance(expr.cases[0][0], PropertyAccess)
+        assert isinstance(expr.cases[0][1], Literal)
+        assert expr.cases[0][1].value == "yes"
+        assert expr.default is None
+
+    def test_case_in_where(self):
+        """WHERE CASE WHEN ... THEN ... END = 'value'"""
+        stmt = _parse("MATCH (n) WHERE CASE WHEN n.a = 1 THEN 'yes' ELSE 'no' END = 'yes' RETURN n")
+        expr = stmt.query.where.expression
+        # Should be BinaryOp with = operator
+        assert isinstance(expr, BinaryOp)
+        assert expr.op == "="
+        assert isinstance(expr.left, CaseExpression)
+        assert isinstance(expr.right, Literal)
+
+    def test_case_error_no_end(self):
+        """CASE WHEN ... THEN ... — missing END"""
+        with pytest.raises(CypherSyntaxError):
+            _parse("RETURN CASE WHEN n.val > 0 THEN 'pos'")
+
+    def test_case_error_no_when(self):
+        """CASE x THEN 'pos' END — missing WHEN"""
+        with pytest.raises(CypherSyntaxError):
+            _parse("RETURN CASE n.val THEN 'oops' END")
+
+
+# ============================================================================
+# UNWIND clause
+# ============================================================================
+
+class TestUnwind:
+    """UNWIND clause parsing."""
+
+    def test_unwind_list(self):
+        """UNWIND [1, 2, 3] AS x RETURN x"""
+        stmt = _parse("UNWIND [1, 2, 3] AS x RETURN x")
+        q = stmt.query
+        assert q.unwind is not None
+        assert q.unwind.variable == "x"
+        uw_expr = q.unwind.expression
+        assert isinstance(uw_expr, ListLiteral)
+        assert len(uw_expr.elements) == 3
+        assert uw_expr.elements[0].value == "1"
+
+    def test_unwind_with_match(self):
+        """MATCH (n) UNWIND n.labels AS label RETURN n, label"""
+        stmt = _parse("MATCH (n) UNWIND n.labels AS label RETURN n, label")
+        q = stmt.query
+        assert q.match is not None
+        assert q.unwind is not None
+        assert q.unwind.variable == "label"
+        assert isinstance(q.unwind.expression, PropertyAccess)
+        assert q.unwind.expression.key == "labels"
+
+    def test_unwind_error_no_as(self):
+        """UNWIND [1,2,3] x — missing AS keyword"""
+        with pytest.raises(CypherSyntaxError):
+            _parse("UNWIND [1,2,3] x RETURN x")
+
+
+# ============================================================================
+# EXISTS subquery
+# ============================================================================
+
+class TestSubquery:
+    """EXISTS { MATCH ... } subquery parsing."""
+
+    def test_exists_subquery_in_where(self):
+        stmt = _parse("MATCH (n) WHERE EXISTS { MATCH (n)-[:calls]->(m) } RETURN n")
+        q = stmt.query
+        assert q.where is not None
+        expr = q.where.expression
+        assert isinstance(expr, SubqueryExpression)
+        assert expr.exists is True
+        # Inner query
+        inner = expr.query
+        assert inner.match is not None
+        pp = inner.match.pattern
+        assert pp.node.name == "n"
+        assert len(pp.chain) == 1
+        assert pp.chain[0].rel.types == ["calls"]
+        assert pp.chain[0].node.name == "m"
+
+    def test_exists_subquery_with_where_inside(self):
+        stmt = _parse("MATCH (n) WHERE EXISTS { MATCH (n)-[:calls]->(m) WHERE m.lang = 'python' } RETURN n")
+        expr = stmt.query.where.expression
+        assert isinstance(expr, SubqueryExpression)
+        assert expr.query.where is not None
+
+
+# ============================================================================
+# WITH clause
+# ============================================================================
+
+class TestWithClause:
+    """WITH clause parsing."""
+
+    def test_with_simple(self):
+        stmt = _parse("MATCH (n) WITH n.name AS name RETURN name")
+        q = stmt.query
+        assert q.with_clause is not None
+        wc = q.with_clause
+        assert len(wc.items) == 1
+        assert wc.items[0].alias == "name"
+        assert isinstance(wc.items[0].expression, PropertyAccess)
+        assert wc.items[0].expression.key == "name"
+        assert wc.where is None
+
+    def test_with_where(self):
+        stmt = _parse("MATCH (n) WITH n.name AS name, n.age AS age WHERE name STARTS WITH 'test' RETURN name, age")
+        q = stmt.query
+        assert q.with_clause is not None
+        wc = q.with_clause
+        assert len(wc.items) == 2
+        assert wc.items[0].alias == "name"
+        assert wc.items[1].alias == "age"
+        assert wc.where is not None
+        assert isinstance(wc.where.expression, BinaryOp)
+        assert wc.where.expression.op == "STARTS WITH"
+
+    def test_unwind_with(self):
+        """UNWIND [1,2] AS x WITH x AS num RETURN num"""
+        stmt = _parse("UNWIND [1, 2] AS x WITH x AS num RETURN num")
+        q = stmt.query
+        assert q.unwind is not None
+        assert q.unwind.variable == "x"
+        assert q.with_clause is not None
+        assert q.with_clause.items[0].alias == "num"
+
+    def test_with_multiple_items(self):
+        stmt = _parse("MATCH (n) WITH n AS node, n.name AS name RETURN node, name")
+        q = stmt.query
+        assert q.with_clause is not None
+        assert len(q.with_clause.items) == 2
+        assert q.with_clause.items[0].alias == "node"
+        assert q.with_clause.items[1].alias == "name"

@@ -24,6 +24,8 @@ _KEYWORDS: set[str] = {
     "SKIP", "LIMIT", "AS", "DISTINCT",
     "AND", "OR", "XOR", "NOT", "IS", "NULL", "TRUE", "FALSE",
     "ASC", "DESC", "CONTAINS", "STARTS", "ENDS", "WITH", "IN",
+    "UNION", "ALL", "CASE", "WHEN", "THEN", "ELSE", "END",
+    "UNWIND", "EXISTS",
 }
 
 
