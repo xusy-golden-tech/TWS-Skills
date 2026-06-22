@@ -260,8 +260,9 @@ class LspManager:
         new_client = self._start_client(language, adapter)
         if new_client is not None:
             self._clients[language] = new_client
-            self._last_heartbeat_time[language] = time.monotonic()
-            # Reset counter on successful (healthy) restart; increment otherwise.
+            # Let _is_healthy do the first check and set the timer --
+            # do NOT pre-set _last_heartbeat_time or the cache will
+            # skip the check and always report healthy.
             if self._is_healthy(new_client, language):
                 self._restart_count[language] = 0
             else:
@@ -275,23 +276,22 @@ class LspManager:
     def _is_healthy(self, client: LspClient, language: str) -> bool:
         """Check whether *client* is still healthy.
 
-        Returns ``False`` when:
+        When the last successful heartbeat is still within
+        :attr:`heartbeat_timeout` seconds the check is skipped and
+        ``True`` is returned (avoids high-frequency re-checks).  Once
+        the window expires a full re-check is performed:
 
-        * The last successful heartbeat is older than
-          :attr:`heartbeat_timeout` seconds.
         * The subprocess has exited (``_process.poll()`` returns non-None).
         * The client's ``_heartbeat()`` method returns ``False`` (e.g. the
           reader has reported EOF/error).
 
-        A successful heartbeat updates the per-language timer so that
-        consecutive calls within the timeout window don't re-check
-        the heartbeat timer.
+        A successful re-check updates the per-language timer.
         """
         last = self._last_heartbeat_time.get(language)
         if last is not None:
             elapsed = time.monotonic() - last
-            if elapsed >= self.heartbeat_timeout:
-                return False
+            if elapsed < self.heartbeat_timeout:
+                return True
 
         if client._process.poll() is not None:
             return False

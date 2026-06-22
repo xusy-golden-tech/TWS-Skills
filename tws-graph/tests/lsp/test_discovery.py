@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from unittest import mock
 
 import pytest
@@ -271,11 +272,14 @@ class TestDiscover:
     # -- L2 env var override --
 
     def test_l2_env_override_python(self, monkeypatch):
-        """discover: TWS_LSP_PYTHON_BINARY overrides PATH lookup result."""
+        """discover: TWS_LSP_PYTHON_BINARY overrides PATH lookup result.
+
+        Uses a real executable path so the direct file-access check passes.
+        """
         adapter = _make_mock_adapter(
             language="python", binary="pyright-langserver", available=True,
         )
-        custom_path = "/custom/path/to/pyright-langserver"
+        custom_path = sys.executable  # guaranteed to exist and be executable
         monkeypatch.setenv("TWS_LSP_PYTHON_BINARY", custom_path)
 
         with mock.patch.object(shutil, "which", side_effect=self._mock_which_returns("/usr/bin/pyright-langserver")):
@@ -286,11 +290,14 @@ class TestDiscover:
         assert result.binary == "pyright-langserver"
 
     def test_l2_env_override_typescript(self, monkeypatch):
-        """discover: TWS_LSP_TYPESCRIPT_BINARY overrides PATH lookup result."""
+        """discover: TWS_LSP_TYPESCRIPT_BINARY overrides PATH lookup result.
+
+        Uses a real executable path so the direct file-access check passes.
+        """
         adapter = _make_mock_adapter(
             language="typescript", binary="typescript-language-server", available=True,
         )
-        custom_path = "/opt/node/bin/typescript-language-server"
+        custom_path = sys.executable  # guaranteed to exist and be executable
         monkeypatch.setenv("TWS_LSP_TYPESCRIPT_BINARY", custom_path)
 
         with mock.patch.object(shutil, "which", side_effect=self._mock_which_returns("/usr/bin/typescript-language-server")):
@@ -299,12 +306,18 @@ class TestDiscover:
         assert result.available is True
         assert result.path == custom_path
 
-    def test_l2_env_override_still_checks_availability(self, monkeypatch):
-        """discover: even with L2 override, check_availability()=False -> unavailable."""
+    def test_l2_env_override_unavailable_when_file_not_found(self, monkeypatch):
+        """discover: L2 override with a non-existent path returns unavailable.
+
+        L2 bypasses adapter.check_availability() entirely and does a direct
+        file-existence check.  When the custom path does not point to an
+        executable file, discovery reports unavailable regardless of the
+        adapter's check_availability() return value.
+        """
         adapter = _make_mock_adapter(
             language="python", binary="pyright-langserver", available=False,
         )
-        monkeypatch.setenv("TWS_LSP_PYTHON_BINARY", "/custom/pyright-langserver")
+        monkeypatch.setenv("TWS_LSP_PYTHON_BINARY", "/nonexistent/pyright-langserver")
 
         with mock.patch.object(shutil, "which", side_effect=self._mock_which_returns(None)):
             result = discover(adapter)
@@ -481,7 +494,10 @@ class TestDiscoverAll:
         assert all(isinstance(k, str) for k in results)
 
     def test_l2_env_override_per_language(self, monkeypatch):
-        """discover_all: per-language L2 env var overrides work independently."""
+        """discover_all: per-language L2 env var overrides work independently.
+
+        Uses real executable paths so the direct file-access checks pass.
+        """
         python_adapter = _make_mock_adapter(
             language="python", binary="pyright-langserver", available=True,
         )
@@ -489,8 +505,8 @@ class TestDiscoverAll:
             language="typescript", binary="typescript-language-server", available=True,
         )
 
-        py_custom = "/custom/pyright"
-        ts_custom = "/custom/tsserver"
+        py_custom = sys.executable  # guaranteed to exist and be executable
+        ts_custom = sys.executable  # same; path just needs to be accessible
         monkeypatch.setenv("TWS_LSP_PYTHON_BINARY", py_custom)
         monkeypatch.setenv("TWS_LSP_TYPESCRIPT_BINARY", ts_custom)
 
@@ -501,7 +517,11 @@ class TestDiscoverAll:
         assert results["typescript"].path == ts_custom
 
     def test_l2_env_var_only_for_one_language(self, monkeypatch):
-        """discover_all: env var for one language, the other falls back to PATH."""
+        """discover_all: env var for one language, the other falls back to PATH.
+
+        Uses a real executable path for the L2 override so the direct
+        file-access check passes.
+        """
         python_adapter = _make_mock_adapter(
             language="python", binary="pyright-langserver", available=True,
         )
@@ -509,7 +529,7 @@ class TestDiscoverAll:
             language="typescript", binary="typescript-language-server", available=True,
         )
 
-        py_custom = "/custom/pyright"
+        py_custom = sys.executable  # guaranteed to exist and be executable
         monkeypatch.setenv("TWS_LSP_PYTHON_BINARY", py_custom)
         # TWS_LSP_TYPESCRIPT_BINARY is NOT set
 

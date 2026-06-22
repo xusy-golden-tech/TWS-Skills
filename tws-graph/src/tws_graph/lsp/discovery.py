@@ -70,20 +70,38 @@ def discover(adapter: LspLanguageAdapter) -> DiscoveryResult:
     env_key = f"TWS_LSP_{language.upper()}_BINARY"
     env_path = os.environ.get(env_key)
 
-    # -- L1: PATH lookup (skipped when L2 provides a path) --
-    found_path: Optional[str] = None
     if env_path:
-        found_path = env_path
-    else:
-        try:
-            found_path = shutil.which(binary)
-        except OSError as e:
+        # L2 override: bypass adapter.check_availability() (which does
+        # a PATH-based lookup that won't find a custom path) and instead
+        # directly verify that the file exists and is executable.
+        if os.path.isfile(env_path) and os.access(env_path, os.X_OK):
+            return DiscoveryResult(
+                language=language,
+                binary=binary,
+                available=True,
+                path=env_path,
+            )
+        else:
             return DiscoveryResult(
                 language=language,
                 binary=binary,
                 available=False,
-                error=f"OSError during PATH lookup: {e}",
+                error=(
+                    f"LSP binary override '{env_path}' (from {env_key}) "
+                    "is not an executable file"
+                ),
             )
+
+    # -- L1: PATH lookup --
+    try:
+        found_path = shutil.which(binary)
+    except OSError as e:
+        return DiscoveryResult(
+            language=language,
+            binary=binary,
+            available=False,
+            error=f"OSError during PATH lookup: {e}",
+        )
 
     # -- L3: adapter-level availability gate --
     if not adapter.check_availability():

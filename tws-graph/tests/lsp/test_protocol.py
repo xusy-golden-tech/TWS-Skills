@@ -423,8 +423,15 @@ class TestLspMessageReaderSendRequest:
 
             assert result == {"uri": "file:///main.py", "range": {}}
 
-            # Verify stdin received the request
-            stdin_content = stdin_reader.read()
+            # Verify stdin received the request (use _read_message since
+            # stdin is no longer auto-closed after each write)
+            stdin_buf = (
+                stdin_reader
+                if isinstance(stdin_reader, io.BufferedReader)
+                else io.BufferedReader(stdin_reader)
+            )
+            stdin_content = _read_message(stdin_buf)
+            assert stdin_content is not None
             assert b"textDocument/definition" in stdin_content
             assert b'"id":1' in stdin_content or b'"id": 1' in stdin_content
 
@@ -484,7 +491,8 @@ class TestLspMessageReaderNotification:
             reader = LspMessageReader(stdout=stdout_reader, stdin=stdin_writer)
             reader.send_notification("initialized", {})
 
-            stdin_content = stdin_reader_f.read()
+            stdin_content = _read_message(stdin_reader_f)
+            assert stdin_content is not None
             assert b"initialized" in stdin_content
             # Notification must NOT have an "id" field
             parsed = json.loads(stdin_content.decode("utf-8"))

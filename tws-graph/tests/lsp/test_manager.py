@@ -645,16 +645,22 @@ class TestLspManagerHealthStatus:
             mock_client = _make_mock_client(["mock"], "/ws")
             mock_cls.return_value = mock_client
 
-            mgr = LspManager(workspace_root="/ws", adapters=[py])
-            mgr.get_client("python")  # start
+            with patch("tws_graph.lsp.manager.time") as mock_time:
+                mock_time.monotonic.return_value = 0.0
 
-            # Simulate unhealthy
-            mock_client._process.poll.return_value = 1  # dead process
-            status = mgr.health_status()
+                mgr = LspManager(workspace_root="/ws", adapters=[py])
+                mgr.get_client("python")  # start
 
-            # Manager should detect unhealthy client
-            if "python" in status:
-                assert status["python"] is False
+                # Simulate unhealthy
+                mock_client._process.poll.return_value = 1  # dead process
+                # Advance time past heartbeat_timeout so the cache expires
+                # and a full re-check is triggered.
+                mock_time.monotonic.return_value = 100.0
+                status = mgr.health_status()
+
+                # Manager should detect unhealthy client
+                if "python" in status:
+                    assert status["python"] is False
 
 
 # ============================================================================
@@ -700,12 +706,16 @@ class TestLspManagerIsHealthy:
             )
             mock_cls.return_value = mock_client
 
-            mgr = LspManager(workspace_root="/ws", adapters=[py])
-            client = mgr.get_client("python")
+            with patch("tws_graph.lsp.manager.time") as mock_time:
+                mock_time.monotonic.return_value = 0.0
 
-            # Simulate dead process
-            mock_client._process.poll.return_value = 1
-            assert mgr._is_healthy(client, "python") is False
+                mgr = LspManager(workspace_root="/ws", adapters=[py])
+                client = mgr.get_client("python")
+
+                # Simulate dead process and expire the heartbeat cache.
+                mock_client._process.poll.return_value = 1
+                mock_time.monotonic.return_value = 100.0
+                assert mgr._is_healthy(client, "python") is False
 
     def test_is_healthy_false_when_heartbeat_returns_false(self):
         """Unhealthy when _heartbeat() returns False."""
@@ -722,13 +732,17 @@ class TestLspManagerIsHealthy:
             )
             mock_cls.return_value = mock_client
 
-            mgr = LspManager(workspace_root="/ws", adapters=[py])
-            client = mgr.get_client("python")
+            with patch("tws_graph.lsp.manager.time") as mock_time:
+                mock_time.monotonic.return_value = 0.0
 
-            # Process alive but heartbeat fails
-            mock_client._process.poll.return_value = None
-            mock_client._heartbeat.return_value = False
-            assert mgr._is_healthy(client, "python") is False
+                mgr = LspManager(workspace_root="/ws", adapters=[py])
+                client = mgr.get_client("python")
+
+                # Process alive but heartbeat fails; expire the cache first.
+                mock_client._process.poll.return_value = None
+                mock_client._heartbeat.return_value = False
+                mock_time.monotonic.return_value = 100.0
+                assert mgr._is_healthy(client, "python") is False
 
     def test_is_healthy_calls_client_heartbeat(self):
         """_is_healthy must use client._heartbeat() as part of its check."""
@@ -745,14 +759,19 @@ class TestLspManagerIsHealthy:
             )
             mock_cls.return_value = mock_client
 
-            mgr = LspManager(workspace_root="/ws", adapters=[py])
-            client = mgr.get_client("python")
+            with patch("tws_graph.lsp.manager.time") as mock_time:
+                mock_time.monotonic.return_value = 0.0
 
-            mock_client._heartbeat.reset_mock()
-            mock_client._heartbeat.return_value = True
-            mgr._is_healthy(client, "python")
+                mgr = LspManager(workspace_root="/ws", adapters=[py])
+                client = mgr.get_client("python")
 
-            mock_client._heartbeat.assert_called()
+                mock_client._heartbeat.reset_mock()
+                mock_client._heartbeat.return_value = True
+                # Expire the cache so a full re-check is triggered.
+                mock_time.monotonic.return_value = 100.0
+                mgr._is_healthy(client, "python")
+
+                mock_client._heartbeat.assert_called()
 
 
 # ============================================================================
@@ -997,6 +1016,10 @@ class TestLspManagerCrashRestart:
                 c1._process.poll.return_value = 1  # dead
                 c1._heartbeat.return_value = False
 
+                # Advance time past heartbeat_timeout so the cache expires
+                # and _is_healthy performs a full re-check.
+                mock_time.monotonic.return_value = 100.0
+
                 # get_client should detect unhealthy and restart
                 client_after = mgr.get_client("python")
 
@@ -1042,6 +1065,11 @@ class TestLspManagerCrashRestart:
                 # First one succeeds
                 client = mgr.get_client("python")
                 assert client is c1
+
+                # Advance time so the heartbeat cache expires and
+                # subsequent _is_healthy calls perform full re-checks.
+                _t = 100.0
+                mock_time.monotonic.return_value = _t
 
                 # Simulate crash — first restart
                 c1._process.poll.return_value = 1
@@ -1091,6 +1119,10 @@ class TestLspManagerCrashRestart:
 
                 _client = mgr.get_client("python")  # OK
 
+                # Advance time past heartbeat_timeout so cache expires
+                # and the unhealthy state is detected.
+                mock_time.monotonic.return_value = 100.0
+
                 # Crash → restart 1: delay should be 5s
                 c1._process.poll.return_value = 1
                 c1._heartbeat.return_value = False
@@ -1136,6 +1168,9 @@ class TestLspManagerCrashRestart:
                 client1 = mgr.get_client("python")
                 assert client1 is c1
 
+                # Advance time so the heartbeat cache expires.
+                mock_time.monotonic.return_value = 100.0
+
                 # Crash → restart (1st and last)
                 c1._process.poll.return_value = 1
                 client2 = mgr.get_client("python")
@@ -1177,16 +1212,23 @@ class TestLspManagerCrashRestart:
 
                 _c = mgr.get_client("python")
 
+                # Advance time so the heartbeat cache expires for
+                # unhealthy detection.
+                mock_time.monotonic.return_value = 100.0
+
                 # Crash 1: restart fails (c2 is dead)
                 c1._process.poll.return_value = 1
                 c1._heartbeat.return_value = False
                 _client2 = mgr.get_client("python")
 
-                # Crash 2: restart succeeds (c3 is healthy)
+                # Crash 2: restart succeeds (c3 is healthy).
+                # _is_healthy succeeded and set _last_heartbeat_time = 100.0.
                 _client3 = mgr.get_client("python")
                 assert _client3 is c3
 
-                # Next crash: should have full 3-restart budget again
+                # Next crash: should have full 3-restart budget again.
+                # Advance time again so the cache expires (last check was at 100.0).
+                mock_time.monotonic.return_value = 200.0
                 c3._process.poll.return_value = 1
                 c3._heartbeat.return_value = False
                 # This should trigger restart, not give up
@@ -1219,6 +1261,9 @@ class TestLspManagerCrashRestart:
                 )
 
                 mgr.get_client("python")  # start
+
+                # Advance time so cache expires for unhealthy detection.
+                mock_time.monotonic.return_value = 100.0
 
                 c1._process.poll.return_value = 1
                 c1._heartbeat.return_value = False
@@ -1299,7 +1344,12 @@ class TestLspManagerHeartbeatTimeout:
                 assert isinstance(result, bool)
 
     def test_heartbeat_timeout_custom_value_used(self):
-        """When heartbeat_timeout is 30, timeout is 30s."""
+        """When heartbeat_timeout is 30, cache expires after 30s.
+
+        Within the window the heartbeat is cached (no re-check).
+        After the window expires a full re-check is performed; if the
+        client is still alive the result is True, not False.
+        """
         try:
             from tws_graph.lsp.manager import LspManager
         except ImportError:
@@ -1324,8 +1374,19 @@ class TestLspManagerHeartbeatTimeout:
 
                 client = mgr.get_client("python")
 
-                # After 31s: should have timed out with 30s timeout
+                # After 29s: still within 30s cache window -> skip re-check
+                mock_time.monotonic.return_value = 29.0
+                assert mgr._is_healthy(client, "python") is True
+
+                # After 31s: cache expired -> full re-check triggered.
+                # The mock client is still healthy (alive + heartbeat True).
                 mock_time.monotonic.return_value = 31.0
+                result = mgr._is_healthy(client, "python")
+                assert result is True
+
+                # Now make the process dead and verify detection on re-check
+                mock_client._process.poll.return_value = 1
+                mock_time.monotonic.return_value = 62.0
                 result = mgr._is_healthy(client, "python")
                 assert result is False
 

@@ -464,6 +464,7 @@ class LspMessageReader:
             self._stdin.close()
         except Exception:
             pass
+        self._stdin_closed = True
 
         # Fail any remaining pending requests.
         with self._pending_lock:
@@ -483,38 +484,24 @@ class LspMessageReader:
     def _write_message(self, msg: dict) -> None:
         """Write a JSON-RPC message to stdin, protected by a lock.
 
-        Writes the JSON body (without Content-Length header) and
-        then forcefully closes the underlying Windows handle so
-        that the read end of the pipe sees EOF.
+        Encodes the message with a ``Content-Length`` header per the
+        LSP protocol (``Content-Length: N\\r\\n\\r\\n{body}``) and
+        writes it to stdin atomically.  stdin is kept open across
+        writes so that a real LSP server can read multiple messages;
+        it is only closed in :meth:`close`.
         """
         if self._stdin_closed:
             return
         body = json.dumps(msg, ensure_ascii=False).encode("utf-8")
+        header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+        data = header + body
         with self._write_lock:
             if self._stdin_closed:
                 return
             try:
-                os.write(self._stdin_fd, body)
+                os.write(self._stdin_fd, data)
             except OSError:
                 pass
-            # Close the underlying handle on Windows so the read
-            # end of the pipe sees EOF.  os.close() alone is not
-            # sufficient when os.fdopen() was used to create the
-            # writer because the CRT may hold extra handle references.
-            if os.name == "nt":
-                try:
-                    import msvcrt
-                    _handle = msvcrt.get_osfhandle(self._stdin_fd)
-                    if _handle not in (-1, -2):
-                        import ctypes
-                        ctypes.windll.kernel32.CloseHandle(_handle)
-                except Exception:
-                    pass
-            try:
-                os.close(self._stdin_fd)
-            except OSError:
-                pass
-            self._stdin_closed = True
 
     def _reader_loop(self) -> None:
         """Background thread: read messages from stdout and route them."""
