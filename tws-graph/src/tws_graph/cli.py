@@ -52,6 +52,10 @@ app = typer.Typer(
     help="TWS Code Graph — 预建代码符号关系图，agent 查图而非搜索",
 )
 
+# LSP sub-command group
+lsp_app = typer.Typer(help="LSP (Language Server Protocol) 集成管理")
+app.add_typer(lsp_app, name="lsp", help="LSP 集成管理")
+
 
 @app.callback(invoke_without_command=True)
 def _version_callback(
@@ -1442,6 +1446,98 @@ def _print_query_table(result, limit: int) -> None:
     if remaining > 0:
         typer.echo(f"\n(显示前 {len(rows_to_print)} 行，共 {result.total_count} 行)"
                    f"{'，使用 --limit 调整' if limit == 100 else ''}")
+
+
+# ============================================================================
+# lsp setup
+# ============================================================================
+
+
+@lsp_app.command("setup")
+def lsp_setup(
+    json_output: bool = typer.Option(
+        False, "--json",
+        help="JSON 格式输出",
+    ),
+):
+    """扫描注册的适配器，检测各 LSP server 可用性。
+
+    输出终端表格（语言 / binary / 状态 / 路径），支持 --json 输出 JSON 格式。
+
+    示例：
+      tws-graph lsp setup
+      tws-graph lsp setup --json
+    """
+    from tws_graph.lsp.discovery import discover_all
+    from tws_graph.lsp.adapters import get_all_adapters
+
+    adapters = get_all_adapters()
+    results = discover_all(adapters)
+
+    if json_output:
+        _print_lsp_setup_json(results)
+    else:
+        _print_lsp_setup_table(results)
+
+
+def _print_lsp_setup_json(results: dict) -> None:
+    """Output discovery results as pretty-printed JSON."""
+    serialized: dict[str, dict] = {}
+    for language, r in results.items():
+        serialized[language] = {
+            "language": r.language,
+            "binary": r.binary,
+            "available": r.available,
+            "path": r.path,
+            "error": r.error,
+        }
+    typer.echo(json.dumps(serialized, ensure_ascii=False, indent=2))
+
+
+def _print_lsp_setup_table(results: dict) -> None:
+    """Output discovery results as a terminal table.
+
+    Columns: language | binary | status | path/error
+    """
+    if not results:
+        typer.echo("(没有注册的 LSP 适配器)")
+        return
+
+    # Column widths
+    lang_width = max(max(len(r.language) for r in results.values()), len("语言"))
+    binary_width = max(max(len(r.binary) for r in results.values()), len("Binary"))
+    status_width = max(len("状态"), 8)
+    path_width = 60
+
+    # Header
+    header = (
+        f"{'语言':<{lang_width}}  "
+        f"{'Binary':<{binary_width}}  "
+        f"{'状态':<{status_width}}  "
+        f"{'路径 / 错误':<{path_width}}"
+    )
+    typer.echo(header)
+    typer.echo("-" * len(header))
+
+    # Rows sorted by language name
+    for language, r in sorted(results.items()):
+        if r.available:
+            status = typer.style("OK", fg=typer.colors.GREEN)
+        else:
+            status = typer.style("FAIL", fg=typer.colors.RED)
+        detail = r.path if r.available else (r.error or "未知错误")
+        # Truncate detail if too long
+        detail_str = str(detail) if detail else "-"
+        if len(detail_str) > path_width:
+            detail_str = detail_str[:path_width - 3] + "..."
+
+        row = (
+            f"{r.language:<{lang_width}}  "
+            f"{r.binary:<{binary_width}}  "
+            f"{status:<{status_width}}  "
+            f"{detail_str:<{path_width}}"
+        )
+        typer.echo(row)
 
 
 def main():
