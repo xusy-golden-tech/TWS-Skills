@@ -284,23 +284,26 @@ class MemoryStore(Store):
         """Insert a single edge. INSERT OR IGNORE (skip if already exists).
 
         Validates that the source node exists. Skips edge if source is missing.
-        Deduplicates by (source, target, kind) triple.
+        Deduplicates by (source, target, target_text, kind) quadruple so that
+        dangling edges with different target_text are treated as distinct.
         """
         _check_closed(self._closed)
         _check_missing_fields(edge, _REQUIRED_EDGE_FIELDS, "Edge")
         src = edge["source"]
         tgt = edge["target"]
         kind = edge["kind"]
+        target_text = edge.get("target_text", "")
 
         # Source must exist
         if src not in self._nodes:
             return
 
-        # Check for duplicate (source, target, kind)
+        # Check for duplicate (source, target, target_text, kind)
         if src in self._outgoing:
             for _, existing in self._outgoing[src]:
-                if (existing["target"] == tgt and
-                        existing["kind"] == kind):
+                if (existing.get("target", "") == tgt and
+                        existing.get("kind", "") == kind and
+                        existing.get("target_text", "") == target_text):
                     return  # duplicate, skip (INSERT OR IGNORE)
 
         edge_dict = dict(edge)
