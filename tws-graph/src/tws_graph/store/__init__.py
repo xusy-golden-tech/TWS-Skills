@@ -20,6 +20,7 @@ from .exceptions import (
     MigrationError,
 )
 from .interface import Store
+from .memory_store import MemoryStore
 from .types import (  # noqa: F401 — re-export for convenience
     Direction,
     EdgeRecord,
@@ -33,6 +34,8 @@ from .types import (  # noqa: F401 — re-export for convenience
 __all__ = [
     # Interface
     "Store",
+    # Implementations
+    "MemoryStore",
     # Exceptions
     "StoreError",
     "StoreClosedError",
