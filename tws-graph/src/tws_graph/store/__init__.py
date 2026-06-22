@@ -19,6 +19,7 @@ from .exceptions import (
     SchemaVersionError,
     MigrationError,
 )
+from .interface import Store
 from .types import (  # noqa: F401 — re-export for convenience
     Direction,
     EdgeRecord,
@@ -30,6 +31,8 @@ from .types import (  # noqa: F401 — re-export for convenience
 )
 
 __all__ = [
+    # Interface
+    "Store",
     # Exceptions
     "StoreError",
     "StoreClosedError",
