@@ -21,6 +21,7 @@ from .exceptions import (
 )
 from .interface import Store
 from .memory_store import MemoryStore
+from .sqlite_store import SqliteStore
 from .types import (  # noqa: F401 — re-export for convenience
     Direction,
     EdgeRecord,
@@ -35,6 +36,7 @@ __all__ = [
     # Interface
     "Store",
     # Implementations
+    "SqliteStore",
     "MemoryStore",
     # Exceptions
     "StoreError",
