@@ -198,6 +198,7 @@ class ClojureExtractor(BaseExtractor):
 
     extensions = [".clj", ".cljs", ".cljc", ".edn"]
     tree_sitter_languages = ["clojure"]
+    language_name = "clojure"
 
     def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
         edges = clojure_extract(source, tree, ctx.file_path)

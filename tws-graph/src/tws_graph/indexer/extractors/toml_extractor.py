@@ -151,6 +151,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
 class TomlExtractor(BaseExtractor):
     extensions = [".toml"]
     tree_sitter_languages = ["toml"]
+    language_name = "toml"
 
     def extract(self, source, tree, ctx) -> None:
         result_edges = extract(source, tree, ctx.file_path)

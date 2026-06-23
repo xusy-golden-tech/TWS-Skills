@@ -310,6 +310,7 @@ class HclExtractor(BaseExtractor):
 
     extensions = [".hcl", ".tf", ".tfvars"]
     tree_sitter_languages = ["hcl"]
+    language_name = "hcl"
 
     def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
         edges = hcl_extract(source, tree, ctx.file_path)

@@ -205,6 +205,7 @@ class JsonExtractor(BaseExtractor):
 
     extensions = [".json"]
     tree_sitter_languages = ["json"]
+    language_name = "json"
 
     def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
         edges = json_extract(source, tree, ctx.file_path)

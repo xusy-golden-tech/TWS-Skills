@@ -203,6 +203,7 @@ class HaskellExtractor(BaseExtractor):
 
     extensions = [".hs", ".lhs"]
     tree_sitter_languages = ["haskell"]
+    language_name = "haskell"
 
     def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
         edges = haskell_extract(source, tree, ctx.file_path)

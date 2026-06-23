@@ -210,6 +210,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
 class HtmlExtractor(BaseExtractor):
     extensions = [".html", ".htm"]
     tree_sitter_languages = ["html"]
+    language_name = "html"
 
     def extract(self, source, tree, ctx) -> None:
         result_edges = extract(source, tree, ctx.file_path)

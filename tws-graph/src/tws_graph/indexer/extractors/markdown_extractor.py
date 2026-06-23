@@ -198,6 +198,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
 class MarkdownExtractor(BaseExtractor):
     extensions = [".md", ".markdown"]
     tree_sitter_languages = ["markdown"]
+    language_name = "markdown"
 
     def extract(self, source, tree, ctx) -> None:
         result_edges = extract(source, tree, ctx.file_path)

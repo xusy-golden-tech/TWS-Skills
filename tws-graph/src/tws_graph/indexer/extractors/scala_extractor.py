@@ -160,6 +160,7 @@ class ScalaExtractor(BaseExtractor):
 
     extensions = [".scala", ".sc"]
     tree_sitter_languages = ["scala"]
+    language_name = "scala"
 
     def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
         edges = scala_extract(source, tree, ctx.file_path)

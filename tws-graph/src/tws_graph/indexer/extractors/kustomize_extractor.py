@@ -328,6 +328,7 @@ class KustomizeExtractor(BaseExtractor):
 
     extensions = [".yaml", ".yml"]
     tree_sitter_languages = ["yaml"]
+    language_name = "yaml"
 
     def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
         edges = kustomize_extract(source, tree, ctx.file_path)

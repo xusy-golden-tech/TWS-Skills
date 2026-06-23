@@ -225,6 +225,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
 class DockerfileExtractor(BaseExtractor):
     extensions = [".dockerfile", "Dockerfile"]
     tree_sitter_languages = ["dockerfile"]
+    language_name = "dockerfile"
 
     def extract(self, source, tree, ctx) -> None:
         result_edges = extract(source, tree, ctx.file_path)

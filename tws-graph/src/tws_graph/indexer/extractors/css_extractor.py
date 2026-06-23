@@ -184,6 +184,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
 class CssExtractor(BaseExtractor):
     extensions = [".css"]
     tree_sitter_languages = ["css"]
+    language_name = "css"
 
     def extract(self, source, tree, ctx) -> None:
         result_edges = extract(source, tree, ctx.file_path)

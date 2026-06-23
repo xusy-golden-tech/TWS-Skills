@@ -186,6 +186,7 @@ class ElixirExtractor(BaseExtractor):
 
     extensions = [".ex", ".exs"]
     tree_sitter_languages = ["elixir"]
+    language_name = "elixir"
 
     def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
         edges = elixir_extract(source, tree, ctx.file_path)
