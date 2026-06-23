@@ -5,6 +5,8 @@ from .entry_point import EntryPointDetector, EntryPointResult
 from .dead_code import DeadCodeDetector, DeadCodeCandidate
 from .complexity import ComplexityAnalyzer, ComplexityMetrics
 from .test_edges import TestEdgeAnalyzer, TestEdge
+from .git_diff import GitDiffAnalyzer, DiffImpact, RiskLevel
+from .config_links import ConfigLink, ConfigLinkAnalyzer
 
 __all__ = [
     "AnalyzerRegistration",
@@ -18,4 +20,9 @@ __all__ = [
     "ComplexityMetrics",
     "TestEdgeAnalyzer",
     "TestEdge",
+    "GitDiffAnalyzer",
+    "DiffImpact",
+    "RiskLevel",
+    "ConfigLink",
+    "ConfigLinkAnalyzer",
 ]
