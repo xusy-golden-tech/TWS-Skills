@@ -17,7 +17,7 @@ tws-graph 是代码符号关系图引擎。它用 tree-sitter 预建 SQLite 索�
 - 查影响范围 → `tws-graph impact`，不允许直接 Grep
 - 只有以下情况才允许使用 Grep：
   1. tws-graph 返回空结果或标记 `[internal]` 未解析
-  2. 搜索目标在 tws-graph 不索引的文件类型中（XML、YAML、JSON、.gradle、资源文件等）
+  2. 搜索目标在 tws-graph 不索引的文件类型中（XML、.gradle、图片、二进制文件等）
   3. 文件模式匹配（如查找 test 文件）
   4. 搜索字面字符串/正则，而非已知符号名
 
@@ -32,6 +32,9 @@ tws-graph 是代码符号关系图引擎。它用 tree-sitter 预建 SQLite 索�
 ```
 ✅ tws-graph search kind:class AppContainer
 ✅ tws-graph search readerSettingsStore
+✅ tws-graph search lang:sql kind:sql_table users
+✅ tws-graph search lang:dockerfile kind:dockerfile_stage builder
+✅ tws-graph search lang:hcl kind:hcl_resource aws_instance
 ✅ Grep "adContainer|FrameLayout" fragment_home.xml   （XML 文件，tws-graph 不索引）
 ✅ Grep "**/test/**/*Test.kt"                          （文件模式匹配）
 ```
@@ -41,6 +44,19 @@ tws-graph 是代码符号关系图引擎。它用 tree-sitter 预建 SQLite 索�
 - **agent 做主观判断**——风险等级、是否需要通知、是否值得改
 
 agent 不应该猜命令。加载此 skill 就是为了确保命令准确。
+
+## 索引覆盖范围
+
+tws-graph 通过 15 个 tree-sitter 提取器索引项目源文件，**所有提取器均产出节点（可搜索的符号）+ 边（关系）**：
+
+| 类别 | 语言 | 文件扩展名 | 关系类型 |
+|------|------|-----------|----------|
+| 编程语言 | Python, TypeScript, JavaScript, Java, Go, Rust, Kotlin, PHP, Ruby, C, C++, C#, Scala, Elixir, Haskell, Clojure | 对应扩展名 | contains, calls, imports |
+| 标记/样式 | HTML, CSS, Markdown | .html, .css, .md | contains, imports, calls |
+| 配置 | YAML, TOML, JSON, HCL, Kustomize | .yaml/.yml, .toml, .json, .hcl/.tf, .kustomize | contains, imports |
+| 容器/数据库 | Dockerfile, SQL | Dockerfile, .sql | contains, imports, calls, env_accesses |
+
+**这意味着 `tws-graph search` 可以搜索任何被索引文件中的符号**——不只是函数和类，还包括 SQL 表、Docker 构建阶段、HCL 资源、YAML 键、Kubernetes 资源等。
 
 ## 前置检查（每次查图前必做）
 
@@ -85,15 +101,51 @@ agent 不应该猜命令。加载此 skill 就是为了确保命令准确。
 
 | qualifier | 说明 | 取值 |
 |-----------|------|------|
-| `kind:` | 符号类型 | `class`, `function`, `method`, `module` |
-| `lang:` | 编程语言 | `python`, `typescript`, `java`, `go`, `rust`, `kotlin` |
+| `kind:` | 符号类型 | 见下方完整注册表 |
+| `lang:` | 语言 | `python`, `typescript`, `javascript`, `java`, `go`, `rust`, `kotlin`, `php`, `ruby`, `c`, `cpp`, `csharp`, `scala`, `elixir`, `haskell`, `clojure`, `html`, `css`, `markdown`, `toml`, `sql`, `dockerfile`, `yaml`, `hcl`, `json`, `kustomize` |
 | `path:` | 文件路径片段 | 任意字符串，如 `src/auth` |
 
-示例：
+### kind 完整注册表
+
+**编程语言通用：** `class`, `function`, `method`, `module`, `interface`, `struct`, `enum`, `variable`, `constant`, `type_alias`
+
+**语言特有：**
+- Scala: `scala_file`, `class`, `object`, `trait`, `function`, `variable`, `package`
+- Elixir: `elixir_file`, `module`, `function`
+- Haskell: `haskell_file`, `module`, `function`, `type_def`, `class`, `instance`, `signature`
+- Clojure: `clojure_file`, `namespace`, `var_def`
+
+**结构式语言：**
+- HTML: `html_element`
+- CSS: `css_rule`, `css_import`, `css_keyframes`, `css_media`
+- Markdown: `md_heading`, `md_code_block`, `md_link`, `md_image`, `md_refdef`
+- TOML: `toml_table`, `toml_table_array`
+- SQL: `sql_table`, `sql_index`, `sql_view`, `sql_query`
+- Dockerfile: `dockerfile`, `dockerfile_stage`
+- YAML: `yaml_key`, `yaml_document`
+- Kubernetes: `k8s_resource`
+- HCL: `hcl_resource`, `hcl_data`, `hcl_module`, `hcl_provider`, `hcl_variable`, `hcl_output`, `hcl_terraform`, `hcl_locals`, `hcl_backend`, `hcl_required_providers`, `hcl_provisioner`
+- JSON: `json_key`
+- Kustomize: `kustomize_section`
+
+### 搜索示例
+
 ```
+# 编程语言搜索
 tws-graph search kind:function auth
 tws-graph search lang:python kind:class user
 tws-graph search path:utils kind:method parse
+tws-graph search lang:haskell kind:function greet
+
+# 结构式语言搜索
+tws-graph search lang:sql kind:sql_table users
+tws-graph search lang:dockerfile kind:dockerfile_stage builder
+tws-graph search lang:hcl kind:hcl_resource aws_instance
+tws-graph search lang:yaml kind:yaml_key replicas
+tws-graph search lang:markdown kind:md_heading
+
+# 不指定 kind 搜索所有符号类型
+tws-graph search myapp
 ```
 
 ## 常用查询模式
@@ -127,6 +179,8 @@ tws-graph calls <报错函数> --inbound --depth 3
 tws-graph search <关键词>
 # 如果结果太多，加 qualifier 缩小范围：
 tws-graph search kind:function <关键词>
+tws-graph search lang:sql kind:sql_table <关键词>
+tws-graph search lang:hcl kind:hcl_resource <关键词>
 ```
 
 ## unresolved 引用分类与行动策略
@@ -187,7 +241,7 @@ tws-graph unresolved
 
 4. **不检查可用性就假设已安装**。每次加载此 skill 时都必须先跑 `tws-graph --version`。
 
-5. **用 Grep 查已知符号名**。类名、方法名、函数名必须先用 `tws-graph search` 查。Grep 只允许用于 tws-graph 不索引的文件类型（XML、.gradle、资源文件）、文件模式匹配、或图返回空/`[internal]` 后的回退。
+5. **用 Grep 查已知符号名**。类名、方法名、函数名、SQL 表、HCL 资源、YAML 键等所有被索引的符号必须先用 `tws-graph search` 查。Grep 只允许用于 tws-graph 不索引的文件类型（XML、.gradle、图片、二进制）、文件模式匹配、或图返回空/`[internal]` 后的回退。
 
 ## Rationalization Prevention
 
@@ -196,4 +250,6 @@ tws-graph unresolved
 | 「hooks 应该同步了，不用管」 | 刚改完代码还没 commit 时 hooks 不会触发，此时手动 `tws-graph index` 是必要的 |
 | 「返回空就是没调用关系」 | 动态调度、回调、闭包不会出现在静态分析中。标注 heuristic，回退 grep |
 | 「AppContainer 是类名，Grep 一下就行」 | 类名是符号，必须用 `tws-graph search kind:class`。Grep 只能看到文本出现，看不到结构化关系 |
-| 「这个参数应该存在」 | 不猜。此 skill 中的命令参考表是唯一权威，表上没有的就是不存在 |
+| 「users 表名，grep 一下就行」 | SQL 表是 `sql_table` 节点，用 `tws-graph search lang:sql kind:sql_table users`。Grep 看不到表与索引/视图的关系 |
+| 「YAML 文件不看代码图」 | YAML 键、K8s 资源、HCL 配置块都已索引为节点。`tws-graph search` 能找到 grep 漏掉的跨文件关联 |
+| 「这个参数应该存在」 | 不猜。此 skill 中的命令参考表和 kind 注册表是唯一权威，表上没有的就是不存在 |
