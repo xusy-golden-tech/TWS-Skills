@@ -1,0 +1,29 @@
+# Sample YAML for testing the generic YAML extractor
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-service
+  namespace: default
+  labels:
+    app: myapp
+    tier: backend
+spec:
+  selector:
+    app: myapp
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+    - port: 443
+      targetPort: 8443
+      protocol: TCP
+  type: ClusterIP
+  externalIPs:
+    - 192.168.1.100
+env:
+  DATABASE_URL: ${DB_URL}
+  APP_PORT: "${APP_PORT:-8080}"
+  NODE_ENV: production
+data:
+  config.yaml: !!include config/base.yaml
+  secret.env: !include secrets/env.yaml

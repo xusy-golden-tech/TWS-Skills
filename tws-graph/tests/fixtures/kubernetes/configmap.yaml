@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: production
+data:
+  app.properties: |
+    server.port=8080
+    server.host=0.0.0.0
+    database.url=jdbc:postgresql://db:5432/app
+  log_level: INFO
+  max_connections: "100"
+  feature_flags:
+    enable_new_ui: "true"
+    enable_cache: "false"

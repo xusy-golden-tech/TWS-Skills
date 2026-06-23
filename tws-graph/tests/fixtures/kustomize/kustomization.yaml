@@ -1,0 +1,55 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+  - ../../base
+  - ../common
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+namespace: production
+
+patches:
+  - path: patch-deployment.yaml
+    target:
+      kind: Deployment
+      name: myapp
+  - path: patch-configmap.yaml
+  - patch-remove-annotation.yaml
+
+images:
+  - name: nginx
+    newName: my-registry.io/production/nginx
+    newTag: "1.21.0"
+  - name: redis
+    newTag: "6.2-alpine"
+  - name: myapp
+    newName: my-registry.io/production/myapp
+    digest: sha256:abc123
+
+configMapGenerator:
+  - name: app-config
+    files:
+      - config.properties
+      - logging.properties
+  - name: env-config
+    literals:
+      - LOG_LEVEL=debug
+      - DB_HOST=postgres.prod
+
+secretGenerator:
+  - name: app-secrets
+    literals:
+      - DB_PASSWORD=supersecret
+      - API_KEY=key123
+
+commonLabels:
+  environment: production
+  team: platform
+
+commonAnnotations:
+  maintained-by: devops-team
+  deployment-tool: kustomize
