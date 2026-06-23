@@ -25,7 +25,8 @@ import fnmatch
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+
+from tws_graph.store.interface import Store
 
 
 # =============================================================================
@@ -100,7 +101,6 @@ class InvalidationTracker:
         self.table_name = table_name
         self._closed = False
         self._registrations: dict[str, AnalyzerRegistration] = {}
-        self._last_store: Optional[object] = None
 
         # Independent connection with WAL mode for concurrent readers.
         self._conn = sqlite3.connect(db_path)
@@ -126,15 +126,25 @@ class InvalidationTracker:
         """Register an analyzer's dependency declaration (idempotent UPSERT).
 
         Re-registering with the same name overwrites the previous registration.
+        If the version has changed, all existing tracking rows for this
+        analyzer are invalidated (is_valid = 0).
         """
         self._check_open()
+        existing = self._registrations.get(registration.analyzer_name)
+        if existing is not None and existing.version != registration.version:
+            self._conn.execute(
+                f"UPDATE {self.table_name} SET is_valid = 0 "
+                "WHERE analyzer_name = ?",
+                (registration.analyzer_name,),
+            )
+            self._conn.commit()
         self._registrations[registration.analyzer_name] = registration
 
     # -------------------------------------------------------------------------
     # Invalidation check
     # -------------------------------------------------------------------------
 
-    def check_invalidation(self, store: object) -> dict[str, list[str]]:
+    def check_invalidation(self, store: Store) -> dict[str, list[str]]:
         """Check which tracked files are stale.
 
         Compares each matched file's current *Store* mtime against the
@@ -154,7 +164,6 @@ class InvalidationTracker:
             registered).
         """
         self._check_open()
-        self._last_store = store
 
         file_stats = store.get_file_stats()  # {path: (size, modified_at)}
         store_paths = set(file_stats.keys())
@@ -236,8 +245,18 @@ class InvalidationTracker:
         Args:
             analyzer_name: Name of the analyzer that completed.
             file_paths: List of file paths to mark as up-to-date.
+
+        Raises:
+            ValueError: If *analyzer_name* has not been registered via
+                ``register()``.
         """
         self._check_open()
+
+        if analyzer_name not in self._registrations:
+            raise ValueError(
+                f"Analyzer '{analyzer_name}' is not registered. "
+                f"Call register() before mark_valid()."
+            )
 
         current_time = int(time.time())
 
@@ -276,7 +295,7 @@ class InvalidationTracker:
     # -------------------------------------------------------------------------
 
     def verify_consistency(
-        self, store: object, sample_size: int = 10
+        self, store: Store, sample_size: int = 10
     ) -> ConsistencyReport:
         """Randomly sample *sample_size* valid tracking records and compare
         the stored mtime baseline with the current Store value.
@@ -321,8 +340,8 @@ class InvalidationTracker:
                     {
                         "analyzer_name": analyzer_name,
                         "file_path": file_path,
-                        "expected_hash": str(tracked_mtime),
-                        "actual_hash": str(store_mtime),
+                        "tracked_mtime": str(tracked_mtime),
+                        "store_mtime": str(store_mtime),
                     }
                 )
 

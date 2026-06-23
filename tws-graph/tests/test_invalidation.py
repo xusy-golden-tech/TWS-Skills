@@ -506,6 +506,7 @@ class TestMarkValid:
 
     def test_mark_valid_persists_to_db(self, tracker, store):
         """mark_valid should write records to the analysis_tracking table."""
+        tracker.register(AnalyzerRegistration("test_analyzer", ["src/**/*.py"], []))
         tracker.mark_valid("test_analyzer", ["src/module_a.py", "src/module_b.py"])
         # Verify via direct SQL
         conn = sqlite3.connect(tracker.db_path)
@@ -528,6 +529,7 @@ class TestMarkValid:
         The actual Store mtime baseline is established later by
         check_invalidation().  mark_valid only flips the validity flag.
         """
+        tracker.register(AnalyzerRegistration("test_analyzer", ["src/**/*.py"], []))
         tracker.mark_valid("test_analyzer", ["src/test.py"])
         conn = sqlite3.connect(tracker.db_path)
         cursor = conn.execute(
@@ -541,11 +543,13 @@ class TestMarkValid:
 
     def test_mark_valid_empty_file_paths(self, tracker, store):
         """mark_valid with empty list should not raise."""
+        tracker.register(AnalyzerRegistration("test_analyzer", ["src/**/*.py"], []))
         tracker.mark_valid("test_analyzer", [])
         # Should not raise
 
     def test_mark_valid_overwrites_existing(self, tracker, store):
         """Calling mark_valid again should update existing records (no duplicates)."""
+        tracker.register(AnalyzerRegistration("test_analyzer", ["src/**/*.py"], []))
         tracker.mark_valid("test_analyzer", ["src/test.py"])
         # Calling again with the same file should not create a second row.
         tracker.mark_valid("test_analyzer", ["src/test.py"])
@@ -562,6 +566,7 @@ class TestMarkValid:
     def test_mark_valid_file_not_in_store_fills_zero(self, tracker):
         """mark_valid for file not in store: should set mtime=0 or handle gracefully."""
         s = MemoryStore()  # empty store
+        tracker.register(AnalyzerRegistration("test_analyzer", ["src/**/*.py"], []))
         tracker.mark_valid("test_analyzer", ["src/nonexistent.py"])
         conn = sqlite3.connect(tracker.db_path)
         cursor = conn.execute(
@@ -575,6 +580,8 @@ class TestMarkValid:
 
     def test_mark_valid_multiple_analyzers(self, tracker, store):
         """mark_valid for different analyzers should keep records separate."""
+        tracker.register(AnalyzerRegistration("analyzer_a", ["src/**/*.py"], []))
+        tracker.register(AnalyzerRegistration("analyzer_b", ["src/**/*.py"], []))
         tracker.mark_valid("analyzer_a", ["src/module_a.py"])
         tracker.mark_valid("analyzer_b", ["src/module_b.py"])
         conn = sqlite3.connect(tracker.db_path)
@@ -596,10 +603,16 @@ class TestMarkValid:
         with pytest.raises(Exception):
             t.mark_valid("test_analyzer", ["src/test.py"])
 
+    def test_mark_valid_unregistered_raises(self, tracker):
+        """mark_valid with an unregistered analyzer name should raise ValueError."""
+        with pytest.raises(ValueError, match="not registered"):
+            tracker.mark_valid("unknown_analyzer", ["src/test.py"])
+
     def test_mark_valid_with_closed_store(self, tracker, store):
         """mark_valid does NOT depend on the store — it should not raise
         even when the store is closed.  (check_invalidation is the method
         that validates store state.)"""
+        tracker.register(AnalyzerRegistration("test_analyzer", ["src/**/*.py"], []))
         store.close()
         # mark_valid only flips is_valid — no store access needed.
         tracker.mark_valid("test_analyzer", ["src/module_a.py"])
@@ -811,12 +824,12 @@ class TestIntegration:
         tracker.register(reg_v2)
 
         # After version bump, existing tracking data should be invalidated
-        # (implementation may do lazy invalidation on check, or eager on register)
         r2 = tracker.check_invalidation(store)
         # Design intent: version change → all files for this analyzer should be stale
-        # Accept either: stale files returned, or behavior TBD based on implementation
-        # For now, verify the method returns without error
-        assert isinstance(r2, dict)
+        assert "dead_code" in r2
+        assert "src/a.py" in r2["dead_code"]
+        assert "src/b.py" in r2["dead_code"]
+        assert len(r2["dead_code"]) == 2
 
         tracker.close()
 
@@ -981,7 +994,7 @@ class TestConsistencyReport:
             consistent_count=9,
             inconsistent_count=1,
             details=[{"analyzer_name": "test", "file_path": "src/a.py",
-                      "expected_hash": "abc", "actual_hash": "def"}],
+                      "tracked_mtime": "abc", "store_mtime": "def"}],
         )
         assert report.checked_count == 10
         assert report.consistent_count == 9
