@@ -241,8 +241,18 @@ class QueryBuilder:
             return self._search_fuzzy(query, limit)
         return []
 
+    def search_fts(self, query: str, limit: int = 50) -> list[sqlite3.Row]:
+        """BM25-ranked FTS5 search with column weights.
+
+        Public API — callers such as semantic search signals use this
+        to query the FTS5 index directly (e.g. BM25Signal).
+
+        Returns rows with an additional ``rank`` column (FTS5 BM25 score).
+        """
+        return self._search_fts(query, limit)
+
     def _search_fts(self, query: str, limit: int) -> list[sqlite3.Row]:
-        """BM25-ranked FTS5 search with column weights."""
+        """BM25-ranked FTS5 search with column weights (internal impl)."""
         try:
             fts_query = self._build_fts_query(query)
             rows = self._exec("""
