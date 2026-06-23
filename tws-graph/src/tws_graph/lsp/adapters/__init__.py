@@ -17,15 +17,25 @@ import pkgutil
 from typing import Type
 
 from tws_graph.lsp.adapters.base import ImportInfo, LspLanguageAdapter
+from tws_graph.lsp.adapters.c import CLspAdapter
+from tws_graph.lsp.adapters.cpp import CppLspAdapter
+from tws_graph.lsp.adapters.csharp import CSharpLspAdapter
 from tws_graph.lsp.adapters.java import JavaLspAdapter
+from tws_graph.lsp.adapters.php import PhpLspAdapter
 from tws_graph.lsp.adapters.python import PythonLspAdapter
+from tws_graph.lsp.adapters.ruby import RubyLspAdapter
 from tws_graph.lsp.adapters.typescript import TypeScriptLspAdapter
 
 __all__ = [
+    "CLspAdapter",
+    "CppLspAdapter",
+    "CSharpLspAdapter",
     "ImportInfo",
     "JavaLspAdapter",
     "LspLanguageAdapter",
+    "PhpLspAdapter",
     "PythonLspAdapter",
+    "RubyLspAdapter",
     "TypeScriptLspAdapter",
     "get_all_adapters",
 ]

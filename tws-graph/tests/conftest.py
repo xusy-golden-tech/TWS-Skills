@@ -220,3 +220,100 @@ def sample_kt_project(temp_project: Path, sample_kt_src: str) -> Path:
     fixt_dir.mkdir()
     (fixt_dir / "sample.kt").write_text(sample_kt_src, encoding="utf-8")
     return temp_project
+
+
+@pytest.fixture(scope="session")
+def sample_c_src() -> str:
+    """Return the sample.c fixture content."""
+    return """#include <stdio.h>
+#include <stdlib.h>
+#include "mylib.h"
+
+struct Point {
+    int x;
+    int y;
+};
+
+union Data {
+    int i;
+    float f;
+};
+
+enum Color { RED, GREEN, BLUE };
+
+int global_counter = 0;
+
+static int hidden_counter = 0;
+
+int add(int a, int b) {
+    return a + b;
+}
+
+void print_point(struct Point p) {
+    printf("Point(%d, %d)\\n", p.x, p.y);
+}
+
+int calculate_total(int x, int y) {
+    int temp = add(x, y);
+    return temp;
+}
+
+int main(void) {
+    struct Point p = {1, 2};
+    print_point(p);
+    int result = add(p.x, p.y);
+    int total = calculate_total(p.x, p.y);
+    return 0;
+}
+"""
+
+
+@pytest.fixture(scope="session")
+def sample_cpp_src() -> str:
+    """Return the sample.cpp fixture content."""
+    return """#include <iostream>
+#include <vector>
+#include "mylib.hpp"
+
+namespace math {
+
+template<typename T>
+class Calculator {
+public:
+    T add(T a, T b) { return a + b; }
+    T multiply(T a, T b) { return a * b; }
+};
+
+struct Point {
+    double x;
+    double y;
+};
+
+class Shape {
+public:
+    virtual double area() const = 0;
+    virtual ~Shape() {}
+};
+
+class Circle : public Shape {
+    double radius;
+public:
+    Circle(double r) : radius(r) {}
+    double area() const override { return 3.14 * radius * radius; }
+};
+
+} // namespace math
+
+int global_count = 0;
+
+void helper() {
+    std::cout << "helper called" << std::endl;
+}
+
+int main() {
+    math::Calculator<int> calc;
+    int result = calc.add(1, 2);
+    helper();
+    return 0;
+}
+"""
