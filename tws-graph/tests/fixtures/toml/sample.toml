@@ -1,0 +1,28 @@
+[package]
+name = "myapp"
+version = "1.0.0"
+description = "A sample application"
+authors = ["dev@example.com"]
+
+[dependencies]
+serde = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+
+[dev-dependencies]
+pytest = "7.0"
+
+[[bin]]
+name = "app"
+path = "src/main.rs"
+
+[[bin]]
+name = "cli"
+path = "src/cli.rs"
+
+[server.host]
+address = "0.0.0.0"
+port = 8080
+
+[server.tls]
+enabled = true
+cert = "/etc/cert.pem"

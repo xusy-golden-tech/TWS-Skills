@@ -1,0 +1,17 @@
+@media (max-width: 600px) {
+  .container {
+    font-size: 14px;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1024px) {
+  #sidebar {
+    display: block;
+  }
+}
+
+@media print {
+  body {
+    color: black;
+  }
+}

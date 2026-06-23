@@ -1,0 +1,20 @@
+.container {
+  color: red;
+}
+
+#header {
+  font-size: 20px;
+}
+
+p {
+  margin: 0;
+  padding: 10px;
+}
+
+div > span {
+  color: blue;
+}
+
+.class1.class2 {
+  font-weight: bold;
+}
