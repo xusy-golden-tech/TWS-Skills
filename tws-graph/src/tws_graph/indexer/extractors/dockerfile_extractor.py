@@ -18,7 +18,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id, BaseExtractor
+from tws_graph.indexer.base import hash_id, BaseExtractor, make_structural_node
 
 
 def _node_text(node, source: bytes) -> str:
@@ -91,8 +91,8 @@ def _resolve_env_text(env_pair_node, source: bytes) -> str:
     return _node_text(env_pair_node, source)
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract edges from a Dockerfile CST.
+def extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract nodes and edges from a Dockerfile CST.
 
     Args:
         source: Raw file bytes.
@@ -100,13 +100,22 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
         file_path: Logical file path.
 
     Returns:
-        List of edge dicts.
+        Tuple of (node dicts, edge dicts).
     """
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "dockerfile"))
+
     root = tree.root_node()
 
     # source ID for the whole Dockerfile
     df_id = hash_id(f"{file_path}::__dockerfile__", file_path)
+    _add_node(df_id, "__dockerfile__", "dockerfile", 1)
 
     def walk(node):
         for child in _named_children(node):
@@ -124,6 +133,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                 if image_spec:
                     image_text = _resolve_image_spec(image_spec, source)
                     stage_id = hash_id(f"{file_path}::{image_text}", file_path)
+                    _add_node(stage_id, image_text, "dockerfile_stage", line)
                     edges.append(_make_edge(
                         stage_id, image_text, "imports",
                         file_path, line,
@@ -219,7 +229,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
             walk(child)
 
     walk(root)
-    return edges
+    return nodes, edges
 
 
 class DockerfileExtractor(BaseExtractor):
@@ -228,5 +238,6 @@ class DockerfileExtractor(BaseExtractor):
     language_name = "dockerfile"
 
     def extract(self, source, tree, ctx) -> None:
-        result_edges = extract(source, tree, ctx.file_path)
+        result_nodes, result_edges = extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
         ctx.result.edges.extend(result_edges)

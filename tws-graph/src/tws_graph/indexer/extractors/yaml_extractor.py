@@ -18,7 +18,7 @@ Usage:
 from __future__ import annotations
 
 import re
-from tws_graph.indexer.base import hash_id, BaseExtractor
+from tws_graph.indexer.base import hash_id, BaseExtractor, make_structural_node
 
 # Regex for environment variable references: ${VAR_NAME} or ${VAR:-default}
 _ENV_VAR_RE = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}')
@@ -81,8 +81,8 @@ def _check_env_references(text: str) -> list[str]:
     return [m.group(0) for m in _ENV_VAR_RE.finditer(text)]
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract edges from a YAML CST.
+def extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract nodes and edges from a YAML CST.
 
     Args:
         source: Raw file bytes (UTF-8 encoded).
@@ -90,13 +90,22 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
         file_path: Logical file path.
 
     Returns:
-        List of edge dicts.
+        Tuple of (node dicts, edge dicts).
     """
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "yaml"))
+
     root = tree.root_node()
 
     # Top-level source ID for the whole file
     file_id = hash_id(f"{file_path}::__yaml__", file_path)
+    _add_node(file_id, "__yaml__", "yaml_document", 1)
 
     def find_tag_in_flow(flow_node) -> str | None:
         """Find a tag node inside a flow_node, return tag text without !! prefix."""
@@ -140,6 +149,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
             key_path = f"{parent_key_path}.{key_text}" if parent_key_path else key_text
             source_id = hash_id(f"{file_path}::{key_path}", file_path)
             line = pair.start_position().row + 1
+            _add_node(source_id, key_path, "yaml_key", line)
 
             # CONTAINS edge for this key
             edges.append(_make_edge(
@@ -218,6 +228,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
             item_key = f"{parent_key_path}[{idx}]"
             source_id = hash_id(f"{file_path}::{item_key}", file_path)
             line = item.start_position().row + 1
+            _add_node(source_id, item_key, "yaml_key", line)
 
             edges.append(_make_edge(
                 parent_source_id if parent_source_id else file_id,
@@ -274,7 +285,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
             if bn.kind() == "block_node":
                 walk_block_mapping(bn, "", file_id)
 
-    return edges
+    return nodes, edges
 
 
 class YamlExtractor(BaseExtractor):
@@ -283,5 +294,6 @@ class YamlExtractor(BaseExtractor):
     language_name = "yaml"
 
     def extract(self, source, tree, ctx) -> None:
-        result_edges = extract(source, tree, ctx.file_path)
+        result_nodes, result_edges = extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
         ctx.result.edges.extend(result_edges)

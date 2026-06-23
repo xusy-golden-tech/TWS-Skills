@@ -24,7 +24,7 @@ class TestTomlExtractor:
     def test_top_level_table(self):
         """Top-level [table] should produce a CONTAINS edge."""
         source, tree = _parse_file("sample.toml")
-        edges = toml_extract(source, tree, "sample.toml")
+        nodes, edges = toml_extract(source, tree, "sample.toml")
 
         table_edges = [e for e in edges if e["target_text"] == "package"
                        and e["kind"] == "contains"]
@@ -35,7 +35,7 @@ class TestTomlExtractor:
     def test_multiple_top_level_tables(self):
         """Multiple [tables] should produce multiple CONTAINS edges."""
         source, tree = _parse_file("sample.toml")
-        edges = toml_extract(source, tree, "sample.toml")
+        nodes, edges = toml_extract(source, tree, "sample.toml")
 
         table_names = {e["target_text"] for e in edges
                        if e["kind"] == "contains"
@@ -47,7 +47,7 @@ class TestTomlExtractor:
     def test_dotted_table(self):
         """[parent.child] should produce a CONTAINS edge with dotted name."""
         source, tree = _parse_file("sample.toml")
-        edges = toml_extract(source, tree, "sample.toml")
+        nodes, edges = toml_extract(source, tree, "sample.toml")
 
         dotted = [e for e in edges if e["target_text"] == "server.host"]
         assert len(dotted) >= 1
@@ -58,7 +58,7 @@ class TestTomlExtractor:
         source_str = "[a.b.c]\nkey = 1\n"
         parser = get_parser("toml")
         tree = parser.parse(source_str)
-        edges = toml_extract(source_str.encode("utf-8"), tree, "test.toml")
+        nodes, edges = toml_extract(source_str.encode("utf-8"), tree, "test.toml")
 
         table_edges = [e for e in edges if e["target_text"] == "a.b.c"]
         assert len(table_edges) == 1
@@ -67,7 +67,7 @@ class TestTomlExtractor:
     def test_array_of_tables(self):
         """[[bin]] should produce a CONTAINS edge."""
         source, tree = _parse_file("sample.toml")
-        edges = toml_extract(source, tree, "sample.toml")
+        nodes, edges = toml_extract(source, tree, "sample.toml")
 
         array_edges = [e for e in edges if e["target_text"] == "bin"
                        and e["kind"] == "contains"]
@@ -76,7 +76,7 @@ class TestTomlExtractor:
     def test_key_value_pairs(self):
         """key=value pairs should produce CONTAINS edges."""
         source, tree = _parse_file("sample.toml")
-        edges = toml_extract(source, tree, "sample.toml")
+        nodes, edges = toml_extract(source, tree, "sample.toml")
 
         pair_edges = [e for e in edges if "=" in e.get("target_text", "")
                       and e["kind"] == "contains"]
@@ -89,7 +89,7 @@ class TestTomlExtractor:
     def test_source_loc_format(self):
         """Each edge should have a properly formatted source_loc."""
         source, tree = _parse_file("sample.toml")
-        edges = toml_extract(source, tree, "sample.toml")
+        nodes, edges = toml_extract(source, tree, "sample.toml")
 
         assert len(edges) > 0
         for edge in edges:
@@ -100,7 +100,7 @@ class TestTomlExtractor:
     def test_source_hash_consistency(self):
         """Same table name should produce same hash ID."""
         source, tree = _parse_file("sample.toml")
-        edges = toml_extract(source, tree, "sample.toml")
+        nodes, edges = toml_extract(source, tree, "sample.toml")
 
         bin_edges = [e for e in edges if e["target_text"] == "bin"]
         assert len(bin_edges) >= 2
@@ -112,7 +112,7 @@ class TestTomlExtractor:
         source_str = "# Just a comment\n"
         parser = get_parser("toml")
         tree = parser.parse(source_str)
-        edges = toml_extract(source_str.encode("utf-8"), tree, "empty.toml")
+        nodes, edges = toml_extract(source_str.encode("utf-8"), tree, "empty.toml")
 
         assert len(edges) == 0
 
@@ -121,7 +121,7 @@ class TestTomlExtractor:
         source_str = "[app]\nname = 'test'\n"
         parser = get_parser("toml")
         tree = parser.parse(source_str)
-        edges = toml_extract(source_str.encode("utf-8"), tree, "test.toml")
+        nodes, edges = toml_extract(source_str.encode("utf-8"), tree, "test.toml")
 
         assert len(edges) >= 2  # table CONTAINS + pair CONTAINS
         kinds = {e["kind"] for e in edges}
@@ -132,7 +132,7 @@ class TestTomlExtractor:
         source_str = "[config]\nenabled = true\ncount = 42\n"
         parser = get_parser("toml")
         tree = parser.parse(source_str)
-        edges = toml_extract(source_str.encode("utf-8"), tree, "test.toml")
+        nodes, edges = toml_extract(source_str.encode("utf-8"), tree, "test.toml")
 
         pair_texts = {e["target_text"] for e in edges if "=" in e["target_text"]}
         assert "enabled=true" in pair_texts
@@ -143,7 +143,7 @@ class TestTomlExtractor:
         source_str = '[info]\ntitle = "Hello World"\n'
         parser = get_parser("toml")
         tree = parser.parse(source_str)
-        edges = toml_extract(source_str.encode("utf-8"), tree, "test.toml")
+        nodes, edges = toml_extract(source_str.encode("utf-8"), tree, "test.toml")
 
         pair_texts = {e["target_text"] for e in edges if "=" in e["target_text"]}
         assert 'title="Hello World"' in pair_texts

@@ -30,7 +30,7 @@ class TestDockerfileExtractor:
     def test_from_imports(self):
         """FROM image:tag should produce IMPORTS edges."""
         source, tree = _parse_file("Dockerfile")
-        edges = df_extract(source, tree, "Dockerfile")
+        nodes, edges = df_extract(source, tree, "Dockerfile")
 
         import_edges = [e for e in edges if e["kind"] == "imports"]
         assert len(import_edges) >= 2  # python:3.11-slim and nginx:alpine
@@ -41,7 +41,7 @@ class TestDockerfileExtractor:
 
     def test_from_without_tag(self):
         """FROM image without tag should produce IMPORTS with image name only."""
-        edges = _parse("FROM ubuntu\n")
+        nodes, edges = _parse("FROM ubuntu\n")
 
         import_edges = [e for e in edges if e["kind"] == "imports"]
         assert len(import_edges) == 1
@@ -50,7 +50,7 @@ class TestDockerfileExtractor:
     def test_copy_imports(self):
         """COPY should produce IMPORTS edges."""
         source, tree = _parse_file("Dockerfile")
-        edges = df_extract(source, tree, "Dockerfile")
+        nodes, edges = df_extract(source, tree, "Dockerfile")
 
         copy_edges = [e for e in edges if e["kind"] == "imports"
                       and e["target_text"] == "requirements.txt"]
@@ -59,7 +59,7 @@ class TestDockerfileExtractor:
     def test_add_imports(self):
         """ADD should produce IMPORTS edges."""
         source, tree = _parse_file("Dockerfile")
-        edges = df_extract(source, tree, "Dockerfile")
+        nodes, edges = df_extract(source, tree, "Dockerfile")
 
         add_edges = [e for e in edges if e["kind"] == "imports"
                      and e["target_text"] == "extra.tar.gz"]
@@ -68,7 +68,7 @@ class TestDockerfileExtractor:
     def test_run_calls(self):
         """RUN should produce CALLS edges."""
         source, tree = _parse_file("Dockerfile")
-        edges = df_extract(source, tree, "Dockerfile")
+        nodes, edges = df_extract(source, tree, "Dockerfile")
 
         call_edges = [e for e in edges if e["kind"] == "calls"]
         assert len(call_edges) >= 1
@@ -79,7 +79,7 @@ class TestDockerfileExtractor:
     def test_env_accesses(self):
         """ENV should produce ENV_ACCESSES edges."""
         source, tree = _parse_file("Dockerfile")
-        edges = df_extract(source, tree, "Dockerfile")
+        nodes, edges = df_extract(source, tree, "Dockerfile")
 
         env_edges = [e for e in edges if e["kind"] == "env_accesses"]
         assert len(env_edges) >= 3  # APP_HOME, MODE, DEBUG
@@ -92,7 +92,7 @@ class TestDockerfileExtractor:
     def test_expose_contains(self):
         """EXPOSE should produce CONTAINS edges."""
         source, tree = _parse_file("Dockerfile")
-        edges = df_extract(source, tree, "Dockerfile")
+        nodes, edges = df_extract(source, tree, "Dockerfile")
 
         expose_edges = [e for e in edges if e["kind"] == "contains"
                         and e["target_text"] in ("8080", "3000", "80")]
@@ -101,7 +101,7 @@ class TestDockerfileExtractor:
     def test_volume_contains(self):
         """VOLUME should produce CONTAINS edges."""
         source, tree = _parse_file("Dockerfile")
-        edges = df_extract(source, tree, "Dockerfile")
+        nodes, edges = df_extract(source, tree, "Dockerfile")
 
         volume_edges = [e for e in edges if e["kind"] == "contains"
                         and e["target_text"] in ("/data", "/var/log", "/var/tmp")]
@@ -110,7 +110,7 @@ class TestDockerfileExtractor:
     def test_cmd_contains(self):
         """CMD should produce CONTAINS edges."""
         source, tree = _parse_file("Dockerfile")
-        edges = df_extract(source, tree, "Dockerfile")
+        nodes, edges = df_extract(source, tree, "Dockerfile")
 
         cmd_edges = [e for e in edges if e["kind"] == "contains"]
         cmd_texts = {e["target_text"] for e in cmd_edges}
@@ -120,7 +120,7 @@ class TestDockerfileExtractor:
     def test_entrypoint_contains(self):
         """ENTRYPOINT should produce CONTAINS edges."""
         source, tree = _parse_file("Dockerfile")
-        edges = df_extract(source, tree, "Dockerfile")
+        nodes, edges = df_extract(source, tree, "Dockerfile")
 
         ep_edges = [e for e in edges if e["kind"] == "contains"]
         ep_texts = {e["target_text"] for e in ep_edges}
@@ -129,7 +129,7 @@ class TestDockerfileExtractor:
     def test_edge_provenance(self):
         """All edges should have provenance='tree-sitter'."""
         source, tree = _parse_file("Dockerfile")
-        edges = df_extract(source, tree, "Dockerfile")
+        nodes, edges = df_extract(source, tree, "Dockerfile")
 
         assert len(edges) > 0
         for edge in edges:
@@ -139,14 +139,14 @@ class TestDockerfileExtractor:
     def test_source_loc_format(self):
         """Each edge should have a properly formatted source_loc."""
         source, tree = _parse_file("Dockerfile")
-        edges = df_extract(source, tree, "Dockerfile")
+        nodes, edges = df_extract(source, tree, "Dockerfile")
 
         for edge in edges:
             assert "Dockerfile:" in edge["source_loc"]
 
     def test_multi_stage_build(self):
         """Multi-stage build with multiple FROM should produce multiple IMPORTS."""
-        edges = _parse(
+        nodes, edges = _parse(
             "FROM golang:1.21 AS builder\n"
             "COPY . /src\n"
             "FROM alpine:3.18\n"
@@ -163,7 +163,7 @@ class TestDockerfileExtractor:
 
     def test_json_form_cmd(self):
         """CMD with JSON form should be extracted correctly."""
-        edges = _parse('CMD ["python", "app.py"]\n')
+        nodes, edges = _parse('CMD ["python", "app.py"]\n')
 
         cmd_edges = [e for e in edges if e["kind"] == "contains"
                      and "python" in e["target_text"]]

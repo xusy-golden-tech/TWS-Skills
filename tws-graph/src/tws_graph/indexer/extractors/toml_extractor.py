@@ -15,7 +15,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id, BaseExtractor
+from tws_graph.indexer.base import hash_id, BaseExtractor, make_structural_node
 
 
 def _node_text(node, source: bytes) -> str:
@@ -74,8 +74,8 @@ def _resolve_pair_text(node, source: bytes) -> str:
     return ""
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract CONTAINS edges from a TOML CST.
+def extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract CONTAINS nodes and edges from a TOML CST.
 
     Args:
         source: Raw file bytes.
@@ -83,9 +83,17 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
         file_path: Logical file path (used in source IDs and locs).
 
     Returns:
-        List of edge dicts.
+        Tuple of (node dicts, edge dicts).
     """
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "toml"))
+
     root = tree.root_node()
 
     def walk(node, current_section: str = ""):
@@ -102,6 +110,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                 if key_node:
                     section = _resolve_dotted_key(key_node, source)
                     source_id = hash_id(f"{file_path}::{section}", file_path)
+                    _add_node(source_id, section, "toml_table", child.start_position().row + 1)
                     edges.append(_make_edge(
                         source_id, section, "contains",
                         file_path, child.start_position().row + 1,
@@ -123,6 +132,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                 if key_node:
                     section = _resolve_dotted_key(key_node, source)
                     source_id = hash_id(f"{file_path}::{section}", file_path)
+                    _add_node(source_id, section, "toml_table_array", child.start_position().row + 1)
                     edges.append(_make_edge(
                         source_id, section, "contains",
                         file_path, child.start_position().row + 1,
@@ -145,7 +155,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
             ))
 
     walk(root)
-    return edges
+    return nodes, edges
 
 
 class TomlExtractor(BaseExtractor):
@@ -154,5 +164,6 @@ class TomlExtractor(BaseExtractor):
     language_name = "toml"
 
     def extract(self, source, tree, ctx) -> None:
-        result_edges = extract(source, tree, ctx.file_path)
+        result_nodes, result_edges = extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
         ctx.result.edges.extend(result_edges)

@@ -77,6 +77,29 @@ def resolve_qualified_target(callee_name: str, file_path: str) -> str:
     return f"{file_path}::{callee_name.replace('.', '::')}"
 
 
+def make_structural_node(source_id: str, name: str, kind: str, file_path: str,
+                         line: int, language: str, end_line: int | None = None) -> dict:
+    """Create a node dict for a structural element (HTML, CSS, YAML, etc.).
+
+    Used by standalone structural extractors that don't have access to
+    ExtractionContext.  Returns a dict conforming to the node schema so
+    wrapper classes can append it directly to ctx.result.nodes.
+    """
+    return {
+        "id": source_id,
+        "kind": kind,
+        "name": name,
+        "qualified_name": f"{file_path}::{name}",
+        "file_path": file_path,
+        "language": language,
+        "start_line": line,
+        "end_line": end_line if end_line is not None else line,
+        "visibility": "public",
+        "is_abstract": 0,
+        "is_exported": 0,
+    }
+
+
 # ---------------------------------------------------------------------------
 # ExtractionContext
 # ---------------------------------------------------------------------------

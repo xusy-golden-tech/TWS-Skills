@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from tws_graph.indexer.base import hash_id, BaseExtractor
+from tws_graph.indexer.base import hash_id, BaseExtractor, make_structural_node
 
 
 def _node_text(node, source: bytes) -> str:
@@ -97,8 +97,8 @@ def _get_heading_level(heading_node) -> int:
     return 1
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract edges from a Markdown CST.
+def extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract nodes and edges from a Markdown CST.
 
     Args:
         source: Raw file bytes.
@@ -106,9 +106,17 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
         file_path: Logical file path.
 
     Returns:
-        List of edge dicts.
+        Tuple of (node dicts, edge dicts).
     """
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "markdown"))
+
     root = tree.root_node()
 
     heading_count: dict[int, int] = {}  # level -> count for indexing
@@ -127,6 +135,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                     idx = heading_count[level]
                     ident = f"h{level}#{idx}: {heading_text}"
                     source_id = hash_id(f"{file_path}::heading::{ident}", file_path)
+                    _add_node(source_id, ident, "md_heading", line)
 
                     edges.append(_make_edge(
                         source_id, heading_text, "contains",
@@ -145,6 +154,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                 preview = code_text[:40].replace("\n", "\\n")
                 ident = f"codeblock:{lang}" if lang else "codeblock"
                 source_id = hash_id(f"{file_path}::codeblock::{ident}", file_path)
+                _add_node(source_id, ident, "md_code_block", line)
 
                 edges.append(_make_edge(
                     source_id, f"lang:{lang} {preview}", "contains",
@@ -156,9 +166,11 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
 
                 # Extract links [text](url)
                 for link_text, url in _extract_inline_links(text):
+                    ident = f"link::{link_text}->{url}"
                     source_id = hash_id(
-                        f"{file_path}::link::{link_text}->{url}", file_path,
+                        f"{file_path}::{ident}", file_path,
                     )
+                    _add_node(source_id, ident, "md_link", line)
                     edges.append(_make_edge(
                         source_id, url, "references",
                         file_path, line,
@@ -166,9 +178,11 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
 
                 # Extract images ![alt](url)
                 for alt_text, url in _extract_inline_images(text):
+                    ident = f"image::{alt_text}->{url}"
                     source_id = hash_id(
-                        f"{file_path}::image::{alt_text}->{url}", file_path,
+                        f"{file_path}::{ident}", file_path,
                     )
+                    _add_node(source_id, ident, "md_image", line)
                     edges.append(_make_edge(
                         source_id, url, "references",
                         file_path, line,
@@ -180,9 +194,11 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                 if label and dest:
                     label_text = _node_text(label, source).strip()
                     dest_text = _node_text(dest, source).strip()
+                    ident = f"refdef::{label_text}"
                     source_id = hash_id(
-                        f"{file_path}::refdef::{label_text}", file_path,
+                        f"{file_path}::{ident}", file_path,
                     )
+                    _add_node(source_id, ident, "md_refdef", line)
                     edges.append(_make_edge(
                         source_id, dest_text, "references",
                         file_path, line,
@@ -192,7 +208,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
             walk(child)
 
     walk(root)
-    return edges
+    return nodes, edges
 
 
 class MarkdownExtractor(BaseExtractor):
@@ -201,5 +217,6 @@ class MarkdownExtractor(BaseExtractor):
     language_name = "markdown"
 
     def extract(self, source, tree, ctx) -> None:
-        result_edges = extract(source, tree, ctx.file_path)
+        result_nodes, result_edges = extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
         ctx.result.edges.extend(result_edges)

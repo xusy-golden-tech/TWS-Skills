@@ -14,7 +14,7 @@ def _read_fixture(name: str) -> str:
         return f.read()
 
 
-def _parse_and_extract(name: str) -> list[dict]:
+def _parse_and_extract(name: str) -> "tuple[list[dict], list[dict]]":
     source = _read_fixture(name)
     parser = get_parser("css")
     tree = parser.parse(source)
@@ -27,31 +27,31 @@ class TestCssExtractor:
     # ---- references edges (selectors) ----
 
     def test_extracts_class_selector_references(self):
-        edges = _parse_and_extract("basic.css")
+        nodes, edges = _parse_and_extract("basic.css")
         refs = [e for e in edges if e["kind"] == "references"]
         target_texts = {e["target_text"] for e in refs}
         assert ".container" in target_texts
 
     def test_extracts_id_selector_references(self):
-        edges = _parse_and_extract("basic.css")
+        nodes, edges = _parse_and_extract("basic.css")
         refs = [e for e in edges if e["kind"] == "references"]
         target_texts = {e["target_text"] for e in refs}
         assert "#header" in target_texts
 
     def test_extracts_element_selector_references(self):
-        edges = _parse_and_extract("basic.css")
+        nodes, edges = _parse_and_extract("basic.css")
         refs = [e for e in edges if e["kind"] == "references"]
         target_texts = {e["target_text"] for e in refs}
         assert any("p" in t for t in target_texts)
 
     def test_extracts_combinator_selector(self):
-        edges = _parse_and_extract("basic.css")
+        nodes, edges = _parse_and_extract("basic.css")
         refs = [e for e in edges if e["kind"] == "references"]
         target_texts = {e["target_text"] for e in refs}
         assert any("div > span" in t for t in target_texts)
 
     def test_extracts_compound_selector(self):
-        edges = _parse_and_extract("basic.css")
+        nodes, edges = _parse_and_extract("basic.css")
         refs = [e for e in edges if e["kind"] == "references"]
         target_texts = {e["target_text"] for e in refs}
         assert any(".class1.class2" in t for t in target_texts)
@@ -59,7 +59,7 @@ class TestCssExtractor:
     # ---- imports edges (@import) ----
 
     def test_extracts_import_statements(self):
-        edges = _parse_and_extract("imports.css")
+        nodes, edges = _parse_and_extract("imports.css")
         imports = [e for e in edges if e["kind"] == "imports"]
         assert len(imports) >= 2
         urls = {e["target_text"] for e in imports}
@@ -69,7 +69,7 @@ class TestCssExtractor:
     # ---- contains edges (CSS variables) ----
 
     def test_extracts_variable_contains(self):
-        edges = _parse_and_extract("variables.css")
+        nodes, edges = _parse_and_extract("variables.css")
         contains = [e for e in edges if e["kind"] == "contains"]
         target_texts = {e["target_text"] for e in contains}
         assert "--main-color" in target_texts
@@ -80,7 +80,7 @@ class TestCssExtractor:
     # ---- contains edges (@keyframes) ----
 
     def test_extracts_keyframes_contains(self):
-        edges = _parse_and_extract("keyframes.css")
+        nodes, edges = _parse_and_extract("keyframes.css")
         contains = [e for e in edges if e["kind"] == "contains"]
         target_texts = {e["target_text"] for e in contains}
         assert "fadeIn" in target_texts
@@ -89,7 +89,7 @@ class TestCssExtractor:
     # ---- contains edges (@media) ----
 
     def test_extracts_media_contains(self):
-        edges = _parse_and_extract("media.css")
+        nodes, edges = _parse_and_extract("media.css")
         contains = [e for e in edges if e["kind"] == "contains"]
         target_texts = {e["target_text"] for e in contains}
         assert any("max-width: 600px" in t for t in target_texts)
@@ -99,12 +99,12 @@ class TestCssExtractor:
     # ---- edge cases ----
 
     def test_empty_file(self):
-        edges = _parse_and_extract("empty.css")
+        nodes, edges = _parse_and_extract("empty.css")
         assert isinstance(edges, list)
         assert len(edges) == 0
 
     def test_all_edges_have_required_fields(self):
-        edges = _parse_and_extract("basic.css")
+        nodes, edges = _parse_and_extract("basic.css")
         for edge in edges:
             assert "source" in edge
             assert "target" in edge
@@ -117,6 +117,6 @@ class TestCssExtractor:
             assert len(edge["source"]) == 32
 
     def test_all_edges_valid_kinds(self):
-        edges = _parse_and_extract("variables.css")
+        nodes, edges = _parse_and_extract("variables.css")
         for edge in edges:
             assert edge["kind"] in ("contains", "imports", "references")

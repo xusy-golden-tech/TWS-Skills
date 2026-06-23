@@ -14,7 +14,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id, BaseExtractor
+from tws_graph.indexer.base import hash_id, BaseExtractor, make_structural_node
 
 
 def _node_text(node, source: bytes) -> str:
@@ -94,8 +94,8 @@ def _count_elements_with_tag(root, tag: str) -> int:
     return count
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract edges from an HTML CST.
+def extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract nodes and edges from an HTML CST.
 
     Args:
         source: Raw file bytes.
@@ -103,10 +103,17 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
         file_path: Logical file path.
 
     Returns:
-        List of edge dicts.
+        Tuple of (node dicts, edge dicts).
     """
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
     root = tree.root_node()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "html"))
 
     def walk(node, state: dict):
         """Walk the AST and extract edges. state holds per-tag counters for index assignment."""
@@ -131,6 +138,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                         ident = f"{tag_name}#{idx}"
 
                     source_id = hash_id(f"{file_path}::{ident}", file_path)
+                    _add_node(source_id, ident, "html_element", line)
 
                     # CONTAINS edge for elements with id
                     if element_id:
@@ -189,6 +197,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                 idx = state[state_key]
                 ident = f"{tag_name}#{idx}"
                 source_id = hash_id(f"{file_path}::{ident}", file_path)
+                _add_node(source_id, ident, "html_element", line)
 
                 src = _get_attribute_value(child, "src", source)
                 if src:
@@ -204,7 +213,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                 walk(child, state)
 
     walk(root, {})
-    return edges
+    return nodes, edges
 
 
 class HtmlExtractor(BaseExtractor):
@@ -213,5 +222,6 @@ class HtmlExtractor(BaseExtractor):
     language_name = "html"
 
     def extract(self, source, tree, ctx) -> None:
-        result_edges = extract(source, tree, ctx.file_path)
+        result_nodes, result_edges = extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
         ctx.result.edges.extend(result_edges)

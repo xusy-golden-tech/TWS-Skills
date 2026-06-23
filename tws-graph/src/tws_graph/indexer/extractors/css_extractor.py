@@ -14,7 +14,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id, BaseExtractor
+from tws_graph.indexer.base import hash_id, BaseExtractor, make_structural_node
 
 
 def _node_text(node, source: bytes) -> str:
@@ -79,8 +79,8 @@ def _extract_keyframes_name(node, source: bytes) -> str | None:
     return None
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract edges from a CSS CST.
+def extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract nodes and edges from a CSS CST.
 
     Args:
         source: Raw file bytes.
@@ -88,9 +88,17 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
         file_path: Logical file path.
 
     Returns:
-        List of edge dicts.
+        Tuple of (node dicts, edge dicts).
     """
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "css"))
+
     root = tree.root_node()
 
     # State for counting unnamed selectors
@@ -111,6 +119,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                     idx = state[state_key]
                     ident = f"rule:{sel_text}" if idx == 1 else f"rule:{sel_text}__{idx}"
                     source_id = hash_id(f"{file_path}::{ident}", file_path)
+                    _add_node(source_id, ident, "css_rule", line)
 
                     edges.append(_make_edge(
                         source_id, sel_text, "references",
@@ -125,7 +134,9 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
             elif kind == "import_statement":
                 url = _extract_import_url(child, source)
                 if url:
-                    source_id = hash_id(f"{file_path}::@import::{url}", file_path)
+                    ident = f"@import::{url}"
+                    source_id = hash_id(f"{file_path}::{ident}", file_path)
+                    _add_node(source_id, ident, "css_import", line)
                     edges.append(_make_edge(
                         source_id, url, "imports",
                         file_path, line,
@@ -134,7 +145,9 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
             elif kind == "keyframes_statement":
                 anim_name = _extract_keyframes_name(child, source)
                 if anim_name:
-                    source_id = hash_id(f"{file_path}::@keyframes::{anim_name}", file_path)
+                    ident = f"@keyframes::{anim_name}"
+                    source_id = hash_id(f"{file_path}::{ident}", file_path)
+                    _add_node(source_id, ident, "css_keyframes", line)
                     edges.append(_make_edge(
                         source_id, anim_name, "contains",
                         file_path, line,
@@ -154,7 +167,9 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                             feature_text = _node_text(keyword, source).strip()
                         else:
                             feature_text = "media"
-                source_id = hash_id(f"{file_path}::@media::{feature_text}", file_path)
+                ident = f"@media::{feature_text}"
+                source_id = hash_id(f"{file_path}::{ident}", file_path)
+                _add_node(source_id, ident, "css_media", line)
                 edges.append(_make_edge(
                     source_id, feature_text, "contains",
                     file_path, line,
@@ -178,7 +193,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                         ))
 
     walk(root)
-    return edges
+    return nodes, edges
 
 
 class CssExtractor(BaseExtractor):
@@ -187,5 +202,6 @@ class CssExtractor(BaseExtractor):
     language_name = "css"
 
     def extract(self, source, tree, ctx) -> None:
-        result_edges = extract(source, tree, ctx.file_path)
+        result_nodes, result_edges = extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
         ctx.result.edges.extend(result_edges)

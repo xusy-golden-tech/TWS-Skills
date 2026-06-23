@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 
-from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext
+from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext, make_structural_node
 
 
 def _node_text(node, source: bytes) -> str:
@@ -80,7 +80,7 @@ def _get_pair_value(pair_node, source: bytes):
 
 
 def _walk_object(obj_node, source: bytes, file_path: str, prefix: str,
-                 edges: list[dict], is_package_json: bool):
+                 edges: list[dict], is_package_json: bool, add_node):
     """Walk an object node, extracting keys and their values."""
     for child in _named_children(obj_node):
         if child.kind() != "pair":
@@ -93,6 +93,7 @@ def _walk_object(obj_node, source: bytes, file_path: str, prefix: str,
         line = child.start_position().row + 1
         key_path = f"{prefix}.{key}" if prefix else key
         source_id = hash_id(f"{file_path}::{key_path}", file_path)
+        add_node(source_id, key_path, "json_key", line)
 
         # Emit CONTAINS edge for this key
         edges.append(_make_edge(source_id, key_path, "contains", file_path, line))
@@ -110,26 +111,26 @@ def _walk_object(obj_node, source: bytes, file_path: str, prefix: str,
                     skip_default_recurse = True
             elif key == "scripts":
                 if value_node.kind() == "object":
-                    _extract_scripts(value_node, source, file_path, source_id, edges)
+                    _extract_scripts(value_node, source, file_path, source_id, edges, add_node)
                     skip_default_recurse = True
 
         # Recurse into nested objects (unless handled by special extractors)
         if not skip_default_recurse and value_node.kind() == "object":
-            _walk_object(value_node, source, file_path, key_path, edges, is_package_json)
+            _walk_object(value_node, source, file_path, key_path, edges, is_package_json, add_node)
 
         # Recurse into arrays
         elif value_node.kind() == "array":
-            _walk_array(value_node, source, file_path, key_path, edges, is_package_json)
+            _walk_array(value_node, source, file_path, key_path, edges, is_package_json, add_node)
 
 
 def _walk_array(arr_node, source: bytes, file_path: str, prefix: str,
-                edges: list[dict], is_package_json: bool):
+                edges: list[dict], is_package_json: bool, add_node):
     """Walk an array node, extracting objects within."""
     for child in _named_children(arr_node):
         if child.kind() == "object":
-            _walk_object(child, source, file_path, prefix, edges, is_package_json)
+            _walk_object(child, source, file_path, prefix, edges, is_package_json, add_node)
         elif child.kind() == "array":
-            _walk_array(child, source, file_path, prefix, edges, is_package_json)
+            _walk_array(child, source, file_path, prefix, edges, is_package_json, add_node)
 
 
 def _extract_dependency_imports(deps_obj, source: bytes, file_path: str,
@@ -145,7 +146,7 @@ def _extract_dependency_imports(deps_obj, source: bytes, file_path: str,
 
 
 def _extract_scripts(scripts_obj, source: bytes, file_path: str,
-                      parent_id: str, edges: list[dict]):
+                      parent_id: str, edges: list[dict], add_node):
     """Extract script names as CONTAINS edges from a scripts object."""
     for child in _named_children(scripts_obj):
         if child.kind() != "pair":
@@ -155,6 +156,7 @@ def _extract_scripts(scripts_obj, source: bytes, file_path: str,
             line = child.start_position().row + 1
             key_path = f"scripts.{key}"
             source_id = hash_id(f"{file_path}::{key_path}", file_path)
+            add_node(source_id, key_path, "json_key", line)
             edges.append(_make_edge(source_id, key_path, "contains", file_path, line))
 
 
@@ -164,8 +166,8 @@ def _is_package_json(file_path: str) -> bool:
     return basename.lower() == "package.json"
 
 
-def json_extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract CONTAINS and IMPORTS edges from a JSON CST.
+def json_extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract CONTAINS and IMPORTS nodes and edges from a JSON CST.
 
     Args:
         source: Raw file bytes.
@@ -173,9 +175,17 @@ def json_extract(source: bytes, tree, file_path: str) -> list[dict]:
         file_path: Logical file path (used in source IDs and locs).
 
     Returns:
-        List of edge dicts.
+        Tuple of (node dicts, edge dicts).
     """
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "json"))
+
     root = tree.root_node()
     is_pkg_json = _is_package_json(file_path)
 
@@ -184,20 +194,20 @@ def json_extract(source: bytes, tree, file_path: str) -> list[dict]:
         if child.kind() == "document":
             for doc_child in _named_children(child):
                 if doc_child.kind() == "object":
-                    _walk_object(doc_child, source, file_path, "", edges, is_pkg_json)
+                    _walk_object(doc_child, source, file_path, "", edges, is_pkg_json, _add_node)
                     break
                 elif doc_child.kind() == "array":
-                    _walk_array(doc_child, source, file_path, "", edges, is_pkg_json)
+                    _walk_array(doc_child, source, file_path, "", edges, is_pkg_json, _add_node)
                     break
             break
         elif child.kind() == "object":
-            _walk_object(child, source, file_path, "", edges, is_pkg_json)
+            _walk_object(child, source, file_path, "", edges, is_pkg_json, _add_node)
             break
         elif child.kind() == "array":
-            _walk_array(child, source, file_path, "", edges, is_pkg_json)
+            _walk_array(child, source, file_path, "", edges, is_pkg_json, _add_node)
             break
 
-    return edges
+    return nodes, edges
 
 
 class JsonExtractor(BaseExtractor):
@@ -208,5 +218,6 @@ class JsonExtractor(BaseExtractor):
     language_name = "json"
 
     def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
-        edges = json_extract(source, tree, ctx.file_path)
-        ctx.result.edges.extend(edges)
+        result_nodes, result_edges = json_extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
+        ctx.result.edges.extend(result_edges)

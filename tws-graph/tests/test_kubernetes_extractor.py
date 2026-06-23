@@ -32,7 +32,7 @@ class TestKubernetesExtractor:
     def test_deployment_resource_identity(self):
         """Deployment should have apiVersion and kind edges."""
         source, tree = _parse_file("deployment.yaml")
-        edges = k8s_extract(source, tree, "deployment.yaml")
+        nodes, edges = k8s_extract(source, tree, "deployment.yaml")
 
         contains = {e["target_text"] for e in edges if e["kind"] == "contains"}
         assert "apiVersion=apps/v1" in contains
@@ -41,7 +41,7 @@ class TestKubernetesExtractor:
     def test_deployment_metadata(self):
         """Deployment should have name and namespace edges."""
         source, tree = _parse_file("deployment.yaml")
-        edges = k8s_extract(source, tree, "deployment.yaml")
+        nodes, edges = k8s_extract(source, tree, "deployment.yaml")
 
         contains = {e["target_text"] for e in edges if e["kind"] == "contains"}
         assert "name=nginx-deployment" in contains
@@ -50,7 +50,7 @@ class TestKubernetesExtractor:
     def test_deployment_labels(self):
         """Deployment should extract metadata labels."""
         source, tree = _parse_file("deployment.yaml")
-        edges = k8s_extract(source, tree, "deployment.yaml")
+        nodes, edges = k8s_extract(source, tree, "deployment.yaml")
 
         contains = {e["target_text"] for e in edges if e["kind"] == "contains"}
         assert "label:app=nginx" in contains
@@ -59,7 +59,7 @@ class TestKubernetesExtractor:
     def test_deployment_selector(self):
         """Deployment spec.selector should produce REFERENCES edges."""
         source, tree = _parse_file("deployment.yaml")
-        edges = k8s_extract(source, tree, "deployment.yaml")
+        nodes, edges = k8s_extract(source, tree, "deployment.yaml")
 
         refs = {e["target_text"] for e in edges if e["kind"] == "references"}
         assert "selector:app=nginx" in refs
@@ -67,7 +67,7 @@ class TestKubernetesExtractor:
     def test_deployment_containers(self):
         """Deployment should extract container info."""
         source, tree = _parse_file("deployment.yaml")
-        edges = k8s_extract(source, tree, "deployment.yaml")
+        nodes, edges = k8s_extract(source, tree, "deployment.yaml")
 
         contains = {e["target_text"] for e in edges if e["kind"] == "contains"}
         assert "container:nginx" in contains
@@ -76,7 +76,7 @@ class TestKubernetesExtractor:
     def test_deployment_container_images(self):
         """Container images should produce IMPORTS edges."""
         source, tree = _parse_file("deployment.yaml")
-        edges = k8s_extract(source, tree, "deployment.yaml")
+        nodes, edges = k8s_extract(source, tree, "deployment.yaml")
 
         imports = {e["target_text"] for e in edges if e["kind"] == "imports"}
         assert "nginx:1.25-alpine" in imports
@@ -85,7 +85,7 @@ class TestKubernetesExtractor:
     def test_deployment_container_env(self):
         """Container env vars should produce ENV_ACCESSES edges."""
         source, tree = _parse_file("deployment.yaml")
-        edges = k8s_extract(source, tree, "deployment.yaml")
+        nodes, edges = k8s_extract(source, tree, "deployment.yaml")
 
         env_edges = {e["target_text"] for e in edges if e["kind"] == "env_accesses"}
         assert "env:NGINX_HOST=localhost" in env_edges
@@ -95,7 +95,7 @@ class TestKubernetesExtractor:
     def test_deployment_volumes(self):
         """Volumes should produce CONTAINS edges."""
         source, tree = _parse_file("deployment.yaml")
-        edges = k8s_extract(source, tree, "deployment.yaml")
+        nodes, edges = k8s_extract(source, tree, "deployment.yaml")
 
         contains = {e["target_text"] for e in edges if e["kind"] == "contains"}
         assert "volume:nginx-config" in contains
@@ -104,7 +104,7 @@ class TestKubernetesExtractor:
     def test_deployment_volume_references(self):
         """Volume configMap/secret refs should produce REFERENCES edges."""
         source, tree = _parse_file("deployment.yaml")
-        edges = k8s_extract(source, tree, "deployment.yaml")
+        nodes, edges = k8s_extract(source, tree, "deployment.yaml")
 
         refs = {e["target_text"] for e in edges if e["kind"] == "references"}
         assert "volume:nginx-config/configMap=nginx-config" in refs
@@ -115,7 +115,7 @@ class TestKubernetesExtractor:
     def test_service_resource(self):
         """Service should have correct resource identity."""
         source, tree = _parse_file("service.yaml")
-        edges = k8s_extract(source, tree, "service.yaml")
+        nodes, edges = k8s_extract(source, tree, "service.yaml")
 
         contains = {e["target_text"] for e in edges if e["kind"] == "contains"}
         assert "apiVersion=v1" in contains
@@ -126,7 +126,7 @@ class TestKubernetesExtractor:
     def test_service_selector(self):
         """Service selector should produce REFERENCES edges."""
         source, tree = _parse_file("service.yaml")
-        edges = k8s_extract(source, tree, "service.yaml")
+        nodes, edges = k8s_extract(source, tree, "service.yaml")
 
         refs = {e["target_text"] for e in edges if e["kind"] == "references"}
         assert "selector:app=nginx" in refs
@@ -136,7 +136,7 @@ class TestKubernetesExtractor:
     def test_configmap_resource(self):
         """ConfigMap should have correct resource identity."""
         source, tree = _parse_file("configmap.yaml")
-        edges = k8s_extract(source, tree, "configmap.yaml")
+        nodes, edges = k8s_extract(source, tree, "configmap.yaml")
 
         contains = {e["target_text"] for e in edges if e["kind"] == "contains"}
         assert "apiVersion=v1" in contains
@@ -147,7 +147,7 @@ class TestKubernetesExtractor:
     def test_configmap_data_keys(self):
         """ConfigMap data keys should produce CONTAINS edges."""
         source, tree = _parse_file("configmap.yaml")
-        edges = k8s_extract(source, tree, "configmap.yaml")
+        nodes, edges = k8s_extract(source, tree, "configmap.yaml")
 
         contains = {e["target_text"] for e in edges if e["kind"] == "contains"}
         assert "data:app.properties" in contains
@@ -160,7 +160,7 @@ class TestKubernetesExtractor:
     def test_edge_provenance(self):
         """All edges should have provenance='tree-sitter'."""
         source, tree = _parse_file("deployment.yaml")
-        edges = k8s_extract(source, tree, "deployment.yaml")
+        nodes, edges = k8s_extract(source, tree, "deployment.yaml")
 
         assert len(edges) > 0
         for edge in edges:
@@ -170,7 +170,7 @@ class TestKubernetesExtractor:
     def test_source_hash_format(self):
         """Source IDs should be 32 hex characters."""
         source, tree = _parse_file("deployment.yaml")
-        edges = k8s_extract(source, tree, "deployment.yaml")
+        nodes, edges = k8s_extract(source, tree, "deployment.yaml")
 
         for edge in edges:
             assert len(edge["source"]) == 32
@@ -179,22 +179,22 @@ class TestKubernetesExtractor:
     def test_source_loc_format(self):
         """source_loc should include the file path."""
         source, tree = _parse_file("deployment.yaml")
-        edges = k8s_extract(source, tree, "deployment.yaml")
+        nodes, edges = k8s_extract(source, tree, "deployment.yaml")
 
         for edge in edges:
             assert "deployment.yaml:" in edge["source_loc"]
 
     def test_non_k8s_yaml(self):
         """Non-Kubernetes YAML should produce no edges."""
-        edges = _parse("name: my-app\nversion: 1.0.0\n")
+        nodes, edges = _parse("name: my-app\nversion: 1.0.0\n")
         assert len(edges) == 0
 
     def test_only_k8s_with_api_version(self):
         """Only YAML with apiVersion AND recognized kind produces edges."""
-        edges = _parse("apiVersion: v1\nkind: UnknownKind\nmetadata:\n  name: test\n")
+        nodes, edges = _parse("apiVersion: v1\nkind: UnknownKind\nmetadata:\n  name: test\n")
         assert len(edges) == 0
 
     def test_non_yaml_content(self):
         """YAML without documents should produce no edges."""
-        edges = _parse("# Just comments\n")
+        nodes, edges = _parse("# Just comments\n")
         assert len(edges) == 0

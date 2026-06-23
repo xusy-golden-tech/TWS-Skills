@@ -30,7 +30,7 @@ class TestHclExtractor:
     def test_resource_block_contains(self):
         """resource blocks should produce CONTAINS edges with 'resource:type/name'."""
         source, tree = _parse_file("main.tf")
-        edges = hcl_extract(source, tree, "main.tf")
+        nodes, edges = hcl_extract(source, tree, "main.tf")
 
         resource_edges = [e for e in edges if e["kind"] == "contains"
                          and e["target_text"].startswith("resource:")]
@@ -44,7 +44,7 @@ class TestHclExtractor:
     def test_variable_block_contains(self):
         """variable blocks should produce CONTAINS edges with 'variable:name'."""
         source, tree = _parse_file("main.tf")
-        edges = hcl_extract(source, tree, "main.tf")
+        nodes, edges = hcl_extract(source, tree, "main.tf")
 
         var_edges = [e for e in edges if e["kind"] == "contains"
                     and e["target_text"].startswith("variable:")]
@@ -57,7 +57,7 @@ class TestHclExtractor:
     def test_output_block_contains(self):
         """output blocks should produce CONTAINS edges with 'output:name'."""
         source, tree = _parse_file("main.tf")
-        edges = hcl_extract(source, tree, "main.tf")
+        nodes, edges = hcl_extract(source, tree, "main.tf")
 
         output_edges = [e for e in edges if e["kind"] == "contains"
                        and e["target_text"].startswith("output:")]
@@ -70,7 +70,7 @@ class TestHclExtractor:
     def test_module_block_contains(self):
         """module blocks should produce CONTAINS edges with 'module:name'."""
         source, tree = _parse_file("main.tf")
-        edges = hcl_extract(source, tree, "main.tf")
+        nodes, edges = hcl_extract(source, tree, "main.tf")
 
         module_edges = [e for e in edges if e["kind"] == "contains"
                        and e["target_text"].startswith("module:")]
@@ -80,7 +80,7 @@ class TestHclExtractor:
     def test_provider_block_contains(self):
         """provider blocks should produce CONTAINS edges with 'provider:name'."""
         source, tree = _parse_file("main.tf")
-        edges = hcl_extract(source, tree, "main.tf")
+        nodes, edges = hcl_extract(source, tree, "main.tf")
 
         provider_edges = [e for e in edges if e["kind"] == "contains"
                          and e["target_text"].startswith("provider:")]
@@ -90,7 +90,7 @@ class TestHclExtractor:
     def test_data_block_contains(self):
         """data blocks should produce CONTAINS edges with 'data:type/name'."""
         source, tree = _parse_file("main.tf")
-        edges = hcl_extract(source, tree, "main.tf")
+        nodes, edges = hcl_extract(source, tree, "main.tf")
 
         data_edges = [e for e in edges if e["kind"] == "contains"
                      and e["target_text"].startswith("data:")]
@@ -100,7 +100,7 @@ class TestHclExtractor:
     def test_terraform_backend_contains(self):
         """terraform { backend 's3' {} } should produce CONTAINS edge."""
         source, tree = _parse_file("main.tf")
-        edges = hcl_extract(source, tree, "main.tf")
+        nodes, edges = hcl_extract(source, tree, "main.tf")
 
         backend_edges = [e for e in edges if e["kind"] == "contains"
                         and e["target_text"].startswith("backend:")]
@@ -110,7 +110,7 @@ class TestHclExtractor:
     def test_terraform_block_contains(self):
         """terraform {} block should produce a CONTAINS edge."""
         source, tree = _parse_file("main.tf")
-        edges = hcl_extract(source, tree, "main.tf")
+        nodes, edges = hcl_extract(source, tree, "main.tf")
 
         tf_edges = [e for e in edges if e["target_text"] == "terraform"
                    and e["kind"] == "contains"]
@@ -119,7 +119,7 @@ class TestHclExtractor:
     def test_required_providers_imports(self):
         """required_providers should produce IMPORTS edges for provider names."""
         source, tree = _parse_file("main.tf")
-        edges = hcl_extract(source, tree, "main.tf")
+        nodes, edges = hcl_extract(source, tree, "main.tf")
 
         import_edges = [e for e in edges if e["kind"] == "imports"]
         assert len(import_edges) >= 2
@@ -131,7 +131,7 @@ class TestHclExtractor:
     def test_locals_block_contains(self):
         """locals block should produce CONTAINS edge."""
         source, tree = _parse_file("main.tf")
-        edges = hcl_extract(source, tree, "main.tf")
+        nodes, edges = hcl_extract(source, tree, "main.tf")
 
         locals_edges = [e for e in edges if e["target_text"] == "locals"
                        and e["kind"] == "contains"]
@@ -140,7 +140,7 @@ class TestHclExtractor:
     def test_provisioner_block_contains(self):
         """provisioner blocks should produce CONTAINS edges."""
         source, tree = _parse_file("main.tf")
-        edges = hcl_extract(source, tree, "main.tf")
+        nodes, edges = hcl_extract(source, tree, "main.tf")
 
         provisioner_edges = [e for e in edges if e["kind"] == "contains"
                             and e["target_text"].startswith("provisioner:")]
@@ -153,7 +153,7 @@ class TestHclExtractor:
     def test_resource_references(self):
         """Resource attribute references should produce REFERENCES edges."""
         source, tree = _parse_file("main.tf")
-        edges = hcl_extract(source, tree, "main.tf")
+        nodes, edges = hcl_extract(source, tree, "main.tf")
 
         ref_edges = [e for e in edges if e["kind"] == "references"]
         # var.region, aws_s3_bucket.my_bucket.bucket, aws_s3_bucket.my_bucket.arn,
@@ -170,7 +170,7 @@ class TestHclExtractor:
     def test_source_loc_format(self):
         """Each edge should have a properly formatted source_loc."""
         source, tree = _parse_file("main.tf")
-        edges = hcl_extract(source, tree, "main.tf")
+        nodes, edges = hcl_extract(source, tree, "main.tf")
 
         assert len(edges) > 0
         for edge in edges:
@@ -181,19 +181,19 @@ class TestHclExtractor:
     def test_source_hash_consistency(self):
         """Edge source IDs should be 32-char hex strings."""
         source, tree = _parse_file("main.tf")
-        edges = hcl_extract(source, tree, "main.tf")
+        nodes, edges = hcl_extract(source, tree, "main.tf")
 
         for edge in edges:
             assert len(edge["source"]) == 32
 
     def test_empty_hcl(self):
         """Empty HCL file should produce no edges."""
-        edges = _parse("# Just a comment\n", "empty.tf")
+        nodes, edges = _parse("# Just a comment\n", "empty.tf")
         assert len(edges) == 0
 
     def test_minimal_resource(self):
         """A minimal resource block should produce one CONTAINS edge."""
-        edges = _parse(
+        nodes, edges = _parse(
             'resource "null_resource" "test" {\n}\n',
             "test.tf",
         )
@@ -203,7 +203,7 @@ class TestHclExtractor:
 
     def test_minimal_output_with_reference(self):
         """An output with a reference should produce CONTAINS + REFERENCES edges."""
-        edges = _parse(
+        nodes, edges = _parse(
             'output "test" {\n  value = module.vpc.id\n}\n',
             "test.tf",
         )
@@ -218,7 +218,7 @@ class TestHclExtractor:
 
     def test_variable_with_type_and_default(self):
         """A variable with type and default should produce CONTAINS edge."""
-        edges = _parse(
+        nodes, edges = _parse(
             'variable "count" {\n  type    = number\n  default = 3\n}\n',
             "test.tf",
         )

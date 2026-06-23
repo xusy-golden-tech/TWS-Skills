@@ -15,7 +15,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext
+from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext, make_structural_node
 
 
 def _node_text(node, source: bytes) -> str:
@@ -137,8 +137,8 @@ def _block_string_lits(block_node, source: bytes) -> list[str]:
     return result
 
 
-def hcl_extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract CONTAINS, IMPORTS, and REFERENCES edges from an HCL/Terraform CST.
+def hcl_extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract CONTAINS, IMPORTS, and REFERENCES nodes and edges from an HCL/Terraform CST.
 
     Args:
         source: Raw file bytes.
@@ -146,9 +146,16 @@ def hcl_extract(source: bytes, tree, file_path: str) -> list[dict]:
         file_path: Logical file path (used in source IDs and locs).
 
     Returns:
-        List of edge dicts.
+        Tuple of (node dicts, edge dicts).
     """
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "hcl"))
 
     def _process_block(block_node, parent_id: str | None = None):
         """Process a single HCL block and recurse into its body."""
@@ -160,41 +167,48 @@ def hcl_extract(source: bytes, tree, file_path: str) -> list[dict]:
         if ident == "resource" and len(string_lits) >= 2:
             target_text = f"resource:{string_lits[0]}/{string_lits[1]}"
             source_id = hash_id(f"{file_path}::{target_text}", file_path)
+            _add_node(source_id, target_text, "hcl_resource", line)
             edges.append(_make_edge(source_id, target_text, "contains", file_path, line))
             _process_body(block_node, source_id)
 
         elif ident == "data" and len(string_lits) >= 2:
             target_text = f"data:{string_lits[0]}/{string_lits[1]}"
             source_id = hash_id(f"{file_path}::{target_text}", file_path)
+            _add_node(source_id, target_text, "hcl_data", line)
             edges.append(_make_edge(source_id, target_text, "contains", file_path, line))
             _process_body(block_node, source_id)
 
         elif ident == "module" and len(string_lits) >= 1:
             target_text = f"module:{string_lits[0]}"
             source_id = hash_id(f"{file_path}::{target_text}", file_path)
+            _add_node(source_id, target_text, "hcl_module", line)
             edges.append(_make_edge(source_id, target_text, "contains", file_path, line))
             _process_body(block_node, source_id)
 
         elif ident == "provider" and len(string_lits) >= 1:
             target_text = f"provider:{string_lits[0]}"
             source_id = hash_id(f"{file_path}::{target_text}", file_path)
+            _add_node(source_id, target_text, "hcl_provider", line)
             edges.append(_make_edge(source_id, target_text, "contains", file_path, line))
             _process_body(block_node, source_id)
 
         elif ident == "variable" and len(string_lits) >= 1:
             target_text = f"variable:{string_lits[0]}"
             source_id = hash_id(f"{file_path}::{target_text}", file_path)
+            _add_node(source_id, target_text, "hcl_variable", line)
             edges.append(_make_edge(source_id, target_text, "contains", file_path, line))
             _process_body(block_node, source_id)
 
         elif ident == "output" and len(string_lits) >= 1:
             target_text = f"output:{string_lits[0]}"
             source_id = hash_id(f"{file_path}::{target_text}", file_path)
+            _add_node(source_id, target_text, "hcl_output", line)
             edges.append(_make_edge(source_id, target_text, "contains", file_path, line))
             _process_body(block_node, source_id)
 
         elif ident == "terraform":
             source_id = hash_id(f"{file_path}::terraform", file_path)
+            _add_node(source_id, "terraform", "hcl_terraform", line)
             edges.append(_make_edge(source_id, "terraform", "contains", file_path, line))
             # Process body for backend and required_providers
             body = _find_body(block_node)
@@ -203,6 +217,7 @@ def hcl_extract(source: bytes, tree, file_path: str) -> list[dict]:
 
         elif ident == "locals":
             source_id = hash_id(f"{file_path}::locals", file_path)
+            _add_node(source_id, "locals", "hcl_locals", line)
             edges.append(_make_edge(source_id, "locals", "contains", file_path, line))
             _process_body(block_node, source_id)
 
@@ -210,10 +225,12 @@ def hcl_extract(source: bytes, tree, file_path: str) -> list[dict]:
         elif ident == "backend" and len(string_lits) >= 1:
             target_text = f"backend:{string_lits[0]}"
             source_id = hash_id(f"{file_path}::{target_text}", file_path)
+            _add_node(source_id, target_text, "hcl_backend", line)
             edges.append(_make_edge(source_id, target_text, "contains", file_path, line))
 
         elif ident == "required_providers":
             source_id = hash_id(f"{file_path}::required_providers", file_path)
+            _add_node(source_id, "required_providers", "hcl_required_providers", line)
             edges.append(_make_edge(source_id, "required_providers", "contains", file_path, line))
             # Extract provider imports from body attributes
             _process_required_providers_body(block_node, source_id)
@@ -221,6 +238,7 @@ def hcl_extract(source: bytes, tree, file_path: str) -> list[dict]:
         elif ident == "provisioner" and len(string_lits) >= 1:
             target_text = f"provisioner:{string_lits[0]}"
             source_id = hash_id(f"{file_path}::{target_text}", file_path)
+            _add_node(source_id, target_text, "hcl_provisioner", line)
             edges.append(_make_edge(source_id, target_text, "contains", file_path, line))
             _process_body(block_node, source_id)
 
@@ -302,7 +320,7 @@ def hcl_extract(source: bytes, tree, file_path: str) -> list[dict]:
             if child.kind() == "block":
                 _process_block(child)
 
-    return edges
+    return nodes, edges
 
 
 class HclExtractor(BaseExtractor):
@@ -313,5 +331,6 @@ class HclExtractor(BaseExtractor):
     language_name = "hcl"
 
     def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
-        edges = hcl_extract(source, tree, ctx.file_path)
-        ctx.result.edges.extend(edges)
+        result_nodes, result_edges = hcl_extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
+        ctx.result.edges.extend(result_edges)

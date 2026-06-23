@@ -30,7 +30,7 @@ class TestJsonExtractor:
     def test_top_level_keys_contains(self):
         """Top-level keys should produce CONTAINS edges."""
         source, tree = _parse_file("package.json")
-        edges = json_extract(source, tree, "package.json")
+        nodes, edges = json_extract(source, tree, "package.json")
 
         top_keys = {"name", "version", "description", "main", "scripts",
                     "dependencies", "devDependencies", "peerDependencies", "config"}
@@ -41,7 +41,7 @@ class TestJsonExtractor:
     def test_nested_keys_contains(self):
         """Nested keys should produce CONTAINS edges with dotted paths."""
         source, tree = _parse_file("package.json")
-        edges = json_extract(source, tree, "package.json")
+        nodes, edges = json_extract(source, tree, "package.json")
 
         nested_keys = {"config.port", "config.host", "config.ssl", "config.ssl.enabled",
                        "config.ssl.cert"}
@@ -52,7 +52,7 @@ class TestJsonExtractor:
     def test_dependencies_imports(self):
         """dependencies should produce IMPORTS edges for package names."""
         source, tree = _parse_file("package.json")
-        edges = json_extract(source, tree, "package.json")
+        nodes, edges = json_extract(source, tree, "package.json")
 
         import_edges = [e for e in edges if e["kind"] == "imports"]
         import_targets = {e["target_text"] for e in import_edges}
@@ -64,7 +64,7 @@ class TestJsonExtractor:
     def test_dev_dependencies_imports(self):
         """devDependencies should produce IMPORTS edges."""
         source, tree = _parse_file("package.json")
-        edges = json_extract(source, tree, "package.json")
+        nodes, edges = json_extract(source, tree, "package.json")
 
         import_edges = [e for e in edges if e["kind"] == "imports"]
         import_targets = {e["target_text"] for e in import_edges}
@@ -77,7 +77,7 @@ class TestJsonExtractor:
     def test_peer_dependencies_imports(self):
         """peerDependencies should produce IMPORTS edges."""
         source, tree = _parse_file("package.json")
-        edges = json_extract(source, tree, "package.json")
+        nodes, edges = json_extract(source, tree, "package.json")
 
         import_edges = [e for e in edges if e["kind"] == "imports"]
         import_targets = {e["target_text"] for e in import_edges}
@@ -88,7 +88,7 @@ class TestJsonExtractor:
     def test_scripts_contains(self):
         """Scripts should produce CONTAINS edges for each script."""
         source, tree = _parse_file("package.json")
-        edges = json_extract(source, tree, "package.json")
+        nodes, edges = json_extract(source, tree, "package.json")
 
         script_edges = [e for e in edges if e["kind"] == "contains"
                        and e["target_text"].startswith("scripts.")]
@@ -102,7 +102,7 @@ class TestJsonExtractor:
     def test_no_imports_for_non_package_json(self):
         """Non-package.json files should not have IMPORTS edges."""
         src = '{"dependencies": {"foo": "1.0"}}'
-        edges = _parse(src, "config.json")
+        nodes, edges = _parse(src, "config.json")
 
         import_edges = [e for e in edges if e["kind"] == "imports"]
         assert len(import_edges) == 0
@@ -110,7 +110,7 @@ class TestJsonExtractor:
     def test_nested_keys_for_non_package_json(self):
         """Nested keys should still produce CONTAINS for non-package.json files."""
         src = '{"dependencies": {"foo": "1.0"}}'
-        edges = _parse(src, "config.json")
+        nodes, edges = _parse(src, "config.json")
 
         contains_edges = [e for e in edges if e["kind"] == "contains"]
         targets = {e["target_text"] for e in contains_edges}
@@ -120,7 +120,7 @@ class TestJsonExtractor:
     def test_source_loc_format(self):
         """Each edge should have a properly formatted source_loc."""
         source, tree = _parse_file("package.json")
-        edges = json_extract(source, tree, "package.json")
+        nodes, edges = json_extract(source, tree, "package.json")
 
         assert len(edges) > 0
         for edge in edges:
@@ -131,19 +131,19 @@ class TestJsonExtractor:
     def test_source_hash_consistency(self):
         """Edge source IDs should be 32-char hex strings."""
         source, tree = _parse_file("package.json")
-        edges = json_extract(source, tree, "package.json")
+        nodes, edges = json_extract(source, tree, "package.json")
 
         for edge in edges:
             assert len(edge["source"]) == 32
 
     def test_empty_json(self):
         """Empty JSON object should produce no edges."""
-        edges = _parse("{}\n", "empty.json")
+        nodes, edges = _parse("{}\n", "empty.json")
         assert len(edges) == 0
 
     def test_simple_key_value(self):
         """A simple key-value pair should produce one CONTAINS edge."""
-        edges = _parse('{"key": "value"}', "simple.json")
+        nodes, edges = _parse('{"key": "value"}', "simple.json")
         assert len(edges) == 1
         assert edges[0]["target_text"] == "key"
         assert edges[0]["kind"] == "contains"
@@ -151,7 +151,7 @@ class TestJsonExtractor:
     def test_array_of_objects(self):
         """An array of objects should produce nested CONTAINS edges."""
         src = '[{"name": "foo", "version": "1.0"}, {"name": "bar", "version": "2.0"}]'
-        edges = _parse(src, "array.json")
+        nodes, edges = _parse(src, "array.json")
 
         contains_edges = [e for e in edges if e["kind"] == "contains"]
         assert len(contains_edges) == 4  # name, version for each object
@@ -159,7 +159,7 @@ class TestJsonExtractor:
     def test_deeply_nested_object(self):
         """Deeply nested objects should produce proper dotted paths."""
         src = '{"a": {"b": {"c": {"d": "deep"}}}}'
-        edges = _parse(src, "deep.json")
+        nodes, edges = _parse(src, "deep.json")
 
         paths = {e["target_text"] for e in edges if e["kind"] == "contains"}
         assert "a" in paths
@@ -170,7 +170,7 @@ class TestJsonExtractor:
     def test_total_edge_count(self):
         """Verify reasonable total edge count from the fixture."""
         source, tree = _parse_file("package.json")
-        edges = json_extract(source, tree, "package.json")
+        nodes, edges = json_extract(source, tree, "package.json")
 
         # Should have: top-level keys CONTAINS, nested config.* CONTAINS,
         # scripts.* CONTAINS, dependencies/devDeps/peerDeps IMPORTS
@@ -179,7 +179,7 @@ class TestJsonExtractor:
     def test_scripts_not_duplicated(self):
         """Script names should not appear as both generic CONTAINS and script CONTAINS."""
         source, tree = _parse_file("package.json")
-        edges = json_extract(source, tree, "package.json")
+        nodes, edges = json_extract(source, tree, "package.json")
 
         # scripts.start should appear exactly once
         start_edges = [e for e in edges if e["target_text"] == "scripts.start"]

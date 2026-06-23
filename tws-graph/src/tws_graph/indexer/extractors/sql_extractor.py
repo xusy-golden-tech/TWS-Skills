@@ -13,7 +13,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id, BaseExtractor
+from tws_graph.indexer.base import hash_id, BaseExtractor, make_structural_node
 
 
 def _node_text(node, source: bytes) -> str:
@@ -121,10 +121,22 @@ def _extract_from_join_tables(statement_node, source: bytes) -> list[str]:
     return tables
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract CONTAINS and REFERENCES edges from a SQL CST."""
+def extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract CONTAINS and REFERENCES nodes and edges from a SQL CST."""
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "sql"))
+
     root = tree.root_node()
+
+    # Ensure the shared __query__ node exists (used by SELECT/INSERT/UPDATE/DELETE)
+    _query_sid = hash_id(f"{file_path}::__query__", file_path)
+    _add_node(_query_sid, "__query__", "sql_query", 1)
 
     def walk(node, parent_statement=None):
         for child in _named_children(node):
@@ -145,6 +157,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                     table_name = _get_identifier_text(obj_ref, source)
                     if table_name:
                         sid = hash_id(f"{file_path}::{table_name}", file_path)
+                        _add_node(sid, table_name, "sql_table", line)
                         edges.append(_make_edge(sid, table_name, "contains", file_path, line))
 
                         # FOREIGN KEY references
@@ -166,6 +179,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                 idx_name_node = _find_named_child(child, "identifier")
                 idx_name = _node_text(idx_name_node, source) if idx_name_node else "index"
                 sid = hash_id(f"{file_path}::{idx_name}", file_path)
+                _add_node(sid, idx_name, "sql_index", line)
                 edges.append(_make_edge(sid, idx_name, "contains", file_path, line))
                 obj_ref = _find_named_child(child, "object_reference")
                 if obj_ref:
@@ -180,6 +194,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                     view_name = _get_identifier_text(obj_ref, source)
                     if view_name:
                         sid = hash_id(f"{file_path}::{view_name}", file_path)
+                        _add_node(sid, view_name, "sql_view", line)
                         edges.append(_make_edge(sid, view_name, "contains", file_path, line))
                         select = _find_first_descendant(child, "select")
                         if select:
@@ -223,10 +238,9 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
         if select_node:
             tables = _extract_from_join_tables(stmt_node, source)
             if tables:
-                sid = hash_id(f"{file_path}::__query__", file_path)
                 for tbl in tables:
                     edges.append(_make_edge(
-                        sid, tbl, "references",
+                        _query_sid, tbl, "references",
                         file_path, select_node.start_position().row + 1,
                     ))
 
@@ -236,9 +250,8 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
             if obj_ref:
                 table_name = _get_identifier_text(obj_ref, source)
                 if table_name:
-                    sid = hash_id(f"{file_path}::__query__", file_path)
                     edges.append(_make_edge(
-                        sid, table_name, "references",
+                        _query_sid, table_name, "references",
                         file_path, insert_node.start_position().row + 1,
                     ))
 
@@ -248,9 +261,8 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
             if relation:
                 table_name = _get_identifier_text(relation, source)
                 if table_name:
-                    sid = hash_id(f"{file_path}::__query__", file_path)
                     edges.append(_make_edge(
-                        sid, table_name, "references",
+                        _query_sid, table_name, "references",
                         file_path, update_node.start_position().row + 1,
                     ))
 
@@ -258,15 +270,14 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
         if delete_node:
             tables = _extract_from_join_tables(stmt_node, source)
             if tables:
-                sid = hash_id(f"{file_path}::__query__", file_path)
                 for tbl in tables:
                     edges.append(_make_edge(
-                        sid, tbl, "references",
+                        _query_sid, tbl, "references",
                         file_path, delete_node.start_position().row + 1,
                     ))
 
     walk(root)
-    return edges
+    return nodes, edges
 
 
 class SqlExtractor(BaseExtractor):
@@ -275,5 +286,6 @@ class SqlExtractor(BaseExtractor):
     language_name = "sql"
 
     def extract(self, source, tree, ctx) -> None:
-        result_edges = extract(source, tree, ctx.file_path)
+        result_nodes, result_edges = extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
         ctx.result.edges.extend(result_edges)

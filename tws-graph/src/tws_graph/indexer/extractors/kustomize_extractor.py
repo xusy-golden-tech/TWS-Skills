@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 
-from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext
+from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext, make_structural_node
 
 
 def _node_text(node, source: bytes) -> str:
@@ -87,7 +87,7 @@ def _is_kustomization(file_path: str) -> bool:
     return basename.lower() in ("kustomization.yaml", "kustomization.yml")
 
 
-def _walk_block_mapping(block_mapping, source: bytes, file_path: str, edges: list[dict]):
+def _walk_block_mapping(block_mapping, source: bytes, file_path: str, edges: list[dict], add_node):
     """Walk a YAML block_mapping node and process kustomization-specific keys."""
     for child in _named_children(block_mapping):
         if child.kind() != "block_mapping_pair":
@@ -112,17 +112,19 @@ def _walk_block_mapping(block_mapping, source: bytes, file_path: str, edges: lis
 
         line = child.start_position().row + 1
         section_id = hash_id(f"{file_path}::{key_text}", file_path)
+        add_node(section_id, key_text, "kustomize_section", line)
 
         # bases/resources/namespace → CONTAINS
         if key_text in ("bases", "resources"):
             if value_node and value_node.kind() == "block_node":
                 _extract_list_items_as_contains(value_node, source, file_path,
-                                                key_text, section_id, edges)
+                                                key_text, section_id, edges, add_node)
         elif key_text == "namespace":
             if value_node:
                 val_text = _get_flow_node_text(value_node, source)
                 if val_text:
                     content_id = hash_id(f"{file_path}::namespace/{val_text}", file_path)
+                    add_node(content_id, f"namespace/{val_text}", "kustomize_section", line)
                     edges.append(_make_edge(content_id, val_text, "contains",
                                            file_path, line))
             edges.append(_make_edge(section_id, key_text, "contains", file_path, line))
@@ -151,7 +153,7 @@ def _walk_block_mapping(block_mapping, source: bytes, file_path: str, edges: lis
 
 
 def _extract_list_items_as_contains(value_node, source: bytes, file_path: str,
-                                     section: str, section_id: str, edges: list[dict]):
+                                     section: str, section_id: str, edges: list[dict], add_node):
     """Extract string items from a YAML list (block_sequence) as CONTAINS edges."""
     for child in _named_children(value_node):
         if child.kind() == "block_sequence":
@@ -164,6 +166,7 @@ def _extract_list_items_as_contains(value_node, source: bytes, file_path: str,
                         item_text = _get_flow_node_text(item_child, source)
                         if item_text:
                             source_id = hash_id(f"{file_path}::{section}/{item_text}", file_path)
+                            add_node(source_id, f"{section}/{item_text}", "kustomize_section", line)
                             edges.append(_make_edge(source_id, item_text, "contains",
                                                     file_path, line))
                         break  # one item per sequence item
@@ -172,6 +175,7 @@ def _extract_list_items_as_contains(value_node, source: bytes, file_path: str,
                     item_text = _node_text(seq_child, source).strip()
                     if item_text:
                         source_id = hash_id(f"{file_path}::{section}/{item_text}", file_path)
+                        add_node(source_id, f"{section}/{item_text}", "kustomize_section", line)
                         edges.append(_make_edge(source_id, item_text, "contains",
                                                file_path, line))
             break  # found block_sequence, done
@@ -290,8 +294,8 @@ def _extract_image_from_block(block_node, source: bytes, file_path: str,
                                            file_path, line))
 
 
-def kustomize_extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract CONTAINS, REFERENCES, and IMPORTS edges from a kustomization YAML CST.
+def kustomize_extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract CONTAINS, REFERENCES, and IMPORTS nodes and edges from a kustomization YAML CST.
 
     Args:
         source: Raw file bytes.
@@ -299,12 +303,19 @@ def kustomize_extract(source: bytes, tree, file_path: str) -> list[dict]:
         file_path: Logical file path (used in source IDs and locs).
 
     Returns:
-        List of edge dicts.
+        Tuple of (node dicts, edge dicts).
     """
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "yaml"))
 
     if not _is_kustomization(file_path):
-        return edges
+        return nodes, edges
 
     root = tree.root_node()
 
@@ -315,12 +326,12 @@ def kustomize_extract(source: bytes, tree, file_path: str) -> list[dict]:
                 if doc_child.kind() == "block_node":
                     for bc in _named_children(doc_child):
                         if bc.kind() == "block_mapping":
-                            _walk_block_mapping(bc, source, file_path, edges)
+                            _walk_block_mapping(bc, source, file_path, edges, _add_node)
                             break
                     break
             break
 
-    return edges
+    return nodes, edges
 
 
 class KustomizeExtractor(BaseExtractor):
@@ -331,5 +342,6 @@ class KustomizeExtractor(BaseExtractor):
     language_name = "yaml"
 
     def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
-        edges = kustomize_extract(source, tree, ctx.file_path)
-        ctx.result.edges.extend(edges)
+        result_nodes, result_edges = kustomize_extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
+        ctx.result.edges.extend(result_edges)

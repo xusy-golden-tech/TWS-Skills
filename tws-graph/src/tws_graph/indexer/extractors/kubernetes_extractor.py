@@ -33,7 +33,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id, BaseExtractor
+from tws_graph.indexer.base import hash_id, BaseExtractor, make_structural_node
 
 # Well-known K8s resource kinds
 _K8S_RESOURCE_KINDS = {
@@ -166,8 +166,8 @@ def _find_sequence(node):
     return None
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract K8s resource edges from a YAML CST.
+def extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract K8s resource nodes and edges from a YAML CST.
 
     Args:
         source: Raw file bytes (UTF-8 encoded).
@@ -175,11 +175,20 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
         file_path: Logical file path.
 
     Returns:
-        List of edge dicts.
+        Tuple of (node dicts, edge dicts).
     """
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "yaml"))
+
     root = tree.root_node()
     file_id = hash_id(f"{file_path}::__kubernetes__", file_path)
+    _add_node(file_id, "__kubernetes__", "yaml_document", 1)
 
     for doc_node in _named_children(root):
         if doc_node.kind() != "document":
@@ -230,6 +239,8 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
 
         # Source ID for this resource
         resource_id = hash_id(f"{file_path}::{kind_value}/{resource_name}", file_path)
+        _add_node(resource_id, f"{kind_value}/{resource_name}", "k8s_resource",
+                  metadata_pair.start_position().row + 1 if metadata_pair else 1)
 
         # -- apiVersion / kind → CONTAINS edges --
         if api_pair:
@@ -379,7 +390,7 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                                     file_path, d_pair.start_position().row + 1,
                                 ))
 
-    return edges
+    return nodes, edges
 
 
 class KubernetesExtractor(BaseExtractor):
@@ -388,7 +399,8 @@ class KubernetesExtractor(BaseExtractor):
     language_name = "yaml"
 
     def extract(self, source, tree, ctx) -> None:
-        result_edges = extract(source, tree, ctx.file_path)
+        result_nodes, result_edges = extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
         ctx.result.edges.extend(result_edges)
 
 
