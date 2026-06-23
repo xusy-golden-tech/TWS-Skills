@@ -1,15 +1,21 @@
-"""Analysis module — invalidation tracking, entry point detection, and dead code detection."""
+"""Analysis module — invalidation tracking and code analysis tools."""
 
-from .dead_code import DeadCodeCandidate, DeadCodeDetector
-from .entry_point import EntryPointDetector, EntryPointResult
 from .invalidation import AnalyzerRegistration, ConsistencyReport, InvalidationTracker
+from .entry_point import EntryPointDetector, EntryPointResult
+from .dead_code import DeadCodeDetector, DeadCodeCandidate
+from .complexity import ComplexityAnalyzer, ComplexityMetrics
+from .test_edges import TestEdgeAnalyzer, TestEdge
 
 __all__ = [
     "AnalyzerRegistration",
     "ConsistencyReport",
-    "DeadCodeCandidate",
-    "DeadCodeDetector",
+    "InvalidationTracker",
     "EntryPointDetector",
     "EntryPointResult",
-    "InvalidationTracker",
+    "DeadCodeDetector",
+    "DeadCodeCandidate",
+    "ComplexityAnalyzer",
+    "ComplexityMetrics",
+    "TestEdgeAnalyzer",
+    "TestEdge",
 ]
