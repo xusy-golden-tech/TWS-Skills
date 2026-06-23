@@ -10,7 +10,7 @@ from tws_graph.edges.kind import EdgeKind
 
 
 # ---------------------------------------------------------------------------
-# 1. 17 members — exact membership
+# 1. 20 members — exact membership
 # ---------------------------------------------------------------------------
 
 EXPECTED_MEMBERS: set[str] = {
@@ -32,6 +32,9 @@ EXPECTED_MEMBERS: set[str] = {
     "LISTENS_ON",
     # P10 跨服务
     "HTTP_CALLS",
+    "GRPC_SERVICE",
+    "GRPC_CLIENT",
+    "GRPC_SERVER",
     # P4/P8 相似度
     "SIMILAR_TO",
     # P9 分析
@@ -55,6 +58,9 @@ EXPECTED_VALUES: dict[str, str] = {
     "EMITS": "emits",
     "LISTENS_ON": "listens_on",
     "HTTP_CALLS": "http_calls",
+    "GRPC_SERVICE": "grpc_service",
+    "GRPC_CLIENT": "grpc_client",
+    "GRPC_SERVER": "grpc_server",
     "SIMILAR_TO": "similar_to",
     "TEST_EDGE": "test_edge",
     "CONFIG_LINK": "config_link",
@@ -62,10 +68,10 @@ EXPECTED_VALUES: dict[str, str] = {
 
 
 class TestMembers:
-    """Verify all 17 members exist with correct values."""
+    """Verify all 20 members exist with correct values."""
 
     def test_exactly_17_members(self):
-        assert len(EdgeKind) == 17
+        assert len(EdgeKind) == 20
 
     def test_all_expected_names_present(self):
         actual = set(EdgeKind.__members__.keys())
@@ -82,7 +88,7 @@ class TestMembers:
         assert member == expected_value
 
     def test_no_duplicate_values(self):
-        """All 17 values must be unique."""
+        """All 20 values must be unique."""
         values = [m.value for m in EdgeKind]
         assert len(values) == len(set(values))
 
@@ -148,6 +154,9 @@ class TestFromStr:
             ("emits", EdgeKind.EMITS),
             ("listens_on", EdgeKind.LISTENS_ON),
             ("http_calls", EdgeKind.HTTP_CALLS),
+            ("grpc_service", EdgeKind.GRPC_SERVICE),
+            ("grpc_client", EdgeKind.GRPC_CLIENT),
+            ("grpc_server", EdgeKind.GRPC_SERVER),
             ("similar_to", EdgeKind.SIMILAR_TO),
             ("test_edge", EdgeKind.TEST_EDGE),
             ("config_link", EdgeKind.CONFIG_LINK),
@@ -219,7 +228,7 @@ class TestIterationAndMembership:
 
     def test_iter_all_members(self):
         members = list(EdgeKind)
-        assert len(members) == 17
+        assert len(members) == 20
 
     def test_contains_by_name(self):
         assert "CALLS" in EdgeKind.__members__

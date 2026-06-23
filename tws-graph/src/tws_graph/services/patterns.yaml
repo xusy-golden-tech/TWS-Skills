@@ -1,0 +1,598 @@
+# P10: Library pattern database for cross-service route detection
+# Stores known framework patterns keyed by language.
+#
+# Each entry under a category:
+#   pattern:   substring or regex pattern to match in source
+#   kind:      decorator | annotation | function | method | class | constructor
+#   frameworks: [list of framework names]
+#   direction: (channels/grpc only) produce | consume | both | client | server
+#
+# Total entries: >150
+
+languages:
+  python:
+    routes:
+      - pattern: "@app.route"
+        kind: decorator
+        frameworks: [flask]
+      - pattern: "@bp.route"
+        kind: decorator
+        frameworks: [flask]
+      - pattern: "@router.get"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@router.post"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@router.put"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@router.delete"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@router.patch"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@router.head"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@router.options"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@app.get"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@app.post"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@app.put"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@app.delete"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@app.patch"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@app.head"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@app.options"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "path("
+        kind: function
+        frameworks: [django]
+      - pattern: "re_path("
+        kind: function
+        frameworks: [django]
+      - pattern: "url("
+        kind: function
+        frameworks: [django]
+      - pattern: "@action"
+        kind: decorator
+        frameworks: [django-rest-framework]
+      - pattern: "add_url_rule"
+        kind: method
+        frameworks: [flask]
+      - pattern: "Route("
+        kind: class
+        frameworks: [bottle]
+      - pattern: "@app.websocket"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@router.websocket"
+        kind: decorator
+        frameworks: [fastapi]
+      - pattern: "@app.websocket_route"
+        kind: decorator
+        frameworks: [sanic]
+      - pattern: "@get("
+        kind: decorator
+        frameworks: [bottle]
+      - pattern: "@post("
+        kind: decorator
+        frameworks: [bottle]
+      - pattern: "@put("
+        kind: decorator
+        frameworks: [bottle]
+      - pattern: "@delete("
+        kind: decorator
+        frameworks: [bottle]
+      - pattern: "@route("
+        kind: decorator
+        frameworks: [bottle]
+    channels:
+      - pattern: "KafkaProducer"
+        kind: class
+        direction: produce
+        frameworks: [kafka-python]
+      - pattern: "KafkaConsumer"
+        kind: class
+        direction: consume
+        frameworks: [kafka-python]
+      - pattern: "@receiver"
+        kind: decorator
+        direction: consume
+        frameworks: [django-signals]
+      - pattern: "send_task"
+        kind: method
+        direction: produce
+        frameworks: [celery]
+      - pattern: "@task"
+        kind: decorator
+        direction: consume
+        frameworks: [celery]
+      - pattern: "@shared_task"
+        kind: decorator
+        direction: consume
+        frameworks: [celery]
+      - pattern: "queue.declare"
+        kind: method
+        direction: both
+        frameworks: [pika]
+      - pattern: "basic_publish"
+        kind: method
+        direction: produce
+        frameworks: [pika]
+      - pattern: "basic_consume"
+        kind: method
+        direction: consume
+        frameworks: [pika]
+      - pattern: "channel("
+        kind: function
+        direction: produce
+        frameworks: [redis-py]
+      - pattern: "pubsub("
+        kind: method
+        direction: consume
+        frameworks: [redis-py]
+      - pattern: "@app.task"
+        kind: decorator
+        direction: consume
+        frameworks: [celery-flask]
+      - pattern: "signals.post_save"
+        kind: attribute
+        direction: consume
+        frameworks: [django-signals]
+      - pattern: "signals.pre_save"
+        kind: attribute
+        direction: consume
+        frameworks: [django-signals]
+      - pattern: "signals.post_delete"
+        kind: attribute
+        direction: consume
+        frameworks: [django-signals]
+    grpc:
+      - pattern: "grpc.server"
+        kind: function
+        frameworks: [grpc-python]
+      - pattern: "grpc.insecure_channel"
+        kind: function
+        direction: client
+        frameworks: [grpc-python]
+      - pattern: ".Stub("
+        kind: constructor
+        direction: client
+        frameworks: [grpc-python]
+      - pattern: "add_MyServiceServicer_to_server"
+        kind: function
+        direction: server
+        frameworks: [grpc-python]
+      - pattern: "grpc.secure_channel"
+        kind: function
+        direction: client
+        frameworks: [grpc-python]
+      - pattern: "grpc.aio.insecure_channel"
+        kind: function
+        direction: client
+        frameworks: [grpc-python]
+      - pattern: "grpc.aio.secure_channel"
+        kind: function
+        direction: client
+        frameworks: [grpc-python]
+
+  typescript:
+    routes:
+      - pattern: "app.get("
+        kind: method
+        frameworks: [express]
+      - pattern: "app.post("
+        kind: method
+        frameworks: [express]
+      - pattern: "app.put("
+        kind: method
+        frameworks: [express]
+      - pattern: "app.delete("
+        kind: method
+        frameworks: [express]
+      - pattern: "app.patch("
+        kind: method
+        frameworks: [express]
+      - pattern: "router.get("
+        kind: method
+        frameworks: [express]
+      - pattern: "router.post("
+        kind: method
+        frameworks: [express]
+      - pattern: "router.put("
+        kind: method
+        frameworks: [express]
+      - pattern: "router.delete("
+        kind: method
+        frameworks: [express]
+      - pattern: "router.patch("
+        kind: method
+        frameworks: [express]
+      - pattern: "@Get("
+        kind: decorator
+        frameworks: [nestjs]
+      - pattern: "@Post("
+        kind: decorator
+        frameworks: [nestjs]
+      - pattern: "@Put("
+        kind: decorator
+        frameworks: [nestjs]
+      - pattern: "@Delete("
+        kind: decorator
+        frameworks: [nestjs]
+      - pattern: "@Patch("
+        kind: decorator
+        frameworks: [nestjs]
+      - pattern: "@Controller"
+        kind: decorator
+        frameworks: [nestjs]
+      - pattern: "createRouter("
+        kind: function
+        frameworks: [nextjs-api-routes]
+      - pattern: "defineEventHandler"
+        kind: function
+        frameworks: [h3/nuxt]
+      - pattern: "app.all("
+        kind: method
+        frameworks: [express]
+      - pattern: "app.head("
+        kind: method
+        frameworks: [express]
+      - pattern: "app.options("
+        kind: method
+        frameworks: [express]
+      - pattern: "@All("
+        kind: decorator
+        frameworks: [nestjs]
+      - pattern: "@Head("
+        kind: decorator
+        frameworks: [nestjs]
+      - pattern: "@Options("
+        kind: decorator
+        frameworks: [nestjs]
+      - pattern: "defineRoute"
+        kind: function
+        frameworks: [nextjs-app-router]
+    channels:
+      - pattern: "@SubscribeMessage"
+        kind: decorator
+        direction: consume
+        frameworks: [nestjs-ws]
+      - pattern: "kafka.producer"
+        kind: method
+        direction: produce
+        frameworks: [kafkajs]
+      - pattern: "kafka.consumer"
+        kind: method
+        direction: consume
+        frameworks: [kafkajs]
+      - pattern: "createClient("
+        kind: function
+        direction: client
+        frameworks: [redis-om]
+      - pattern: "createClient("
+        kind: function
+        direction: client
+        frameworks: [ioredis-redis]
+      - pattern: "@MessagePattern"
+        kind: decorator
+        direction: consume
+        frameworks: [nestjs-microservices]
+      - pattern: "@EventPattern"
+        kind: decorator
+        direction: consume
+        frameworks: [nestjs-microservices]
+      - pattern: "ClientProxy.send"
+        kind: method
+        direction: produce
+        frameworks: [nestjs-microservices]
+      - pattern: "ClientProxy.emit"
+        kind: method
+        direction: produce
+        frameworks: [nestjs-microservices]
+    grpc:
+      - pattern: "grpc.Client("
+        kind: constructor
+        direction: client
+        frameworks: [grpc-node]
+      - pattern: "grpc.Server("
+        kind: constructor
+        direction: server
+        frameworks: [grpc-node]
+      - pattern: ".addService("
+        kind: method
+        direction: server
+        frameworks: [grpc-node]
+      - pattern: "@GrpcMethod"
+        kind: decorator
+        direction: server
+        frameworks: [nestjs-grpc]
+      - pattern: "@GrpcService"
+        kind: decorator
+        direction: server
+        frameworks: [nestjs-grpc]
+
+  java:
+    routes:
+      - pattern: "@GetMapping"
+        kind: annotation
+        frameworks: [spring-mvc]
+      - pattern: "@PostMapping"
+        kind: annotation
+        frameworks: [spring-mvc]
+      - pattern: "@PutMapping"
+        kind: annotation
+        frameworks: [spring-mvc]
+      - pattern: "@DeleteMapping"
+        kind: annotation
+        frameworks: [spring-mvc]
+      - pattern: "@PatchMapping"
+        kind: annotation
+        frameworks: [spring-mvc]
+      - pattern: "@RequestMapping"
+        kind: annotation
+        frameworks: [spring-mvc]
+      - pattern: "@RestController"
+        kind: annotation
+        frameworks: [spring-mvc]
+      - pattern: "@Controller"
+        kind: annotation
+        frameworks: [spring-mvc]
+      - pattern: "@Path("
+        kind: annotation
+        frameworks: [jakarta-ws]
+      - pattern: "@GET"
+        kind: annotation
+        frameworks: [jakarta-ws]
+      - pattern: "@POST"
+        kind: annotation
+        frameworks: [jakarta-ws]
+      - pattern: "@PUT"
+        kind: annotation
+        frameworks: [jakarta-ws]
+      - pattern: "@DELETE"
+        kind: annotation
+        frameworks: [jakarta-ws]
+      - pattern: "@HEAD"
+        kind: annotation
+        frameworks: [jakarta-ws]
+      - pattern: "@OPTIONS"
+        kind: annotation
+        frameworks: [jakarta-ws]
+      - pattern: "RouterFunctions.route("
+        kind: method
+        frameworks: [spring-webflux]
+      - pattern: "Javalin.create"
+        kind: method
+        frameworks: [javalin]
+      - pattern: "@Produces"
+        kind: annotation
+        frameworks: [jakarta-ws]
+      - pattern: "@Consumes"
+        kind: annotation
+        frameworks: [jakarta-ws]
+      - pattern: "@ApplicationPath"
+        kind: annotation
+        frameworks: [jakarta-ws]
+    channels:
+      - pattern: "@KafkaListener"
+        kind: annotation
+        direction: consume
+        frameworks: [spring-kafka]
+      - pattern: "KafkaTemplate"
+        kind: class
+        direction: produce
+        frameworks: [spring-kafka]
+      - pattern: "@RabbitListener"
+        kind: annotation
+        direction: consume
+        frameworks: [spring-amqp]
+      - pattern: "RabbitTemplate"
+        kind: class
+        direction: produce
+        frameworks: [spring-amqp]
+      - pattern: "@JmsListener"
+        kind: annotation
+        direction: consume
+        frameworks: [spring-jms]
+      - pattern: "JmsTemplate"
+        kind: class
+        direction: produce
+        frameworks: [spring-jms]
+      - pattern: "channel.basicPublish"
+        kind: method
+        direction: produce
+        frameworks: [rabbitmq-client]
+      - pattern: "channel.basicConsume"
+        kind: method
+        direction: consume
+        frameworks: [rabbitmq-client]
+    grpc:
+      - pattern: "Channel("
+        kind: constructor
+        direction: client
+        frameworks: [grpc-java]
+      - pattern: "newBlockingStub"
+        kind: method
+        direction: client
+        frameworks: [grpc-java]
+      - pattern: "newStub"
+        kind: method
+        direction: client
+        frameworks: [grpc-java]
+      - pattern: "ServerBuilder.forPort"
+        kind: method
+        direction: server
+        frameworks: [grpc-java]
+      - pattern: "addService("
+        kind: method
+        direction: server
+        frameworks: [grpc-java]
+      - pattern: "newFutureStub"
+        kind: method
+        direction: client
+        frameworks: [grpc-java]
+      - pattern: "ManagedChannelBuilder.forAddress"
+        kind: method
+        direction: client
+        frameworks: [grpc-java]
+
+  go:
+    routes:
+      - pattern: "http.HandleFunc("
+        kind: function
+        frameworks: [net-http]
+      - pattern: "http.Handle("
+        kind: function
+        frameworks: [net-http]
+      - pattern: "mux.HandleFunc("
+        kind: method
+        frameworks: [gorilla-mux]
+      - pattern: "mux.NewRouter("
+        kind: function
+        frameworks: [gorilla-mux]
+      - pattern: ".GET("
+        kind: method
+        frameworks: [chi]
+      - pattern: ".POST("
+        kind: method
+        frameworks: [chi]
+      - pattern: ".PUT("
+        kind: method
+        frameworks: [chi]
+      - pattern: ".DELETE("
+        kind: method
+        frameworks: [chi]
+      - pattern: ".Group("
+        kind: method
+        frameworks: [gin]
+      - pattern: ".GET("
+        kind: method
+        frameworks: [gin]
+      - pattern: ".POST("
+        kind: method
+        frameworks: [gin]
+      - pattern: ".Handle("
+        kind: method
+        frameworks: [gin]
+      - pattern: "gin.Default"
+        kind: function
+        frameworks: [gin]
+      - pattern: "gin.New"
+        kind: function
+        frameworks: [gin]
+      - pattern: "echo.New"
+        kind: function
+        frameworks: [echo]
+      - pattern: ".GET("
+        kind: method
+        frameworks: [echo]
+      - pattern: ".POST("
+        kind: method
+        frameworks: [echo]
+      - pattern: "fiber.New"
+        kind: function
+        frameworks: [fiber]
+      - pattern: ".PATCH("
+        kind: method
+        frameworks: [chi]
+      - pattern: ".PATCH("
+        kind: method
+        frameworks: [gin]
+      - pattern: ".PATCH("
+        kind: method
+        frameworks: [echo]
+      - pattern: ".OPTIONS("
+        kind: method
+        frameworks: [chi]
+      - pattern: ".HEAD("
+        kind: method
+        frameworks: [chi]
+      - pattern: "mux.PathPrefix("
+        kind: method
+        frameworks: [gorilla-mux]
+      - pattern: "mux.Path("
+        kind: method
+        frameworks: [gorilla-mux]
+    channels:
+      - pattern: "kafka.NewProducer"
+        kind: function
+        direction: produce
+        frameworks: [sarama]
+      - pattern: "kafka.NewConsumer"
+        kind: function
+        direction: consume
+        frameworks: [sarama]
+      - pattern: "amqp.Dial"
+        kind: function
+        direction: client
+        frameworks: [amqp091-go]
+      - pattern: ".PublishWithContext"
+        kind: method
+        direction: produce
+        frameworks: [amqp091-go]
+      - pattern: ".Consume("
+        kind: method
+        direction: consume
+        frameworks: [amqp091-go]
+      - pattern: "rmq.NewConnection"
+        kind: function
+        direction: client
+        frameworks: [go-redis]
+      - pattern: "nsq.NewProducer"
+        kind: function
+        direction: produce
+        frameworks: [go-nsq]
+      - pattern: "nsq.NewConsumer"
+        kind: function
+        direction: consume
+        frameworks: [go-nsq]
+      - pattern: ".Publish("
+        kind: method
+        direction: produce
+        frameworks: [amqp091-go]
+    grpc:
+      - pattern: "pb.New"
+        kind: function
+        direction: client
+        frameworks: [grpc-go]
+      - pattern: "grpc.Dial"
+        kind: function
+        direction: client
+        frameworks: [grpc-go]
+      - pattern: "grpc.NewServer"
+        kind: function
+        direction: server
+        frameworks: [grpc-go]
+      - pattern: ".Register"
+        kind: method
+        direction: server
+        frameworks: [grpc-go]
+      - pattern: "pb.Register"
+        kind: function
+        direction: server
+        frameworks: [grpc-go]
+      - pattern: "grpc.DialContext"
+        kind: function
+        direction: client
+        frameworks: [grpc-go]
+      - pattern: ".Serve("
+        kind: method
+        direction: server
+        frameworks: [grpc-go]

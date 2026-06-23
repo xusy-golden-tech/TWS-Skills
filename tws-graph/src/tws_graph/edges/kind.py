@@ -46,6 +46,9 @@ class EdgeKind(str, Enum):
 
     # -- P10 跨服务 --
     HTTP_CALLS = "http_calls"
+    GRPC_SERVICE = "grpc_service"
+    GRPC_CLIENT = "grpc_client"
+    GRPC_SERVER = "grpc_server"
 
     # -- P4/P8 相似度 --
     SIMILAR_TO = "similar_to"
