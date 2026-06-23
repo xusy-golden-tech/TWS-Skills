@@ -31,6 +31,7 @@ from .pipeline.passes import (
     ParseExtractPass,
     NodeInsertPass,
     EdgeInsertPass,
+    DataFlowPass,
     CrossFileResolvePass,
 )
 from .store import SqliteStore
@@ -170,6 +171,7 @@ def _build_pipeline_engine(store: SqliteStore) -> PipelineEngine:
     engine.register_pass(ParseExtractPass())
     engine.register_pass(NodeInsertPass())
     engine.register_pass(EdgeInsertPass())
+    engine.register_pass(DataFlowPass())
     engine.register_pass(CrossFileResolvePass())
     return engine
 

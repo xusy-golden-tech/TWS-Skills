@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """VariableUsageExtractor -- 变量使用分析提取器.
 
 从 tree-sitter AST 提取每函数的变量 read/write/throw 集合。

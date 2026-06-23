@@ -10,6 +10,7 @@ Currently supports Python and TypeScript.
 
 from __future__ import annotations
 
+from tws_graph.edges.kind import EdgeKind
 
 # ---------------------------------------------------------------------------
 # Tree-sitter navigation helpers (tree-sitter >= 0.25 method-based API)
@@ -379,7 +380,7 @@ class DataFlowExtractor:
             edges.append({
                 "source": caller_id,
                 "target": callee_id,
-                "kind": "data_flows",
+                "kind": EdgeKind.DATA_FLOWS.value,
                 "target_text": target_text,
                 "source_loc": f"{file_path}:{line}",
                 "provenance": "tree-sitter",
@@ -523,7 +524,7 @@ class DataFlowExtractor:
             edges.append({
                 "source": caller_id,
                 "target": callee_id,
-                "kind": "data_flows",
+                "kind": EdgeKind.DATA_FLOWS.value,
                 "target_text": target_text,
                 "source_loc": f"{file_path}:{line}",
                 "provenance": "tree-sitter",

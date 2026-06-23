@@ -57,6 +57,20 @@ class DataFlowPass(Pass):
             ctx.metadata["dataflow_files"] = 0
             return ctx
 
+        # B6: guard against empty root_dir with non-empty files
+        if not ctx.root_dir and ctx.files:
+            logger.warning(
+                "DataFlowPass: ctx.root_dir is empty but ctx.files is not, skipping"
+            )
+            ctx.errors.append({
+                "pass": self.name,
+                "error": "root_dir is empty, cannot resolve file paths",
+                "severity": "warning",
+            })
+            ctx.metadata["dataflow_edges"] = 0
+            ctx.metadata["dataflow_files"] = 0
+            return ctx
+
         # 1. Get tracker DB path from metadata
         tracker_db_path = ctx.metadata.get(
             "tracker_db_path", ".tws/codegraph/analysis.db"
@@ -186,12 +200,12 @@ class DataFlowPass(Pass):
                 )
                 continue
 
-            # --- 5b. Read file content ---
+            # --- 5b. Read file content as bytes ---
             full_path = os.path.join(ctx.root_dir, file_path)
             try:
-                with open(full_path, "r", encoding="utf-8", errors="replace") as fh:
-                    content = fh.read()
-            except (OSError, UnicodeDecodeError) as exc:
+                with open(full_path, "rb") as fh:
+                    source_bytes = fh.read()
+            except OSError as exc:
                 logger.warning("Failed to read %s: %s", file_path, exc)
                 ctx.errors.append({
                     "pass": self.name,
@@ -217,8 +231,7 @@ class DataFlowPass(Pass):
             # --- 5d. Parse with tree-sitter ---
             try:
                 parser = get_parser(language)
-                tree = parser.parse(content)
-                source_bytes = content.encode("utf-8")
+                tree = parser.parse(source_bytes.decode("utf-8", errors="replace"))
             except Exception as exc:
                 logger.warning("Failed to parse %s: %s", file_path, exc)
                 ctx.errors.append({

@@ -5,6 +5,7 @@ from .parse_extract import ParseExtractPass
 from .node_insert import NodeInsertPass
 from .edge_insert import EdgeInsertPass
 from .cross_file_resolve import CrossFileResolvePass
+from .dataflow_pass import DataFlowPass
 
 __all__ = [
     "StatFilterPass",
@@ -12,4 +13,5 @@ __all__ = [
     "NodeInsertPass",
     "EdgeInsertPass",
     "CrossFileResolvePass",
+    "DataFlowPass",
 ]

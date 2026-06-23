@@ -28,6 +28,7 @@ from typing import Optional
 from .engine import PipelineEngine
 from .passes import (
     CrossFileResolvePass,
+    DataFlowPass,
     EdgeInsertPass,
     NodeInsertPass,
     ParseExtractPass,
@@ -113,6 +114,7 @@ class ExtractionOrchestrator:
         self._engine.register_pass(ParseExtractPass())
         self._engine.register_pass(NodeInsertPass())
         self._engine.register_pass(EdgeInsertPass())
+        self._engine.register_pass(DataFlowPass())
         self._engine.register_pass(CrossFileResolvePass())
 
     # ── db_path resolution + schema compatibility ─────────────────────────
