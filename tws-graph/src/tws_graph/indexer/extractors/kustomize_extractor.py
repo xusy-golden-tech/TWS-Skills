@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 
-from tws_graph.indexer.base import hash_id
+from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext
 
 
 def _node_text(node, source: bytes) -> str:
@@ -290,7 +290,7 @@ def _extract_image_from_block(block_node, source: bytes, file_path: str,
                                            file_path, line))
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
+def kustomize_extract(source: bytes, tree, file_path: str) -> list[dict]:
     """Extract CONTAINS, REFERENCES, and IMPORTS edges from a kustomization YAML CST.
 
     Args:
@@ -321,3 +321,14 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
             break
 
     return edges
+
+
+class KustomizeExtractor(BaseExtractor):
+    """BaseExtractor wrapper for the standalone kustomize_extract function."""
+
+    extensions = [".yaml", ".yml"]
+    tree_sitter_languages = ["yaml"]
+
+    def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
+        edges = kustomize_extract(source, tree, ctx.file_path)
+        ctx.result.edges.extend(edges)

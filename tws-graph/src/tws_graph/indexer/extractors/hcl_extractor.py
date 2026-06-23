@@ -15,7 +15,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id
+from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext
 
 
 def _node_text(node, source: bytes) -> str:
@@ -137,7 +137,7 @@ def _block_string_lits(block_node, source: bytes) -> list[str]:
     return result
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
+def hcl_extract(source: bytes, tree, file_path: str) -> list[dict]:
     """Extract CONTAINS, IMPORTS, and REFERENCES edges from an HCL/Terraform CST.
 
     Args:
@@ -303,3 +303,14 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                 _process_block(child)
 
     return edges
+
+
+class HclExtractor(BaseExtractor):
+    """BaseExtractor wrapper for the standalone hcl_extract function."""
+
+    extensions = [".hcl", ".tf", ".tfvars"]
+    tree_sitter_languages = ["hcl"]
+
+    def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
+        edges = hcl_extract(source, tree, ctx.file_path)
+        ctx.result.edges.extend(edges)

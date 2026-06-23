@@ -14,7 +14,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id
+from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext
 
 
 def _node_text(node, source: bytes) -> str:
@@ -92,7 +92,7 @@ def _is_local_name(identifier, source: bytes) -> bool:
     return text and text[0].islower()
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
+def elixir_extract(source: bytes, tree, file_path: str) -> list[dict]:
     """Extract edges from an Elixir source CST.
 
     Args:
@@ -179,3 +179,14 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
 
     walk(root)
     return edges
+
+
+class ElixirExtractor(BaseExtractor):
+    """BaseExtractor wrapper for the standalone elixir_extract function."""
+
+    extensions = [".ex", ".exs"]
+    tree_sitter_languages = ["elixir"]
+
+    def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
+        edges = elixir_extract(source, tree, ctx.file_path)
+        ctx.result.edges.extend(edges)

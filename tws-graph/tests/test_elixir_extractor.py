@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from tws_graph.indexer.extractors.elixir_extractor import extract
+from tws_graph.indexer.extractors.elixir_extractor import elixir_extract
 from tree_sitter_language_pack import get_parser
 
 
@@ -21,7 +21,7 @@ def _parse_file(filename):
 def _parse(source_str, file_path="test.ex"):
     parser = get_parser("elixir")
     tree = parser.parse(source_str)
-    return extract(source_str.encode("utf-8"), tree, file_path)
+    return elixir_extract(source_str.encode("utf-8"), tree, file_path)
 
 
 class TestElixirExtractor:
@@ -100,7 +100,7 @@ class TestElixirExtractor:
     def test_full_fixture_file(self):
         """Full fixture file should produce a variety of edge types."""
         source, tree = _parse_file("Sample.ex")
-        edges = extract(source, tree, "Sample.ex")
+        edges = elixir_extract(source, tree, "Sample.ex")
 
         assert len(edges) > 0
 
@@ -132,7 +132,7 @@ class TestElixirExtractor:
     def test_edge_provenance(self):
         """All edges should have provenance='tree-sitter'."""
         source, tree = _parse_file("Sample.ex")
-        edges = extract(source, tree, "Sample.ex")
+        edges = elixir_extract(source, tree, "Sample.ex")
 
         assert len(edges) > 0
         for edge in edges:
@@ -151,7 +151,7 @@ class TestElixirExtractor:
     def test_source_loc_format(self):
         """Each edge should have a properly formatted source_loc."""
         source, tree = _parse_file("Sample.ex")
-        edges = extract(source, tree, "Sample.ex")
+        edges = elixir_extract(source, tree, "Sample.ex")
 
         for edge in edges:
             assert "Sample.ex:" in edge["source_loc"]

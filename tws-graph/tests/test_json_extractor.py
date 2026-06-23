@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from tws_graph.indexer.extractors.json_extractor import extract as json_extract
+from tws_graph.indexer.extractors.json_extractor import json_extract
 from tree_sitter_language_pack import get_parser
 
 

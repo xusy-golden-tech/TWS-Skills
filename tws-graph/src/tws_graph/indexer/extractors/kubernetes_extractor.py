@@ -33,7 +33,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id
+from tws_graph.indexer.base import hash_id, BaseExtractor
 
 # Well-known K8s resource kinds
 _K8S_RESOURCE_KINDS = {
@@ -380,6 +380,15 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
                                 ))
 
     return edges
+
+
+class KubernetesExtractor(BaseExtractor):
+    extensions = [".yaml", ".yml"]
+    tree_sitter_languages = ["yaml"]
+
+    def extract(self, source, tree, ctx) -> None:
+        result_edges = extract(source, tree, ctx.file_path)
+        ctx.result.edges.extend(result_edges)
 
 
 def _extract_containers(containers_seq, resource_id: str, file_path: str, source: bytes, edges: list):

@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from tws_graph.indexer.extractors.clojure_extractor import extract
+from tws_graph.indexer.extractors.clojure_extractor import clojure_extract
 from tree_sitter_language_pack import get_parser
 
 
@@ -21,7 +21,7 @@ def _parse_file(filename):
 def _parse(source_str, file_path="test.clj"):
     parser = get_parser("clojure")
     tree = parser.parse(source_str)
-    return extract(source_str.encode("utf-8"), tree, file_path)
+    return clojure_extract(source_str.encode("utf-8"), tree, file_path)
 
 
 class TestClojureExtractor:
@@ -87,7 +87,7 @@ class TestClojureExtractor:
     def test_full_fixture_file(self):
         """Full fixture file should produce a variety of edge types."""
         source, tree = _parse_file("Sample.clj")
-        edges = extract(source, tree, "Sample.clj")
+        edges = clojure_extract(source, tree, "Sample.clj")
 
         assert len(edges) > 0
 
@@ -120,7 +120,7 @@ class TestClojureExtractor:
     def test_edge_provenance(self):
         """All edges should have provenance='heuristic'."""
         source, tree = _parse_file("Sample.clj")
-        edges = extract(source, tree, "Sample.clj")
+        edges = clojure_extract(source, tree, "Sample.clj")
 
         assert len(edges) > 0
         for edge in edges:
@@ -136,7 +136,7 @@ class TestClojureExtractor:
     def test_source_loc_format(self):
         """Each edge should have a properly formatted source_loc."""
         source, tree = _parse_file("Sample.clj")
-        edges = extract(source, tree, "Sample.clj")
+        edges = clojure_extract(source, tree, "Sample.clj")
 
         for edge in edges:
             assert "Sample.clj:" in edge["source_loc"]

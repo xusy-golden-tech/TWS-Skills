@@ -13,7 +13,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id
+from tws_graph.indexer.base import hash_id, BaseExtractor
 
 
 def _node_text(node, source: bytes) -> str:
@@ -267,3 +267,12 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
 
     walk(root)
     return edges
+
+
+class SqlExtractor(BaseExtractor):
+    extensions = [".sql"]
+    tree_sitter_languages = ["sql"]
+
+    def extract(self, source, tree, ctx) -> None:
+        result_edges = extract(source, tree, ctx.file_path)
+        ctx.result.edges.extend(result_edges)

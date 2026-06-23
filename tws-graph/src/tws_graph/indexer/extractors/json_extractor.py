@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 
-from tws_graph.indexer.base import hash_id
+from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext
 
 
 def _node_text(node, source: bytes) -> str:
@@ -164,7 +164,7 @@ def _is_package_json(file_path: str) -> bool:
     return basename.lower() == "package.json"
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
+def json_extract(source: bytes, tree, file_path: str) -> list[dict]:
     """Extract CONTAINS and IMPORTS edges from a JSON CST.
 
     Args:
@@ -198,3 +198,14 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
             break
 
     return edges
+
+
+class JsonExtractor(BaseExtractor):
+    """BaseExtractor wrapper for the standalone json_extract function."""
+
+    extensions = [".json"]
+    tree_sitter_languages = ["json"]
+
+    def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
+        edges = json_extract(source, tree, ctx.file_path)
+        ctx.result.edges.extend(edges)

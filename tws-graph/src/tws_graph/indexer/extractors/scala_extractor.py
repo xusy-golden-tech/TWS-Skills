@@ -15,7 +15,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id
+from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext
 
 
 def _node_text(node, source: bytes) -> str:
@@ -50,7 +50,7 @@ def _line(node) -> int:
     return node.start_position().row + 1
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
+def scala_extract(source: bytes, tree, file_path: str) -> list[dict]:
     """Extract edges from a Scala source CST.
 
     Args:
@@ -153,3 +153,14 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
 
     walk(root)
     return edges
+
+
+class ScalaExtractor(BaseExtractor):
+    """BaseExtractor wrapper for the standalone scala_extract function."""
+
+    extensions = [".scala", ".sc"]
+    tree_sitter_languages = ["scala"]
+
+    def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
+        edges = scala_extract(source, tree, ctx.file_path)
+        ctx.result.edges.extend(edges)

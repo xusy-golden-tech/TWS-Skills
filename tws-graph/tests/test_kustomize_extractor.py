@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from tws_graph.indexer.extractors.kustomize_extractor import extract as kustomize_extract
+from tws_graph.indexer.extractors.kustomize_extractor import kustomize_extract
 from tree_sitter_language_pack import get_parser
 
 

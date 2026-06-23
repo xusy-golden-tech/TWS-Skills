@@ -1,0 +1,33 @@
+import io, os, json, sys, logging, time
+logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)
+from tws_graph.lsp.protocol import LspMessageReader
+
+def test_something():
+    print("In test function", file=sys.stderr)
+    stdout_read_fd, stdout_write_fd = os.pipe()
+    stdin_read_fd, stdin_write_fd = os.pipe()
+    stdout_reader = io.BufferedReader(os.fdopen(stdout_read_fd, 'rb', closefd=False))
+    stdin_writer = os.fdopen(stdin_write_fd, 'wb', closefd=False)
+    stdin_reader = os.fdopen(stdin_read_fd, 'rb', closefd=False)
+    print("Pipes created", file=sys.stderr)
+    reader = LspMessageReader(stdout=stdout_reader, stdin=stdin_writer)
+    print("Reader created, thread alive:", reader._reader_thread.is_alive(), file=sys.stderr)
+    time.sleep(0.3)
+    print("After sleep", file=sys.stderr)
+    def _make_msg(p):
+        body = json.dumps(p, ensure_ascii=False).encode('utf-8')
+        header = f'Content-Length: {len(body)}\r\n\r\n'.encode('ascii')
+        return header + body
+    resp = _make_msg({'jsonrpc': '2.0', 'id': 1, 'result': {'uri': 'file:///main.py', 'range': {}}})
+    os.write(stdout_write_fd, resp)
+    print("Response written", file=sys.stderr)
+    time.sleep(0.3)
+    print("Buffer:", reader._response_buffer, file=sys.stderr)
+    result = reader.send_request('textDocument/definition', {'param': 1}, timeout=5.0)
+    print("Result:", result, file=sys.stderr)
+    reader.close()
+    for fd in [stdout_read_fd, stdout_write_fd, stdin_read_fd, stdin_write_fd]:
+        try: os.close(fd)
+        except: pass
+    print("DONE", file=sys.stderr)
+    assert result == {'uri': 'file:///main.py', 'range': {}}

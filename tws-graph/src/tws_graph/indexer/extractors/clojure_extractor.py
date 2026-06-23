@@ -17,7 +17,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id
+from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext
 
 PROVENANCE = "heuristic"
 
@@ -121,7 +121,7 @@ def _is_definition_form(first_sym: str) -> bool:
     return first_sym in ("def", "defn", "defmacro", "defn-", "defmacro-", "defonce")
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
+def clojure_extract(source: bytes, tree, file_path: str) -> list[dict]:
     """Extract edges from a Clojure source CST.
 
     Args:
@@ -191,3 +191,14 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
 
     walk(root)
     return edges
+
+
+class ClojureExtractor(BaseExtractor):
+    """BaseExtractor wrapper for the standalone clojure_extract function."""
+
+    extensions = [".clj", ".cljs", ".cljc", ".edn"]
+    tree_sitter_languages = ["clojure"]
+
+    def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
+        edges = clojure_extract(source, tree, ctx.file_path)
+        ctx.result.edges.extend(edges)

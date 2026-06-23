@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from tws_graph.indexer.extractors.hcl_extractor import extract as hcl_extract
+from tws_graph.indexer.extractors.hcl_extractor import hcl_extract
 from tree_sitter_language_pack import get_parser
 
 

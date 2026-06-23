@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from tws_graph.indexer.extractors.haskell_extractor import extract
+from tws_graph.indexer.extractors.haskell_extractor import haskell_extract
 from tree_sitter_language_pack import get_parser
 
 
@@ -21,7 +21,7 @@ def _parse_file(filename):
 def _parse(source_str, file_path="test.hs"):
     parser = get_parser("haskell")
     tree = parser.parse(source_str)
-    return extract(source_str.encode("utf-8"), tree, file_path)
+    return haskell_extract(source_str.encode("utf-8"), tree, file_path)
 
 
 class TestHaskellExtractor:
@@ -112,7 +112,7 @@ class TestHaskellExtractor:
     def test_full_fixture_file(self):
         """Full fixture file should produce a variety of edge types."""
         source, tree = _parse_file("Sample.hs")
-        edges = extract(source, tree, "Sample.hs")
+        edges = haskell_extract(source, tree, "Sample.hs")
 
         assert len(edges) > 0
 
@@ -145,7 +145,7 @@ class TestHaskellExtractor:
     def test_edge_provenance(self):
         """All edges should have provenance='heuristic'."""
         source, tree = _parse_file("Sample.hs")
-        edges = extract(source, tree, "Sample.hs")
+        edges = haskell_extract(source, tree, "Sample.hs")
 
         assert len(edges) > 0
         for edge in edges:
@@ -162,7 +162,7 @@ class TestHaskellExtractor:
     def test_source_loc_format(self):
         """Each edge should have a properly formatted source_loc."""
         source, tree = _parse_file("Sample.hs")
-        edges = extract(source, tree, "Sample.hs")
+        edges = haskell_extract(source, tree, "Sample.hs")
 
         for edge in edges:
             assert "Sample.hs:" in edge["source_loc"]

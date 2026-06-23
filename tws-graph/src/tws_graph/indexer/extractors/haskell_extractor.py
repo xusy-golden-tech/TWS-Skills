@@ -18,7 +18,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id
+from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext
 
 PROVENANCE = "heuristic"
 
@@ -89,7 +89,7 @@ def _extract_apply_target(node, source: bytes) -> str | None:
     return None
 
 
-def extract(source: bytes, tree, file_path: str) -> list[dict]:
+def haskell_extract(source: bytes, tree, file_path: str) -> list[dict]:
     """Extract edges from a Haskell source CST.
 
     Args:
@@ -196,3 +196,14 @@ def extract(source: bytes, tree, file_path: str) -> list[dict]:
 
     walk(root)
     return edges
+
+
+class HaskellExtractor(BaseExtractor):
+    """BaseExtractor wrapper for the standalone haskell_extract function."""
+
+    extensions = [".hs", ".lhs"]
+    tree_sitter_languages = ["haskell"]
+
+    def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
+        edges = haskell_extract(source, tree, ctx.file_path)
+        ctx.result.edges.extend(edges)

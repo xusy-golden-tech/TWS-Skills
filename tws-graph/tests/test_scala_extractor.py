@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from tws_graph.indexer.extractors.scala_extractor import extract
+from tws_graph.indexer.extractors.scala_extractor import scala_extract
 from tree_sitter_language_pack import get_parser
 
 
@@ -21,7 +21,7 @@ def _parse_file(filename):
 def _parse(source_str, file_path="test.scala"):
     parser = get_parser("scala")
     tree = parser.parse(source_str)
-    return extract(source_str.encode("utf-8"), tree, file_path)
+    return scala_extract(source_str.encode("utf-8"), tree, file_path)
 
 
 class TestScalaExtractor:
@@ -94,7 +94,7 @@ class TestScalaExtractor:
     def test_full_fixture_file(self):
         """Full fixture file should produce a variety of edge types."""
         source, tree = _parse_file("Sample.scala")
-        edges = extract(source, tree, "Sample.scala")
+        edges = scala_extract(source, tree, "Sample.scala")
 
         assert len(edges) > 0
 
@@ -134,7 +134,7 @@ class TestScalaExtractor:
     def test_edge_provenance(self):
         """All edges should have provenance='tree-sitter'."""
         source, tree = _parse_file("Sample.scala")
-        edges = extract(source, tree, "Sample.scala")
+        edges = scala_extract(source, tree, "Sample.scala")
 
         assert len(edges) > 0
         for edge in edges:
@@ -153,7 +153,7 @@ class TestScalaExtractor:
     def test_source_loc_format(self):
         """Each edge should have a properly formatted source_loc."""
         source, tree = _parse_file("Sample.scala")
-        edges = extract(source, tree, "Sample.scala")
+        edges = scala_extract(source, tree, "Sample.scala")
 
         for edge in edges:
             assert "Sample.scala:" in edge["source_loc"]
