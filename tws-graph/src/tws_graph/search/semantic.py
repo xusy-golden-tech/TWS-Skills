@@ -99,7 +99,7 @@ def _load_signals():
 # Candidate retrieval
 # ---------------------------------------------------------------------------
 
-def _get_candidates(store_or_queries, query: str, limit: int = 200) -> list[dict]:
+def _get_candidates(store_or_db_path, query: str, limit: int = 200) -> list[dict]:
     """Retrieve FTS5 pre-filtered candidate set.
 
     Accepts a Store instance, QueryBuilder instance, or db_path str.
@@ -107,30 +107,30 @@ def _get_candidates(store_or_queries, query: str, limit: int = 200) -> list[dict
     candidate dicts.
     """
     # --- Store instance ---
-    if hasattr(store_or_queries, "fts_search"):
-        return store_or_queries.fts_search(query, limit=limit)
+    if hasattr(store_or_db_path, "fts_search"):
+        return store_or_db_path.fts_search(query, limit=limit)
 
     # --- QueryBuilder instance ---
-    if hasattr(store_or_queries, "search_nodes"):
-        rows = store_or_queries.search_nodes(query, limit=limit)
+    if hasattr(store_or_db_path, "search_nodes"):
+        rows = store_or_db_path.search_nodes(query, limit=limit)
         return [dict(r) for r in rows]
 
     # --- db_path string ---
-    if isinstance(store_or_queries, str):
+    if isinstance(store_or_db_path, str):
         from tws_graph.store.sqlite_store import SqliteStore
-        if not os.path.exists(store_or_queries):
+        if not os.path.exists(store_or_db_path):
             raise FileNotFoundError(
-                f"Database file not found: {store_or_queries}"
+                f"Database file not found: {store_or_db_path}"
             )
-        store = SqliteStore(store_or_queries)
+        store = SqliteStore(store_or_db_path)
         try:
             return store.fts_search(query, limit=limit)
         finally:
             store.close()
 
     raise TypeError(
-        f"store_or_queries must be Store, QueryBuilder, or db_path str, "
-        f"got {type(store_or_queries)}"
+        f"store_or_db_path must be Store, QueryBuilder, or db_path str, "
+        f"got {type(store_or_db_path)}"
     )
 
 
@@ -138,14 +138,17 @@ def _get_candidates(store_or_queries, query: str, limit: int = 200) -> list[dict
 # Store context builder
 # ---------------------------------------------------------------------------
 
-def _build_ctx(store_or_queries) -> dict:
+def _build_ctx(store_or_db_path, use_embeddings: bool = False) -> dict:
     """Build the store_context dict signals use for pre-computed artefacts.
 
-    Lazy-initialised fields (minhash, centrality, embeddings) are set to None
-    and created on first access by the relevant signal.
+    Eagerly initialises MinHash, GraphTraverser, centrality_scores,
+    clone_pairs, and embeddings_model where possible.  Each initialisation
+    is wrapped in try/except so a single failure never blocks the whole
+    pipeline — resources gracefully degrade to None.
     """
     ctx: dict = {
         "queries": None,
+        "store": None,
         "traverser": None,
         "minhash": None,
         "lsh": None,
@@ -154,9 +157,73 @@ def _build_ctx(store_or_queries) -> dict:
         "clone_pairs": None,
     }
 
-    # If we have a QueryBuilder, store it so signals can issue graph queries
-    if hasattr(store_or_queries, "search_nodes"):
-        ctx["queries"] = store_or_queries
+    # ------------------------------------------------------------------
+    # MinHash — zero external dependencies, always initialisable
+    # ------------------------------------------------------------------
+    try:
+        from tws_graph.graph.algorithms.minhash import MinHash
+        ctx["minhash"] = MinHash()
+    except Exception:
+        pass
+
+    # ------------------------------------------------------------------
+    # QueryBuilder path — store for search_nodes, build GraphTraverser
+    # ------------------------------------------------------------------
+    if hasattr(store_or_db_path, "search_nodes"):
+        ctx["queries"] = store_or_db_path
+        try:
+            from tws_graph.graph.traversal import GraphTraverser
+            ctx["traverser"] = GraphTraverser(store_or_db_path)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Store path — pre-compute centrality / clone-pairs; also expose
+    # the store itself for O(1) search_by_def_index lookups.
+    # ------------------------------------------------------------------
+    if hasattr(store_or_db_path, "fts_search"):
+        ctx["store"] = store_or_db_path
+
+        # GraphTraverser via Store's internal QueryBuilder
+        if ctx["traverser"] is None:
+            try:
+                from tws_graph.graph.traversal import GraphTraverser
+                qb = getattr(store_or_db_path, "_qb", None)
+                if qb is not None:
+                    ctx["traverser"] = GraphTraverser(qb)
+                    ctx["queries"] = qb
+            except Exception:
+                pass
+
+        # Centrality scores
+        try:
+            from tws_graph.graph.algorithms.centrality import CentralityComputer
+            cc = CentralityComputer()
+            result = cc.run(store_or_db_path)
+            ctx["centrality_scores"] = result.data.get("scores", {})
+        except Exception:
+            pass
+
+        # Clone pairs
+        try:
+            from tws_graph.graph.algorithms.similarity import CloneDetector
+            cd = CloneDetector()
+            result = cd.run(store_or_db_path)
+            ctx["clone_pairs"] = result.data.get("similar_pairs", [])
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Embeddings model (ONNX-based, optional)
+    # ------------------------------------------------------------------
+    if use_embeddings:
+        try:
+            from tws_graph.search.embeddings.model import EmbeddingsModel
+            model = EmbeddingsModel("all-MiniLM-L6-v2")
+            if model.is_available:
+                ctx["embeddings_model"] = model
+        except Exception:
+            pass
 
     return ctx
 
@@ -167,7 +234,7 @@ def _build_ctx(store_or_queries) -> dict:
 
 def semantic_query(
     query: str,
-    store_or_queries,
+    store_or_db_path,
     limit: int = 20,
     signal_weights: Optional[dict[str, float]] = None,
     use_embeddings: bool = False,
@@ -183,7 +250,7 @@ def semantic_query(
 
     Args:
         query: The search string. Must be non-empty.
-        store_or_queries: ``Store`` instance, ``QueryBuilder`` instance, or
+        store_or_db_path: ``Store`` instance, ``QueryBuilder`` instance, or
             ``db_path`` string.
         limit: Max number of results to return (default 20).
         signal_weights: Optional per-signal weight overrides, e.g.
@@ -196,8 +263,8 @@ def semantic_query(
 
     Raises:
         ValueError: *query* is empty or None.
-        FileNotFoundError: *store_or_queries* is a non-existent file path.
-        TypeError: *store_or_queries* has an unsupported type.
+        FileNotFoundError: *store_or_db_path* is a non-existent file path.
+        TypeError: *store_or_db_path* has an unsupported type.
     """
     # ------------------------------------------------------------------
     # 1. Validate input
@@ -210,7 +277,7 @@ def semantic_query(
     # ------------------------------------------------------------------
     # 2. FTS5 pre-filter candidates
     # ------------------------------------------------------------------
-    candidates = _get_candidates(store_or_queries, query, limit=200)
+    candidates = _get_candidates(store_or_db_path, query, limit=200)
 
     # ------------------------------------------------------------------
     # 3. Load signals & apply custom weights
@@ -223,24 +290,11 @@ def semantic_query(
                 sig.weight = signal_weights[sig.name]
 
     # ------------------------------------------------------------------
-    # 4. Build context
+    # 4. Build context (initialises MinHash, GraphTraverser, centrality,
+    #    clone-pairs, and optionally embeddings)
     # ------------------------------------------------------------------
-    ctx = _build_ctx(store_or_queries)
-
-    # Attempt embeddings setup if requested
-    embeddings_enabled = False
-    if use_embeddings:
-        try:
-            # Lazy: import sentence-transformers only when needed
-            from sentence_transformers import SentenceTransformer
-            ctx["embeddings_model"] = SentenceTransformer(
-                "all-MiniLM-L6-v2"
-            )
-            embeddings_enabled = True
-        except ImportError:
-            embeddings_enabled = False
-        except Exception:
-            embeddings_enabled = False
+    ctx = _build_ctx(store_or_db_path, use_embeddings=use_embeddings)
+    embeddings_enabled = ctx.get("embeddings_model") is not None
 
     # ------------------------------------------------------------------
     # 5. Score each candidate
@@ -249,7 +303,7 @@ def semantic_query(
         duration_ms = (time.perf_counter() - t0) * 1000.0
         return SemanticSearchResult(
             results=[] if not candidates else [
-                {**c, "_score": 0.0} for c in candidates[:limit]
+                {**c, "_score": 0.0, "signals": {}} for c in candidates[:limit]
             ],
             query=query,
             candidate_count=len(candidates),
@@ -263,15 +317,18 @@ def semantic_query(
 
     for candidate in candidates:
         weighted_sum = 0.0
+        signals_scores: dict[str, float] = {}
         for sig in signals:
             try:
                 score = sig.compute(query, candidate, ctx)
             except Exception:
                 score = 0.0
+            signals_scores[sig.name] = score
             weighted_sum += sig.weight * score
 
         rank = weighted_sum / total_weight if total_weight > 0 else 0.0
         candidate["_score"] = rank
+        candidate["signals"] = signals_scores
         scored.append(candidate)
 
     # ------------------------------------------------------------------

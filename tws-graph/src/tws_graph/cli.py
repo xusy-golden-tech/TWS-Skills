@@ -34,6 +34,7 @@ from .pipeline.passes import (
     DataFlowPass,
     CrossFileResolvePass,
 )
+from .search.semantic import semantic_query
 from .store import SqliteStore
 from .graph.traversal import GraphTraverser
 from .graph.algorithms.similarity import CloneDetector
@@ -899,6 +900,9 @@ def search(
     limit: int = typer.Option(20, "--limit", "-n", help="最大结果数"),
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+    semantic: bool = typer.Option(False, "--semantic", help="启用 11-signal 语义搜索"),
+    signal_weights: Optional[str] = typer.Option(None, "--weights", help="JSON 格式信号权重覆盖"),
+    embeddings: bool = typer.Option(False, "--embeddings", help="启用向量增强"),
 ):
     """全文搜索代码符号。
 
@@ -906,8 +910,77 @@ def search(
       tws-graph search calculateTotal
       tws-graph search kind:function api
       tws-graph search lang:python kind:class controller --limit 10
+      tws-graph search tax --semantic --limit 10
+      tws-graph search auth --semantic --weights '{"BM25":2.0}'
     """
     query_str = " ".join(query)
+
+    # ------------------------------------------------------------------
+    # Semantic search path
+    # ------------------------------------------------------------------
+    if semantic:
+        db = _get_db(db_path) if os.path.exists(db_path or DEFAULT_DB) else None
+        if not db:
+            typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
+            raise typer.Exit(1)
+
+        # Parse optional signal weights
+        weights_dict = None
+        if signal_weights:
+            try:
+                weights_dict = json.loads(signal_weights)
+            except json.JSONDecodeError as e:
+                typer.echo(f"错误: 无效的 --weights JSON: {e}", err=True)
+                raise typer.Exit(1)
+
+        # Pass QueryBuilder so _build_ctx can create GraphTraverser
+        queries = QueryBuilder(db.conn)
+
+        result = semantic_query(
+            query=query_str,
+            store_or_db_path=queries,
+            limit=limit,
+            signal_weights=weights_dict,
+            use_embeddings=embeddings,
+        )
+
+        if not result.results:
+            typer.echo(f"未找到匹配: {query_str}")
+            return
+
+        if json_output:
+            output = {
+                "query": result.query,
+                "candidate_count": result.candidate_count,
+                "duration_ms": result.duration_ms,
+                "embeddings_enabled": result.embeddings_enabled,
+                "results": _serialize(result.results),
+            }
+            typer.echo(json.dumps(output, ensure_ascii=False, indent=2))
+        else:
+            typer.echo(
+                f"\n语义搜索: \"{result.query}\" "
+                f"(候选 {result.candidate_count}, "
+                f"{result.duration_ms:.1f}ms)"
+            )
+            for row in result.results:
+                name = row.get("name")
+                kind = row.get("kind")
+                fpath = row.get("file_path")
+                line = row.get("start_line")
+                lang = row.get("language")
+                score = row.get("_score", 0.0)
+                sig = row.get("signature") or ""
+                sig_short = f"  ({sig[:50]}...)" if sig and len(sig) > 50 else f"  ({sig})" if sig else ""
+                typer.echo(
+                    f"  {name} [{kind}] ({lang}) {fpath}:{line}{sig_short} "
+                    f"score={score:.3f}"
+                )
+        return
+
+    # ------------------------------------------------------------------
+    # Existing FTS5 / field-qualified search path
+    # ------------------------------------------------------------------
     db = _get_db(db_path) if os.path.exists(db_path or DEFAULT_DB) else None
     if not db:
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)

@@ -11,6 +11,7 @@ They never instantiate heavy objects inside compute().
 
 from __future__ import annotations
 
+import os
 import re
 from abc import ABC, abstractmethod
 from typing import Any, Optional
@@ -21,7 +22,12 @@ from typing import Any, Optional
 # ============================================================================
 
 class ScoredResult(dict):
-    """Extended search result with per-signal scores."""
+    """Extended search result with per-signal scores.
+
+    Attributes:
+        signals: Dict mapping signal name (str) to its raw score (float).
+            Populated by the semantic_query orchestrator.
+    """
     pass
 
 
@@ -167,12 +173,23 @@ class QualifiedNameMatchSignal(Signal):
             if not q or not qname:
                 return 0.0
 
+            # O(1) exact lookup via store's def index when available
+            store = ctx.get("store")
+            if store is not None:
+                try:
+                    found_id = store.search_by_def_index(query)
+                    if found_id is not None and found_id == candidate.get("id"):
+                        return min(1.0, 1.0)
+                except Exception:
+                    pass
+
+            # Fallback to string-based matching
             if qname == q:
-                return min(1.0,1.0)
+                return min(1.0, 1.0)
             if qname.startswith(q):
-                return min(1.0,0.5)
+                return min(1.0, 0.5)
             if q in qname:
-                return min(1.0,0.3)
+                return min(1.0, 0.3)
             return 0.0
         except Exception:
             return 0.0
@@ -205,7 +222,7 @@ class DocstringMatchSignal(Signal):
 
             overlap = len(q_tokens & d_tokens)
             raw = overlap / len(q_tokens)
-            return min(1.0,raw)
+            return min(1.0, raw)
         except Exception:
             return 0.0
 
@@ -251,7 +268,7 @@ class ASTSimilaritySignal(Signal):
             sig_b = minhash.compute_signature(body_tokens)
 
             raw = estimate_jaccard(sig_q, sig_b)
-            return min(1.0,raw)
+            return min(1.0, raw)
         except Exception:
             return 0.0
 
@@ -293,7 +310,7 @@ class APISignatureSimilaritySignal(Signal):
             sig_s = minhash.compute_signature(s_tokens)
 
             raw = estimate_jaccard(sig_q, sig_s)
-            return min(1.0,raw)
+            return min(1.0, raw)
         except Exception:
             return 0.0
 
@@ -323,13 +340,28 @@ class CloneSimilaritySignal(Signal):
             if not cid:
                 return 0.0
 
+            q_lower = query.lower().strip()
+
+            # First, try to find clone pairs whose names match the query text.
+            # If the candidate appears in such a query-relevant pair, return
+            # its similarity immediately.
+            if q_lower:
+                for pair in clone_pairs:
+                    name_a = (pair.get("name_a", "") or "").lower()
+                    name_b = (pair.get("name_b", "") or "").lower()
+                    if q_lower in name_a or q_lower in name_b:
+                        if pair.get("node_a") == cid or pair.get("node_b") == cid:
+                            return min(1.0, pair.get("similarity", 0.0))
+
+            # Fall back to the original behaviour: check all clone pairs
+            # regardless of query relevance.
             best = 0.0
             for pair in clone_pairs:
                 if pair.get("node_a") == cid or pair.get("node_b") == cid:
                     sim = pair.get("similarity", 0.0)
                     if sim > best:
                         best = sim
-            return min(1.0,best)
+            return min(1.0, best)
         except Exception:
             return 0.0
 
@@ -373,13 +405,12 @@ class ModuleProximitySignal(Signal):
                 best = max(best, 0.3)
 
             # Check same directory via parent path matching
-            import os
             if file_path:
                 parent = os.path.dirname(file_path)
                 if parent and q in parent:
                     best = max(best, 0.15)
 
-            return min(1.0,best)
+            return min(1.0, best)
         except Exception:
             return 0.0
 
@@ -435,7 +466,7 @@ class GraphDiffusionSignal(Signal):
                     score = 1.0 / (1.0 + float(depth))
                     best = max(best, score)
 
-            return min(1.0,best)
+            return min(1.0, best)
         except Exception:
             return 0.0
 
@@ -527,7 +558,7 @@ class CallerCalleeProximitySignal(Signal):
                     elif depth == 2:
                         best = max(best, 0.5)
 
-            return min(1.0,best)
+            return min(1.0, best)
         except Exception:
             return 0.0
 
@@ -597,7 +628,7 @@ class GraphCentralitySignal(Signal):
                 return 0.0
 
             normalized = raw / max_score
-            return min(1.0,normalized)
+            return min(1.0, normalized)
         except Exception:
             return 0.0
 
@@ -648,6 +679,6 @@ class DataFlowConnectionSignal(Signal):
                     score = 1.0 / (1.0 + path_len)
                     best = max(best, score)
 
-            return min(1.0,best)
+            return min(1.0, best)
         except Exception:
             return 0.0
