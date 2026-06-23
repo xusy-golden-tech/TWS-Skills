@@ -127,19 +127,22 @@ def _get_store(db_path: str) -> SqliteStore:
     if is_new:
         # Fresh database: use the full migration system
         from .store.migrations import MigrationRunner
+        from .store.connection import configure_connection
 
         conn = _sqlite3.connect(db_path, isolation_level=None)
         conn.row_factory = _sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL")
+        configure_connection(conn)
         runner = MigrationRunner(conn)
         runner.migrate()
         conn.close()
     else:
         # Existing database: ensure properties column exists
         # (old schema created by DatabaseConnection.initialize() lacks it)
+        from .store.connection import configure_connection
+
         conn = _sqlite3.connect(db_path, isolation_level=None)
         conn.row_factory = _sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL")
+        configure_connection(conn)
         try:
             conn.execute("SELECT properties FROM nodes LIMIT 1")
         except _sqlite3.OperationalError:

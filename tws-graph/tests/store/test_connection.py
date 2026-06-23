@@ -104,6 +104,11 @@ class TestPragmaConfiguration:
         row = conn_mgr.conn.execute("PRAGMA mmap_size").fetchone()
         assert row[0] == 268435456
 
+    def test_threads(self, conn_mgr):
+        """threads should be 4 (allow up to 4 auxiliary worker threads)."""
+        row = conn_mgr.conn.execute("PRAGMA threads").fetchone()
+        assert row[0] == 4
+
 
 # ---------------------------------------------------------------------------
 # Statement cache

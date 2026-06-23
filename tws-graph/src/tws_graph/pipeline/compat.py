@@ -134,18 +134,22 @@ class ExtractionOrchestrator:
             # Fresh DB: run full migrations
             from tws_graph.store.migrations import MigrationRunner
 
+            from tws_graph.store.connection import configure_connection
+
             conn = _sqlite3.connect(db_path, isolation_level=None)
             conn.row_factory = _sqlite3.Row
-            conn.execute("PRAGMA journal_mode = WAL")
+            configure_connection(conn)
             runner = MigrationRunner(conn)
             runner.migrate()
             conn.close()
             return
 
         # Existing DB: ensure properties columns exist
+        from tws_graph.store.connection import configure_connection
+
         conn = _sqlite3.connect(db_path, isolation_level=None)
         conn.row_factory = _sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL")
+        configure_connection(conn)
         try:
             conn.execute("SELECT properties FROM nodes LIMIT 1")
         except _sqlite3.OperationalError:

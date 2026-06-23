@@ -1,0 +1,48 @@
+{
+  "_comment": "P13 performance baselines. Values updated via --update-baseline flag or manual edit.",
+  "index_build": {
+    "baseline_ms": 500.0,
+    "scale": "500_nodes_400_edges"
+  },
+  "fts_search": {
+    "baseline_ms": 30.0,
+    "scale": "300_nodes_single_keyword"
+  },
+  "edge_insert_batch": {
+    "baseline_ms": 100.0,
+    "scale": "500_edges",
+    "throughput_ops": 5000.0
+  },
+  "read_query_large_file": {
+    "baseline_ms": 10.0,
+    "scale": "200_nodes_1_file"
+  },
+  "read_query_many_small_files": {
+    "baseline_ms": 20.0,
+    "scale": "200_nodes_50_files"
+  },
+  "impact_neighbors_depth1": {
+    "baseline_ms": 5.0,
+    "scale": "50_node_chain"
+  },
+  "impact_bfs_depth2": {
+    "baseline_ms": 10.0,
+    "scale": "50_node_chain"
+  },
+  "invalidation_check": {
+    "baseline_ms": 30.0,
+    "scale": "100_tracked_files_2_analyzers"
+  },
+  "flush_small": {
+    "baseline_ms": 50.0,
+    "scale": "100_nodes_50_edges"
+  },
+  "flush_medium": {
+    "baseline_ms": 200.0,
+    "scale": "1000_nodes_500_edges"
+  },
+  "flush_large": {
+    "baseline_ms": 500.0,
+    "scale": "5000_nodes_2000_edges"
+  }
+}

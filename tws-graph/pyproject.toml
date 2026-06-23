@@ -22,6 +22,9 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 addopts = "--cov=tws_graph --cov-report=term --cov-report=html"
 testpaths = ["tests"]
+markers = [
+    "slow: benchmarks and performance tests (skipped by default, use --run-slow to enable)",
+]
 
 [tool.coverage.run]
 source = ["src/tws_graph"]

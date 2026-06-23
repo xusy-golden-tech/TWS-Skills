@@ -2,9 +2,44 @@
 
 Wraps sqlite3 connection with WAL mode, performance pragmas, and a
 prepared-statement LRU cache. Not exported through __init__.py.
+
+Provides ``configure_connection()`` as the single canonical pragma
+configuration — all connection creation points (cli.py, diff.py,
+invalidation.py, compat.py) should use it for consistent settings.
 """
 
 import sqlite3
+
+
+# ------------------------------------------------------------------
+# Module-level pragma configuration
+# ------------------------------------------------------------------
+
+def configure_connection(conn: sqlite3.Connection) -> None:
+    """Apply the canonical set of performance and safety PRAGMAs.
+
+    This is the **single source of truth** for SQLite connection
+    configuration.  Every place that creates a ``sqlite3.connect()``
+    call should invoke this function immediately after connection.
+
+    Pragmas applied:
+        busy_timeout = 5000      — wait 5 s before raising "database is locked"
+        foreign_keys = ON        — enforce FK constraints
+        journal_mode = WAL       — write-ahead log for concurrent reads
+        synchronous = NORMAL     — safe with WAL, much faster than FULL
+        cache_size = -64000      — 64 MB page cache (negative = kibibytes)
+        temp_store = MEMORY      — store temp tables/indexes in memory
+        mmap_size = 268435456    — 256 MB memory-mapped I/O
+        threads = 4              — allow up to 4 auxiliary worker threads
+    """
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA cache_size = -64000")       # 64 MB
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA mmap_size = 268435456")     # 256 MB
+    conn.execute("PRAGMA threads = 4")
 
 
 class ConnectionManager:
@@ -35,14 +70,8 @@ class ConnectionManager:
     # ------------------------------------------------------------------
 
     def _configure_pragmas(self) -> None:
-        """Apply performance and safety PRAGMAs."""
-        self.conn.execute("PRAGMA busy_timeout = 5000")
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA journal_mode = WAL")
-        self.conn.execute("PRAGMA synchronous = NORMAL")
-        self.conn.execute("PRAGMA cache_size = -64000")       # 64 MB
-        self.conn.execute("PRAGMA temp_store = MEMORY")
-        self.conn.execute("PRAGMA mmap_size = 268435456")     # 256 MB
+        """Apply performance and safety PRAGMAs via the shared utility."""
+        configure_connection(self.conn)
 
     # ------------------------------------------------------------------
     # Prepared statement cache

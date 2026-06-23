@@ -11,6 +11,33 @@ from tws_graph.db.queries import QueryBuilder
 
 
 # ---------------------------------------------------------------------------
+# Custom pytest options
+# ---------------------------------------------------------------------------
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-slow", action="store_true", default=False,
+        help="run slow benchmarks and performance tests"
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "slow: mark test as slow (benchmark / performance)"
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-slow"):
+        # --run-slow given: do not skip slow tests
+        return
+    skip_slow = pytest.mark.skip(reason="need --run-slow option to run")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip_slow)
+
+
+# ---------------------------------------------------------------------------
 # fixture file contents
 # ---------------------------------------------------------------------------
 

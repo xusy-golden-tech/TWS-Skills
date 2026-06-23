@@ -11,6 +11,8 @@ import sqlite3
 import os
 from dataclasses import dataclass, field
 
+from tws_graph.store.connection import configure_connection
+
 
 @dataclass
 class DiffReport:
@@ -69,8 +71,10 @@ def compare_snapshots(
 
     before = sqlite3.connect(before_path)
     before.row_factory = sqlite3.Row
+    configure_connection(before)
     after = sqlite3.connect(after_path)
     after.row_factory = sqlite3.Row
+    configure_connection(after)
 
     report = DiffReport()
 

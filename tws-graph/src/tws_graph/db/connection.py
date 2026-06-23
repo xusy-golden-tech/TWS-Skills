@@ -5,6 +5,8 @@ import os
 import time
 import pathlib
 
+from tws_graph.store.connection import configure_connection
+
 
 class DatabaseConnection:
     """Manages a SQLite connection with WAL mode and foreign keys enabled."""
@@ -16,13 +18,8 @@ class DatabaseConnection:
         self._configure_pragmas()
 
     def _configure_pragmas(self):
-        """Apply performance and safety PRAGMAs (ported from CodeGraph)."""
-        self.conn.execute("PRAGMA busy_timeout = 5000")
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA journal_mode = WAL")
-        self.conn.execute("PRAGMA synchronous = NORMAL")
-        self.conn.execute("PRAGMA cache_size = -64000")   # 64MB page cache
-        self.conn.execute("PRAGMA temp_store = MEMORY")
+        """Apply performance and safety PRAGMAs via the shared utility."""
+        configure_connection(self.conn)
 
     @classmethod
     def initialize(cls, db_path: str) -> "DatabaseConnection":

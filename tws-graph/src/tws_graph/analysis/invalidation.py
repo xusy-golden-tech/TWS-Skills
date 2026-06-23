@@ -27,6 +27,7 @@ import time
 from dataclasses import dataclass, field
 
 from tws_graph.store.interface import Store
+from tws_graph.store.connection import configure_connection
 
 
 # =============================================================================
@@ -102,9 +103,9 @@ class InvalidationTracker:
         self._closed = False
         self._registrations: dict[str, AnalyzerRegistration] = {}
 
-        # Independent connection with WAL mode for concurrent readers.
+        # Independent connection with performance pragmas for concurrent readers.
         self._conn = sqlite3.connect(db_path)
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        configure_connection(self._conn)
         self._conn.execute(
             f"""CREATE TABLE IF NOT EXISTS {table_name} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
