@@ -17,11 +17,13 @@ import pkgutil
 from typing import Type
 
 from tws_graph.lsp.adapters.base import ImportInfo, LspLanguageAdapter
+from tws_graph.lsp.adapters.java import JavaLspAdapter
 from tws_graph.lsp.adapters.python import PythonLspAdapter
 from tws_graph.lsp.adapters.typescript import TypeScriptLspAdapter
 
 __all__ = [
     "ImportInfo",
+    "JavaLspAdapter",
     "LspLanguageAdapter",
     "PythonLspAdapter",
     "TypeScriptLspAdapter",

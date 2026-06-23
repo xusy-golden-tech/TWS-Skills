@@ -4,7 +4,7 @@ Uses tree-sitter to parse Python and TypeScript source files. Queries a tws-grap
 Store for file/function discovery, then re-parses source to compute complexity
 metrics for each function/method node.
 
-Supports: Python (.py), TypeScript (.ts, .tsx)
+Supports: Python (.py), TypeScript (.ts, .tsx), Java (.java)
 """
 
 from __future__ import annotations
@@ -134,6 +134,9 @@ _COGNITIVE_BODY_FIELDS: dict[str, list[str]] = {
     "catch_clause": ["body"],
     "switch_case": ["body"],
     "switch_default": ["body"],
+    # Java-specific
+    "switch_expression": ["body"],  # body is switch_block
+    "lambda_expression": ["body"],  # body of lambda block
 }
 
 # Python operators/keywords counted for Halstead (as operators)
@@ -260,6 +263,88 @@ _TS_OPERAND_KINDS = frozenset(
     }
 )
 
+# ---------------------------------------------------------------------------
+# Java-specific constants
+# ---------------------------------------------------------------------------
+
+_JAVA_CYCLOMATIC_KINDS = frozenset(
+    {
+        "if_statement",
+        "for_statement",
+        "while_statement",
+        "do_statement",
+        "catch_clause",
+        "switch_label",  # case / default labels
+        "ternary_expression",  # cond ? x : y
+    }
+)
+
+_JAVA_COGNITIVE_KINDS = frozenset(
+    {
+        "if_statement",
+        "for_statement",
+        "while_statement",
+        "do_statement",
+        "catch_clause",
+        "switch_expression",  # entire switch statement
+        "lambda_expression",  # nested lambda increments complexity
+    }
+)
+
+_JAVA_HALSTEAD_OPERATOR_KINDS = frozenset(
+    {
+        # Expression operators
+        "binary_expression",
+        "unary_expression",
+        "assignment_expression",
+        "update_expression",
+        # Control flow keywords
+        "if_statement",
+        "for_statement",
+        "while_statement",
+        "do_statement",
+        "return_statement",
+        "break_statement",
+        "continue_statement",
+        "throw_statement",
+        # Switch
+        "switch_expression",
+        "switch_label",
+        # Exception handling
+        "try_statement",
+        "catch_clause",
+        "finally_clause",
+        # Declarations
+        "method_declaration",
+        "lambda_expression",
+        "class_declaration",
+        "interface_declaration",
+        # Ternary
+        "ternary_expression",
+        # Java-specific
+        "instanceof_expression",
+        "synchronized_statement",
+    }
+)
+
+_JAVA_OPERAND_KINDS = frozenset(
+    {
+        "identifier",
+        "decimal_integer_literal",
+        "hex_integer_literal",
+        "octal_integer_literal",
+        "binary_integer_literal",
+        "decimal_floating_point_literal",
+        "hex_floating_point_literal",
+        "character_literal",
+        "string_literal",
+        "true",
+        "false",
+        "null_literal",
+        "this",
+    }
+)
+
 # Operator token strings (used to distinguish operators from keywords)
 _OPERATOR_TOKENS = frozenset(
     {
@@ -364,6 +449,29 @@ _KEYWORD_TOKENS = frozenset(
         "debugger",
         "get",
         "set",
+        # Java-specific keywords
+        "do",
+        "catch",
+        "package",
+        "public",
+        "private",
+        "protected",
+        "static",
+        "final",
+        "abstract",
+        "synchronized",
+        "volatile",
+        "transient",
+        "native",
+        "strictfp",
+        "boolean",
+        "byte",
+        "short",
+        "int",
+        "long",
+        "float",
+        "double",
+        "char",
     }
 )
 
@@ -401,6 +509,8 @@ def _map_lang_to_ts(language: str) -> str:
     """Map language name to tree-sitter language key."""
     if language in ("typescript", "ts", "tsx"):
         return "typescript"
+    if language == "java":
+        return "java"
     return "python"
 
 
@@ -438,8 +548,8 @@ class ComplexityAnalyzer:
         if not all_files:
             return results
 
-        # Filter by language (only python + typescript)
-        supported = {"python", "typescript", "ts", "tsx"}
+        # Filter by language (only python + typescript + java)
+        supported = {"python", "typescript", "ts", "tsx", "java"}
 
         for file_rec in all_files:
             path = file_rec.get("path", "")
@@ -606,6 +716,8 @@ class ComplexityAnalyzer:
                 "method_definition",
             ) and ts_lang == "typescript":
                 return child
+            if child.kind() == "method_declaration" and ts_lang == "java":
+                return child
             result = self._find_func_def(child, ts_lang)
             if result:
                 return result
@@ -745,6 +857,36 @@ class ComplexityAnalyzer:
                     for child in _children(node):
                         walk(child, parent_qname_prefix)
 
+            elif language == "java":
+                if kind == "method_declaration":
+                    name_node = node.child_by_field_name("name")
+                    if name_node:
+                        name = _node_text(name_node, source_bytes)
+                        self._add_java_func_node(
+                            node, name, file_path, language, parent_qname_prefix, results, source_bytes
+                        )
+                        body = node.child_by_field_name("body")
+                        qname = f"{file_path}::{name}"
+                        if parent_qname_prefix:
+                            qname = f"{parent_qname_prefix}::{name}"
+                        if body:
+                            walk(body, qname)
+
+                elif kind == "class_declaration":
+                    name_node = node.child_by_field_name("name")
+                    if name_node:
+                        cls_name = _node_text(name_node, source_bytes)
+                        cls_qname = f"{file_path}::{cls_name}"
+                        if parent_qname_prefix:
+                            cls_qname = f"{parent_qname_prefix}::{cls_name}"
+                        body = node.child_by_field_name("body")
+                        if body:
+                            walk(body, cls_qname)
+
+                if kind not in ("method_declaration", "class_declaration"):
+                    for child in _children(node):
+                        walk(child, parent_qname_prefix)
+
         walk(root)
         return results
 
@@ -772,6 +914,30 @@ class ComplexityAnalyzer:
         }
         results.append((node, info))
 
+    def _add_java_func_node(
+        self, node, name, file_path, language, parent_qname_prefix, results, source_bytes
+    ):
+        """Add a Java method node to results."""
+        import hashlib
+
+        qname = f"{file_path}::{name}"
+        if parent_qname_prefix:
+            qname = f"{parent_qname_prefix}::{name}"
+        nid = hashlib.sha256(f"{file_path}:{qname}".encode()).hexdigest()[:32]
+        sp = node.start_position()
+        ep = node.end_position()
+        info = {
+            "id": nid,
+            "qualified_name": qname,
+            "file_path": file_path,
+            "language": language,
+            "start_line": sp.row + 1,
+            "end_line": ep.row + 1,
+            "kind": "method",
+            "name": name,
+        }
+        results.append((node, info))
+
     # ------------------------------------------------------------------
     # Cyclomatic complexity
     # ------------------------------------------------------------------
@@ -782,6 +948,8 @@ class ComplexityAnalyzer:
 
         if ts_lang == "python":
             cyc_kinds = _PY_CYCLOMATIC_KINDS
+        elif ts_lang == "java":
+            cyc_kinds = _JAVA_CYCLOMATIC_KINDS
         else:
             cyc_kinds = _TS_CYCLOMATIC_KINDS
 
@@ -792,16 +960,13 @@ class ComplexityAnalyzer:
             if kind in cyc_kinds:
                 decision_points += 1
 
-            # Handle TypeScript logical operators (&&, ||)
-            if ts_lang == "typescript":
+            # Handle TypeScript / Java logical operators (&&, ||)
+            if ts_lang in ("typescript", "java"):
                 if kind in ("binary_expression",) and n.child_count() >= 2:
                     # Check operator token
                     op_text = _node_text(n.child(1), source_bytes) if n.child_count() > 1 else ""
                     if op_text in ("&&", "||"):
                         decision_points += 1
-
-            # Handle case_clause in TypeScript (NOT switch_case which is the case label)
-            # switch_case is already in cyc_kinds
 
             for child in _children(n):
                 walk(child)
@@ -821,6 +986,9 @@ class ComplexityAnalyzer:
 
         if ts_lang == "python":
             cog_kinds = _PY_COGNITIVE_KINDS
+            body_fields = _COGNITIVE_BODY_FIELDS
+        elif ts_lang == "java":
+            cog_kinds = _JAVA_COGNITIVE_KINDS
             body_fields = _COGNITIVE_BODY_FIELDS
         else:
             cog_kinds = _TS_COGNITIVE_KINDS
@@ -860,8 +1028,8 @@ class ComplexityAnalyzer:
             if kind == "boolean_operator" and ts_lang == "python":
                 cognitive += 1
 
-            # TypeScript logical operators (&&, ||)
-            if ts_lang == "typescript" and kind == "binary_expression":
+            # TypeScript / Java logical operators (&&, ||)
+            if ts_lang in ("typescript", "java") and kind == "binary_expression":
                 if n.child_count() > 1:
                     op_text = _node_text(n.child(1), source_bytes)
                     if op_text in ("&&", "||"):
@@ -922,6 +1090,9 @@ class ComplexityAnalyzer:
         if ts_lang == "python":
             op_kinds = _PY_HALSTEAD_OPERATOR_KINDS
             operand_kinds = _PY_OPERAND_KINDS
+        elif ts_lang == "java":
+            op_kinds = _JAVA_HALSTEAD_OPERATOR_KINDS
+            operand_kinds = _JAVA_OPERAND_KINDS
         else:
             op_kinds = _TS_HALSTEAD_OPERATOR_KINDS
             operand_kinds = _TS_OPERAND_KINDS
@@ -955,6 +1126,15 @@ class ComplexityAnalyzer:
                     "method_definition",
                     "class_declaration",
                     "switch_statement",
+                    # Java-specific structural nodes
+                    "method_declaration",
+                    "switch_expression",
+                    "lambda_expression",
+                    "try_statement",
+                    "throw_statement",
+                    "catch_clause",
+                    "finally_clause",
+                    "synchronized_statement",
                 ):
                     # Extract the keyword
                     keyword = token.split()[0] if token else kind
@@ -1009,6 +1189,24 @@ class ComplexityAnalyzer:
                     unique_operands.add("<string>")
                     total_operands += 1
                 elif kind in ("true", "false", "none", "null", "undefined"):
+                    unique_operands.add(text)
+                    total_operands += 1
+                elif ts_lang == "java" and kind in (
+                    "decimal_integer_literal",
+                    "hex_integer_literal",
+                    "octal_integer_literal",
+                    "binary_integer_literal",
+                    "decimal_floating_point_literal",
+                    "hex_floating_point_literal",
+                ):
+                    # Normalize all Java numeric literals
+                    unique_operands.add("<number>")
+                    total_operands += 1
+                elif ts_lang == "java" and kind in ("character_literal", "string_literal"):
+                    # Normalize string/character literals
+                    unique_operands.add("<string>")
+                    total_operands += 1
+                elif ts_lang == "java" and kind in ("null_literal",):
                     unique_operands.add(text)
                     total_operands += 1
 

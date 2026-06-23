@@ -130,6 +130,19 @@ def _extract_ts_args(call_node, source: bytes) -> list[tuple[int | str, bool]]:
     return args
 
 
+def _extract_java_args(call_node, source: bytes) -> list[tuple[int | str, bool]]:
+    """Parse Java call arguments (positional only, no keyword args)."""
+    args_node = call_node.child_by_field_name("arguments")
+    if args_node is None:
+        return []
+    args: list[tuple[int | str, bool]] = []
+    pos_idx = 0
+    for child in _named_children(args_node):
+        args.append((pos_idx, False))
+        pos_idx += 1
+    return args
+
+
 # ---------------------------------------------------------------------------
 # Callee-name resolution
 # ---------------------------------------------------------------------------
@@ -179,6 +192,64 @@ def _resolve_callee_qname(
     return None
 
 
+def _resolve_java_callee_qname(
+    node,
+    source: bytes,
+    file_path: str,
+    class_stack: list[str],
+    func_node_ids: dict[str, str] | None = None,
+) -> str | None:
+    """Resolve callee qualified name from a Java ``method_invocation`` node.
+
+    Java ``method_invocation`` structure::
+
+        bar()           → identifier "bar", argument_list
+        this.bar()      → "this", ".", identifier "bar", argument_list
+        obj.bar()       → identifier "obj", ".", identifier "bar", argument_list
+        obj.chain().bar() → method_invocation, ".", identifier "bar", argument_list
+
+    When *func_node_ids* is provided, tries class-scoped resolution first
+    for simple calls within a class.
+    """
+    obj_name: str | None = None
+
+    # Collect identifier names
+    identifier_names: list[str] = []
+    for child in _children(node):
+        if child.is_named():
+            if child.kind() == "identifier":
+                identifier_names.append(_node_text(child, source))
+            elif child.kind() == "this":
+                obj_name = "this"
+
+    if not identifier_names:
+        return None
+
+    if len(identifier_names) == 1:
+        # Simple call: foo()
+        method_name = identifier_names[0]
+    else:
+        # Object call: obj.method() or this.method()
+        # First identifier is the object, last is the method
+        method_name = identifier_names[-1]
+        if obj_name is None:
+            obj_name = identifier_names[0]
+
+    if method_name is None:
+        return None
+
+    if obj_name == "this" and class_stack:
+        return f"{file_path}::{class_stack[-1]}::{method_name}"
+
+    # For simple calls inside a class, try class-scoped resolution first
+    if obj_name is None and class_stack and func_node_ids:
+        scoped = f"{file_path}::{class_stack[-1]}::{method_name}"
+        if scoped in func_node_ids:
+            return scoped
+
+    return f"{file_path}::{method_name}"
+
+
 # ===================================================================
 # DataFlowExtractor
 # ===================================================================
@@ -225,7 +296,7 @@ class DataFlowExtractor:
         # --- Phase 2: walk the tree and process calls ----------------
         edges: list[dict] = []
         name_stack: list[str] = []       # combined class + function names (for qname building)
-        class_stack: list[str] = []      # only class names (for self.method resolution)
+        class_stack: list[str] = []      # only class names (for self/this.method resolution)
         func_stack: list[str] = []       # stacked function qnames
         self._walk_calls(
             root, source, file_path, language,
@@ -250,6 +321,12 @@ class DataFlowExtractor:
             )
         elif language == "typescript":
             self._walk_ts_calls(
+                node, source, file_path,
+                name_stack, class_stack, func_stack,
+                func_node_ids, func_def_nodes, edges,
+            )
+        elif language == "java":
+            self._walk_java_calls(
                 node, source, file_path,
                 name_stack, class_stack, func_stack,
                 func_node_ids, func_def_nodes, edges,
@@ -530,6 +607,126 @@ class DataFlowExtractor:
                 "provenance": "tree-sitter",
             })
 
+    # -- Java call walker --------------------------------------------------
+
+    def _walk_java_calls(
+        self, node, source, file_path,
+        name_stack, class_stack, func_stack,
+        func_node_ids, func_def_nodes, edges,
+    ):
+        kind = node.kind()
+
+        if kind in ("method_declaration", "constructor_declaration"):
+            name_node = node.child_by_field_name("name")
+            if name_node is not None and func_node_ids:
+                name = _node_text(name_node, source)
+                qname = file_path + "::" + "::".join(name_stack + [name])
+                if qname in func_node_ids:
+                    func_stack.append(qname)
+                    name_stack.append(name)
+                    body = node.child_by_field_name("body")
+                    if body is None and kind == "constructor_declaration":
+                        for child in _children(node):
+                            if child.kind() == "constructor_body":
+                                body = child
+                                break
+                    if body is not None:
+                        for child in _named_children(body):
+                            self._walk_java_calls(
+                                child, source, file_path,
+                                name_stack, class_stack, func_stack,
+                                func_node_ids, func_def_nodes, edges,
+                            )
+                    name_stack.pop()
+                    func_stack.pop()
+                    return  # body already walked
+            return
+
+        elif kind == "class_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node is not None:
+                name = _node_text(name_node, source)
+                name_stack.append(name)
+                class_stack.append(name)
+                body = node.child_by_field_name("body")
+                if body:
+                    for child in _named_children(body):
+                        self._walk_java_calls(
+                            child, source, file_path,
+                            name_stack, class_stack, func_stack,
+                            func_node_ids, func_def_nodes, edges,
+                        )
+                class_stack.pop()
+                name_stack.pop()
+                return  # body already walked
+
+        elif kind == "method_invocation":
+            if func_stack:
+                self._process_java_call(
+                    node, source, file_path,
+                    class_stack, func_stack,
+                    func_node_ids, func_def_nodes, edges,
+                )
+
+        # Default: recurse into all named children
+        for child in _named_children(node):
+            self._walk_java_calls(
+                child, source, file_path,
+                name_stack, class_stack, func_stack,
+                func_node_ids, func_def_nodes, edges,
+            )
+
+    def _process_java_call(
+        self, node, source, file_path,
+        class_stack, func_stack,
+        func_node_ids, func_def_nodes, edges,
+    ):
+        """Process a single Java ``method_invocation`` node."""
+        # --- caller ---
+        caller_qname = func_stack[-1] if func_stack else None
+        if caller_qname is None:
+            return
+        caller_id = func_node_ids.get(caller_qname)
+        if caller_id is None:
+            return
+
+        # --- callee ---
+        callee_qname = _resolve_java_callee_qname(
+            node, source, file_path, class_stack, func_node_ids,
+        )
+        if callee_qname is None:
+            return
+        callee_id = func_node_ids.get(callee_qname)
+        if callee_id is None:
+            return
+
+        # --- callee parameters ---
+        callee_def = func_def_nodes.get(callee_qname)
+        if callee_def is None:
+            return
+        params = _extract_params(callee_def, source, "java")
+
+        # --- call arguments ---
+        args = _extract_java_args(node, source)
+        if not args or not params:
+            return
+
+        # Java methods do NOT explicitly declare ``this`` as a formal
+        # parameter, so we do NOT skip the first param.
+
+        # --- map ---
+        line = node.start_position().row + 1
+        mapped = _map_args_to_params(args, params)
+        for target_text in mapped:
+            edges.append({
+                "source": caller_id,
+                "target": callee_id,
+                "kind": EdgeKind.DATA_FLOWS.value,
+                "target_text": target_text,
+                "source_loc": f"{file_path}:{line}",
+                "provenance": "tree-sitter",
+            })
+
     # -- Internal: collect function-definition nodes -----------------------
 
     def _collect_all_defs(
@@ -541,6 +738,8 @@ class DataFlowExtractor:
             self._collect_py_defs(node, source, file_path, name_stack, func_def_nodes)
         elif language == "typescript":
             self._collect_ts_defs(node, source, file_path, name_stack, func_def_nodes)
+        elif language == "java":
+            self._collect_java_defs(node, source, file_path, name_stack, func_def_nodes)
 
     def _collect_py_defs(self, node, source, file_path, name_stack, func_def_nodes):
         """Collect Python function_definition nodes into *func_def_nodes*."""
@@ -630,6 +829,50 @@ class DataFlowExtractor:
 
         for child in _named_children(node):
             self._collect_ts_defs(child, source, file_path, name_stack, func_def_nodes)
+
+    def _collect_java_defs(
+        self, node, source, file_path, name_stack, func_def_nodes,
+    ):
+        """Collect Java method_declaration / constructor_declaration nodes."""
+        kind = node.kind()
+
+        if kind in ("method_declaration", "constructor_declaration"):
+            name_node = node.child_by_field_name("name")
+            if name_node is not None:
+                name = _node_text(name_node, source)
+                qname = file_path + "::" + "::".join(name_stack + [name])
+                func_def_nodes[qname] = node
+                name_stack.append(name)
+                body = node.child_by_field_name("body")
+                if body is None and kind == "constructor_declaration":
+                    for child in _children(node):
+                        if child.kind() == "constructor_body":
+                            body = child
+                            break
+                if body is not None:
+                    for child in _named_children(body):
+                        self._collect_java_defs(
+                            child, source, file_path, name_stack, func_def_nodes,
+                        )
+                name_stack.pop()
+                return
+
+        elif kind == "class_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node is not None:
+                name = _node_text(name_node, source)
+                name_stack.append(name)
+                body = node.child_by_field_name("body")
+                if body is not None:
+                    for child in _named_children(body):
+                        self._collect_java_defs(
+                            child, source, file_path, name_stack, func_def_nodes,
+                        )
+                name_stack.pop()
+                return
+
+        for child in _named_children(node):
+            self._collect_java_defs(child, source, file_path, name_stack, func_def_nodes)
 
 
 # ---------------------------------------------------------------------------

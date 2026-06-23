@@ -67,6 +67,8 @@ class VariableUsageExtractor:
             self._extract_python(source, tree, func_node_ids, file_path, edges)
         elif language == "typescript":
             self._extract_typescript(source, tree, func_node_ids, file_path, edges)
+        elif language == "java":
+            self._extract_java(source, tree, func_node_ids, file_path, edges)
 
         return edges
 
@@ -509,6 +511,213 @@ class VariableUsageExtractor:
         for child in _children(node):
             if child.is_named():
                 self._collect_ts_param_writes(source, child, write_set)
+
+    # ========================================================================
+    # Java
+    # ========================================================================
+
+    _JAVA_FUNC_KINDS = frozenset({"method_declaration", "constructor_declaration"})
+    _JAVA_SKIP_KINDS = frozenset({
+        "method_declaration", "constructor_declaration",
+        "class_declaration", "interface_declaration", "enum_declaration",
+    })
+
+    def _extract_java(
+        self, source: bytes, tree, func_node_ids: dict[str, str],
+        file_path: str, edges: list[dict],
+    ) -> None:
+        root = tree.root_node()
+        name_stack: list[str] = []
+
+        def build_qname(simple_name: str) -> str:
+            parts = [file_path] + name_stack + [simple_name]
+            return "::".join(parts)
+
+        def walk(node) -> None:
+            kind = node.kind()
+
+            if kind == "class_declaration":
+                name_node = node.child_by_field_name("name")
+                if name_node:
+                    name = _node_text(name_node, source)
+                    name_stack.append(name)
+                    body = node.child_by_field_name("body")
+                    if body:
+                        for child in _children(body):
+                            walk(child)
+                    name_stack.pop()
+                return
+
+            elif kind in ("method_declaration", "constructor_declaration"):
+                name_node = node.child_by_field_name("name")
+                if name_node:
+                    name = _node_text(name_node, source)
+                    qname = build_qname(name)
+                    if qname in func_node_ids:
+                        nid = func_node_ids[qname]
+                        self._analyze_java_body(
+                            source, node, nid, file_path, edges,
+                        )
+
+                    # Push name for nested class/method defs
+                    name_stack.append(name)
+                    body = node.child_by_field_name("body")
+                    if body is None and kind == "constructor_declaration":
+                        # constructor uses "constructor_body"
+                        for child in _children(node):
+                            if child.kind() == "constructor_body":
+                                body = child
+                                break
+                    if body:
+                        for child in _children(body):
+                            walk(child)
+                    name_stack.pop()
+                return
+
+            # Default: recurse into children
+            for child in _children(node):
+                walk(child)
+
+        walk(root)
+
+    def _analyze_java_body(
+        self, source: bytes, func_node, nid: str,
+        file_path: str, edges: list[dict],
+    ) -> None:
+        """Analyze a Java method/constructor body for reads/writes/throws."""
+        body_node = func_node.child_by_field_name("body")
+        if body_node is None:
+            # constructor_declaration uses "constructor_body"
+            for child in _children(func_node):
+                if child.kind() == "constructor_body":
+                    body_node = child
+                    break
+        if body_node is None:
+            return
+
+        # Collect parameters as writes
+        write_set: dict[str, int] = {}
+        params_node = func_node.child_by_field_name("parameters")
+        if params_node:
+            for child in _named_children(params_node):
+                if child.kind() == "formal_parameter":
+                    # Find identifier inside formal_parameter
+                    for param_child in _named_children(child):
+                        if param_child.kind() == "identifier":
+                            name = _node_text(param_child, source)
+                            write_set[name] = param_child.start_position().row + 1
+                            break
+
+        read_set: dict[str, int] = {}
+        throw_set: dict[str, int] = {}
+
+        def walk_body(node, is_write_lhs: bool = False) -> None:
+            kind = node.kind()
+
+            # Skip nested function/class definitions entirely
+            if kind in self._JAVA_SKIP_KINDS:
+                return
+
+            # -- assignment_expression: LHS = write, RHS = read --
+            if kind == "assignment_expression":
+                left = node.child_by_field_name("left")
+                right = node.child_by_field_name("right")
+                if left:
+                    walk_body(left, is_write_lhs=True)
+                if right:
+                    walk_body(right, is_write_lhs=False)
+                # Also handle unnamed children that aren't left/right
+                for child in _children(node):
+                    if child.is_named() and child != left and child != right:
+                        walk_body(child, is_write_lhs=False)
+                return
+
+            # -- variable_declarator: name = write, value = read --
+            if kind == "variable_declarator":
+                name_node = node.child_by_field_name("name")
+                value_node = node.child_by_field_name("value")
+                if name_node:
+                    walk_body(name_node, is_write_lhs=True)
+                if value_node:
+                    walk_body(value_node, is_write_lhs=False)
+                return
+
+            # -- for_statement: init = write --
+            if kind == "for_statement":
+                for child in _children(node):
+                    if child.is_named():
+                        if child.kind() in ("local_variable_declaration",
+                                            "assignment_expression"):
+                            walk_body(child, is_write_lhs=True)
+                        elif child.kind() in ("for_statement", "enhanced_for_statement"):
+                            # Skip nested loops — they'll be processed by their own handler
+                            pass
+                        else:
+                            walk_body(child, is_write_lhs=False)
+                return
+
+            # -- enhanced_for_statement: loop variable = write --
+            if kind == "enhanced_for_statement":
+                found_var = False
+                for child in _children(node):
+                    if child.is_named():
+                        if not found_var and child.kind() == "identifier":
+                            walk_body(child, is_write_lhs=True)
+                            found_var = True
+                        else:
+                            walk_body(child, is_write_lhs=False)
+                return
+
+            # -- throw_statement: collect throw text --
+            if kind == "throw_statement":
+                for child in _named_children(node):
+                    text = _node_text(child, source)
+                    throw_set[text] = node.start_position().row + 1
+                return
+
+            # -- try_statement: recurse body, record catch exception types --
+            if kind == "try_statement":
+                for child in _children(node):
+                    if child.kind() == "catch_clause":
+                        # Find catch_formal_parameter → catch_type → type_identifier
+                        for cchild in _named_children(child):
+                            if cchild.kind() == "catch_formal_parameter":
+                                for cparam in _named_children(cchild):
+                                    if cparam.kind() == "catch_type":
+                                        text = _node_text(cparam, source)
+                                        throw_set[text] = child.start_position().row + 1
+                    elif child.is_named():
+                        walk_body(child, is_write_lhs=False)
+                return
+
+            # -- identifier: read or write based on context --
+            if kind == "identifier":
+                name = _node_text(node, source)
+                if is_write_lhs:
+                    write_set[name] = node.start_position().row + 1
+                else:
+                    read_set[name] = node.start_position().row + 1
+                return
+
+            # -- field_access (e.g. obj.field): always a read --
+            if kind == "field_access":
+                if not is_write_lhs:
+                    text = _node_text(node, source)
+                    read_set[text] = node.start_position().row + 1
+                return
+
+            # Default: recurse into all children with read context
+            for child in _children(node):
+                if child.is_named():
+                    walk_body(child, is_write_lhs=False)
+
+        walk_body(body_node)
+
+        # -- Build edges --
+        self._emit_edges(
+            nid, file_path, write_set, read_set, throw_set,
+            set(), set(), edges,  # no nonlocal/global for Java
+        )
 
     # ========================================================================
     # Edge emission (shared)

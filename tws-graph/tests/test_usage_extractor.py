@@ -759,3 +759,242 @@ class TestVariableUsageEdgeCases:
         read_targets = {e["target_text"] for e in reads}
         assert "var:a" in read_targets, f"a should be read, got {read_targets}"
         assert "var:b" in read_targets, f"b should be read, got {read_targets}"
+
+
+# ============================================================================
+# Java tests
+# ============================================================================
+
+
+class TestVariableUsageExtractorJava:
+    """Variable usage extraction tests for Java source code."""
+
+    @pytest.fixture
+    def parser(self):
+        return get_parser("java")
+
+    @pytest.fixture
+    def file_path(self):
+        return "Test.java"
+
+    def _extract(self, code, parser, file_path, func_node_ids):
+        from tws_graph.indexer.extractors.usage import VariableUsageExtractor
+
+        extractor = VariableUsageExtractor()
+        tree = parser.parse(code)
+        source = code.encode("utf-8")
+        return extractor.extract(source, tree, func_node_ids, file_path, "java")
+
+    # ------------------------------------------------------------------
+    # write detection: variable_declarator
+    # ------------------------------------------------------------------
+
+    def test_variable_declaration_produces_write(self, parser, file_path):
+        """int x = 1; produces a WRITES edge for var:x."""
+        code = "class Foo { void bar() { int x = 1; } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        writes = [e for e in edges if e["kind"] == EdgeKind.WRITES.value]
+        write_targets = {e["target_text"] for e in writes}
+        assert "var:x" in write_targets, \
+            f"Expected WRITES edge for var:x, got {write_targets}"
+
+    def test_assignment_expression_produces_write(self, parser, file_path):
+        """x = 1; produces a WRITES edge for var:x."""
+        code = "class Foo { void bar() { int x; x = 1; } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        writes = [e for e in edges if e["kind"] == EdgeKind.WRITES.value]
+        write_targets = {e["target_text"] for e in writes}
+        assert "var:x" in write_targets, \
+            f"Expected WRITES edge for var:x, got {write_targets}"
+
+    def test_for_loop_variable_produces_write(self, parser, file_path):
+        """for (int i = 0; ...) : i is a write."""
+        code = "class Foo { void bar() { for (int i = 0; i < 10; i++) { int y = i; } } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        writes = [e for e in edges if e["kind"] == EdgeKind.WRITES.value]
+        write_targets = {e["target_text"] for e in writes}
+        assert "var:i" in write_targets, \
+            f"For-loop variable i should be in write_set, got {write_targets}"
+
+    def test_enhanced_for_loop_variable_produces_write(self, parser, file_path):
+        """for (int x : arr) : x is a write."""
+        code = "class Foo { void bar(int[] arr) { for (int x : arr) { int y = x; } } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        writes = [e for e in edges if e["kind"] == EdgeKind.WRITES.value]
+        write_targets = {e["target_text"] for e in writes}
+        assert "var:x" in write_targets, \
+            f"Enhanced-for variable x should be in write_set, got {write_targets}"
+
+    # ------------------------------------------------------------------
+    # read detection
+    # ------------------------------------------------------------------
+
+    def test_identifier_read_in_expression(self, parser, file_path):
+        """Reading x in expression y = x + 1 produces READS edge."""
+        code = "class Foo { void bar() { int y = x + 1; } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        reads = [e for e in edges if e["kind"] == EdgeKind.READS.value]
+        read_targets = {e["target_text"] for e in reads}
+        assert "var:x" in read_targets, \
+            f"x should be read, got read targets: {read_targets}"
+
+    def test_field_access_produces_read(self, parser, file_path):
+        """obj.field produces a READS edge."""
+        code = "class Foo { void bar(Foo obj) { int y = obj.field; } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        reads = [e for e in edges if e["kind"] == EdgeKind.READS.value]
+        read_targets = {e["target_text"] for e in reads}
+        assert any("obj.field" in t for t in read_targets), \
+            f"Field access should produce a read with obj.field, got {read_targets}"
+
+    def test_method_call_argument_read(self, parser, file_path):
+        """foo(x): x in argument position is a read."""
+        code = "class Foo { void bar() { foo(x); } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        reads = [e for e in edges if e["kind"] == EdgeKind.READS.value]
+        read_targets = {e["target_text"] for e in reads}
+        assert "var:x" in read_targets, \
+            f"x should be read as argument, got {read_targets}"
+
+    # ------------------------------------------------------------------
+    # throw detection
+    # ------------------------------------------------------------------
+
+    def test_throw_statement_produces_throw_edge(self, parser, file_path):
+        """throw new Exception() produces a THROWS edge."""
+        code = "class Foo { void bar() { throw new RuntimeException(); } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        throws = [e for e in edges if e["kind"] == EdgeKind.THROWS.value]
+        assert len(throws) >= 1, f"Expected at least 1 throw edge, got {len(throws)}"
+        assert any("RuntimeException" in e.get("target_text", "") for e in throws), \
+            f"Expected RuntimeException in throw target_text, got {[e.get('target_text') for e in throws]}"
+
+    def test_try_catch_produces_throw_edge(self, parser, file_path):
+        """try/catch block: caught exception type is recorded as throw."""
+        code = "class Foo { void bar() { try { x(); } catch (Exception e) { } } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        throws = [e for e in edges if e["kind"] == EdgeKind.THROWS.value]
+        assert any("Exception" in e.get("target_text", "") for e in throws), \
+            f"Expected Exception in throw target_text from catch, got {[e.get('target_text') for e in throws]}"
+
+    # ------------------------------------------------------------------
+    # function parameters in write_set
+    # ------------------------------------------------------------------
+
+    def test_method_parameters_in_write_set(self, parser, file_path):
+        """Method parameters count as implicit writes."""
+        code = "class Foo { void bar(int a, String b) { int c = a; } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        writes = [e for e in edges if e["kind"] == EdgeKind.WRITES.value]
+        write_targets = {e["target_text"] for e in writes}
+        assert "var:a" in write_targets, f"Parameter a not in write_set: {write_targets}"
+        assert "var:b" in write_targets, f"Parameter b not in write_set: {write_targets}"
+
+    def test_constructor_parameters_in_write_set(self, parser, file_path):
+        """Constructor parameters are also implicit writes."""
+        code = "class Foo { Foo(int x) { int y = x; } }"
+        fid = _hash_id("Test.java::Foo::Foo", file_path)
+        func_node_ids = {"Test.java::Foo::Foo": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        writes = [e for e in edges if e["kind"] == EdgeKind.WRITES.value]
+        write_targets = {e["target_text"] for e in writes}
+        assert "var:x" in write_targets, f"Constructor param x not in write_set: {write_targets}"
+
+    # ------------------------------------------------------------------
+    # class method (method inside class)
+    # ------------------------------------------------------------------
+
+    def test_class_method_qualified_name(self, parser, file_path):
+        """Method inside class has qualified_name file::Class::method."""
+        code = "class Foo { void bar() { int x = 1; } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        writes = [e for e in edges if e["kind"] == EdgeKind.WRITES.value]
+        assert any(e["source"] == fid and e["target_text"] == "var:x" for e in writes), \
+            f"Expected write edge from {fid} for var:x"
+
+    # ------------------------------------------------------------------
+    # edges structure checks
+    # ------------------------------------------------------------------
+
+    def test_edge_has_required_fields(self, parser, file_path):
+        """Every edge dict contains all required fields."""
+        code = "class Foo { void bar() { int x = 1; } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        required = {"source", "target", "kind", "target_text", "source_loc", "provenance"}
+        for e in edges:
+            missing = required - set(e.keys())
+            assert not missing, f"Edge missing required fields: {missing}"
+
+    def test_target_text_var_prefix(self, parser, file_path):
+        """READS/WRITES edges have target_text starting with 'var:'."""
+        code = "class Foo { void bar() { int x = 1; } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        rw_edges = [e for e in edges
+                    if e["kind"] in (EdgeKind.READS.value, EdgeKind.WRITES.value)]
+        for e in rw_edges:
+            assert e["target_text"].startswith("var:"), \
+                f"Expected target_text 'var:<name>', got {e['target_text']!r}"
+
+    def test_provenance_is_tree_sitter(self, parser, file_path):
+        """All edges have provenance='tree-sitter'."""
+        code = "class Foo { void bar() { int x = 1; } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+        for e in edges:
+            assert e.get("provenance") == "tree-sitter", \
+                f"Expected provenance='tree-sitter', got {e.get('provenance')!r}"
+
+    def test_empty_method_produces_no_edges(self, parser, file_path):
+        """An empty Java method body produces zero edges."""
+        code = "class Foo { void bar() { } }"
+        fid = _hash_id("Test.java::Foo::bar", file_path)
+        func_node_ids = {"Test.java::Foo::bar": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+        assert len(edges) == 0, f"Empty method should produce 0 edges, got {len(edges)}"
+
+    def test_method_not_in_func_node_ids_skipped(self, parser, file_path):
+        """Methods not in func_node_ids are skipped."""
+        code = "class Foo { void bar() { int x = 1; } }"
+        edges = self._extract(code, parser, file_path, {})
+        assert len(edges) == 0

@@ -519,12 +519,12 @@ class TestAnalyze:
         from unittest.mock import MagicMock
         mock_store = MagicMock()
         mock_store.get_all_files.return_value = [
-            {"path": "test.java", "language": "java", "content_hash": "abc"}
+            {"path": "test.rb", "language": "ruby", "content_hash": "abc"}
         ]
         mock_store.iter_all_nodes.return_value = iter([])
         results = analyzer.analyze(mock_store)
         assert results == []
-        # Java is not supported
+        # Ruby is not supported
 
     def test_analyze_non_existent_file_skipped(self):
         """File path that doesn't exist on disk should be skipped."""
@@ -537,3 +537,284 @@ class TestAnalyze:
         mock_store.iter_all_nodes.return_value = iter([])
         results = analyzer.analyze(mock_store)
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Java complexity tests
+# ---------------------------------------------------------------------------
+
+
+def _make_java_node(
+    node_id="test::foo",
+    qname="Test.java::foo",
+    file_path="Test.java",
+    language="java",
+    start_line=1,
+    end_line=10,
+) -> dict:
+    """Helper to create a Java-specific NodeRecord-like dict."""
+    return {
+        "id": node_id,
+        "qualified_name": qname,
+        "file_path": file_path,
+        "language": language,
+        "start_line": start_line,
+        "end_line": end_line,
+        "kind": "method",
+        "name": qname.split("::")[-1] if "::" in qname else qname,
+    }
+
+
+class TestJavaCyclomaticComplexity:
+    """Cyclomatic complexity for Java methods."""
+
+    def test_java_empty_method(self):
+        """An empty Java method has cyclomatic complexity 1."""
+        analyzer = ComplexityAnalyzer()
+        body = "public void foo() {\n    int x = 0;\n}\n"
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cyclomatic == 1, f"Expected 1, got {m.cyclomatic}"
+
+    def test_java_if_statement(self):
+        """Single if statement adds +1."""
+        analyzer = ComplexityAnalyzer()
+        body = "public void foo(int x) {\n    if (x > 0) { return; }\n}\n"
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cyclomatic == 2, f"Expected 2, got {m.cyclomatic}"
+
+    def test_java_if_else(self):
+        """if-else: 1 base + 1 if = 2 (else does not add)."""
+        analyzer = ComplexityAnalyzer()
+        body = (
+            "public void foo(int x) {\n"
+            "    if (x > 0) { return; }\n"
+            "    else { return; }\n"
+            "}\n"
+        )
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cyclomatic == 2, f"Expected 2, got {m.cyclomatic}"
+
+    def test_java_for_loop(self):
+        """for loop adds +1."""
+        analyzer = ComplexityAnalyzer()
+        body = (
+            "public void foo() {\n"
+            "    for (int i = 0; i < 10; i++) { }\n"
+            "}\n"
+        )
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cyclomatic == 2, f"Expected 2, got {m.cyclomatic}"
+
+    def test_java_while_loop(self):
+        """while loop adds +1."""
+        analyzer = ComplexityAnalyzer()
+        body = "public void foo(int x) {\n    while (x > 0) { x--; }\n}\n"
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cyclomatic == 2, f"Expected 2, got {m.cyclomatic}"
+
+    def test_java_do_while(self):
+        """do-while loop adds +1."""
+        analyzer = ComplexityAnalyzer()
+        body = (
+            "public void foo(int x) {\n"
+            "    do { x++; } while (x < 5);\n"
+            "}\n"
+        )
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cyclomatic == 2, f"Expected 2, got {m.cyclomatic}"
+
+    def test_java_switch_statement(self):
+        """switch with 3 case labels (including default) adds +3."""
+        analyzer = ComplexityAnalyzer()
+        body = (
+            "public String foo(int x) {\n"
+            "    switch (x) {\n"
+            "        case 0: return \"a\";\n"
+            "        case 1: return \"b\";\n"
+            "        default: return \"c\";\n"
+            "    }\n"
+            "}\n"
+        )
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cyclomatic == 4, f"Expected 4, got {m.cyclomatic}"
+
+    def test_java_try_catch(self):
+        """try-catch: each catch_clause adds +1."""
+        analyzer = ComplexityAnalyzer()
+        body = (
+            "public void foo() {\n"
+            "    try { doSomething(); }\n"
+            "    catch (IOException e) { log(e); }\n"
+            "    catch (Exception e) { log(e); }\n"
+            "}\n"
+        )
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cyclomatic == 3, f"Expected 3, got {m.cyclomatic}"
+
+    def test_java_ternary(self):
+        """Ternary expression (? :) adds +1."""
+        analyzer = ComplexityAnalyzer()
+        body = "public int foo(int x) {\n    return x > 0 ? 1 : 0;\n}\n"
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cyclomatic == 2, f"Expected 2, got {m.cyclomatic}"
+
+    def test_java_logical_and(self):
+        """&& operator adds +1 to cyclomatic complexity."""
+        analyzer = ComplexityAnalyzer()
+        body = (
+            "public boolean foo(int x, int y) {\n"
+            "    return x > 0 && y > 0;\n"
+            "}\n"
+        )
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cyclomatic == 2, f"Expected 2, got {m.cyclomatic}"
+
+    def test_java_logical_or(self):
+        """|| operator adds +1 to cyclomatic complexity."""
+        analyzer = ComplexityAnalyzer()
+        body = (
+            "public boolean foo(int x, int y) {\n"
+            "    return x < 0 || y < 0;\n"
+            "}\n"
+        )
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cyclomatic == 2, f"Expected 2, got {m.cyclomatic}"
+
+
+class TestJavaCognitiveComplexity:
+    """Cognitive complexity for Java methods."""
+
+    def test_java_empty_method_cognitive(self):
+        """Empty method has cognitive complexity 0."""
+        analyzer = ComplexityAnalyzer()
+        body = "public void foo() {\n    int x = 0;\n}\n"
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cognitive == 0, f"Expected 0, got {m.cognitive}"
+
+    def test_java_single_if_cognitive(self):
+        """Single if: 1 + nesting 0 = 1."""
+        analyzer = ComplexityAnalyzer()
+        body = "public void foo(int x) {\n    if (x > 0) { return; }\n}\n"
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cognitive == 1, f"Expected 1, got {m.cognitive}"
+
+    def test_java_nested_if_cognitive(self):
+        """Nested ifs: outer 1 + inner 2 = 3."""
+        analyzer = ComplexityAnalyzer()
+        body = (
+            "public void foo(int x, int y) {\n"
+            "    if (x > 0) {\n"
+            "        if (y > 0) { return; }\n"
+            "    }\n"
+            "}\n"
+        )
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cognitive == 3, f"Expected 3, got {m.cognitive}"
+
+    def test_java_nested_for_in_if(self):
+        """Nested for inside if: if=1 + for(nesting+1)=2 = 3."""
+        analyzer = ComplexityAnalyzer()
+        body = (
+            "public void foo(int[] items, boolean flag) {\n"
+            "    if (flag) {\n"
+            "        for (int i = 0; i < items.length; i++) { }\n"
+            "    }\n"
+            "}\n"
+        )
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cognitive == 3, f"Expected 3, got {m.cognitive}"
+
+    def test_java_switch_cognitive(self):
+        """switch_expression nests its children."""
+        analyzer = ComplexityAnalyzer()
+        body = (
+            "public String foo(int x) {\n"
+            "    switch (x) {\n"
+            "        case 0: return \"a\";\n"
+            "        case 1: return \"b\";\n"
+            "        default: return \"c\";\n"
+            "    }\n"
+            "}\n"
+        )
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cognitive >= 1, f"Expected >= 1, got {m.cognitive}"
+
+    def test_java_catch_cognitive(self):
+        """catch_clause adds to cognitive complexity."""
+        analyzer = ComplexityAnalyzer()
+        body = (
+            "public void foo() {\n"
+            "    try { doSomething(); }\n"
+            "    catch (Exception e) { log(e); }\n"
+            "}\n"
+        )
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cognitive >= 1, f"Expected >= 1, got {m.cognitive}"
+
+    def test_java_lambda_cognitive(self):
+        """Nested lambda adds to cognitive complexity."""
+        analyzer = ComplexityAnalyzer()
+        body = (
+            "public void foo() {\n"
+            "    Runnable r = () -> { return; };\n"
+            "    r.run();\n"
+            "}\n"
+        )
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.cognitive >= 1, f"Expected >= 1, got {m.cognitive}"
+
+
+class TestJavaHalsteadMetrics:
+    """Halstead metrics for Java methods."""
+
+    def test_java_halstead_positive(self):
+        """A Java method should produce positive Halstead metrics."""
+        analyzer = ComplexityAnalyzer()
+        body = "public int add(int a, int b) {\n    return a + b;\n}\n"
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.halstead_volume > 0, f"Volume should be > 0, got {m.halstead_volume}"
+        assert m.halstead_effort > 0, f"Effort should be > 0, got {m.halstead_effort}"
+
+    def test_java_halstead_effort_relation(self):
+        """Effort = round(Volume * Difficulty, 2) due to intermediate rounding."""
+        analyzer = ComplexityAnalyzer()
+        body = "public int add(int a, int b) {\n    return a + b;\n}\n"
+        m = analyzer.analyze_node(_make_java_node(), body)
+        # Effort uses rounded intermediate values, so expect within 0.01
+        expected = round(m.halstead_volume * m.halstead_difficulty, 2)
+        assert math.isclose(m.halstead_effort, expected, abs_tol=0.01), (
+            f"Expected ~{expected}, got {m.halstead_effort}"
+        )
+
+
+class TestJavaEdgeCases:
+    """Edge cases for Java complexity analysis."""
+
+    def test_java_risk_level_low(self):
+        """Simple method should have 'low' risk."""
+        analyzer = ComplexityAnalyzer()
+        body = "public void foo() {\n    int x = 0;\n}\n"
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.risk_level == "low", f"Expected low, got {m.risk_level}"
+
+    def test_java_lines_of_code(self):
+        """Lines of code should match the body."""
+        analyzer = ComplexityAnalyzer()
+        body = "public void foo() {\n    int x = 1;\n    int y = 2;\n}\n"
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.lines_of_code == 4, f"Expected 4, got {m.lines_of_code}"
+
+    def test_java_language_field(self):
+        """The language field should be 'java'."""
+        analyzer = ComplexityAnalyzer()
+        body = "public void foo() {}\n"
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert m.language == "java"
+
+    def test_java_syntax_error(self):
+        """Unparseable Java code should not crash."""
+        analyzer = ComplexityAnalyzer()
+        body = "public void foo( !!! not valid java {{{ !!!\n"
+        m = analyzer.analyze_node(_make_java_node(), body)
+        assert isinstance(m.cyclomatic, int)
+        assert isinstance(m.risk_level, str)

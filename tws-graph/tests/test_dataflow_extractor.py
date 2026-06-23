@@ -664,3 +664,233 @@ class TestDataFlowExtractorBoundary:
                       if e["source"] == "node_bar" and e["target"] == "node_foo"]
         assert len(bar_to_foo) == 1
         assert bar_to_foo[0]["target_text"] == "arg:0->param:x"
+
+
+# ===================================================================
+# Java positive tests
+# ===================================================================
+
+
+def _parse_java(code: str):
+    """Parse Java source, return (tree, source_bytes)."""
+    parser = tree_sitter_language_pack.get_parser("java")
+    tree = parser.parse(code)
+    return tree, code.encode("utf-8")
+
+
+class TestDataFlowExtractorJava:
+    """Positive tests for DataFlowExtractor with Java source."""
+
+    def test_basic_positional_call(self):
+        """foo(a, b) calling void foo(int x, int y) -> 2 DATA_FLOWS edges."""
+        code = (
+            "class Foo {\n"
+            "    void foo(int x, int y) { }\n"
+            "    void bar(int a, int b) { foo(a, b); }\n"
+            "}"
+        )
+        tree, source = _parse_java(code)
+        func_node_ids = {
+            "Test.java::Foo::foo": "node_foo",
+            "Test.java::Foo::bar": "node_bar",
+        }
+        edges = _extract(tree, source, func_node_ids, "Test.java", "java")
+        assert len(edges) == 2, f"Expected 2 edges, got {len(edges)}"
+        target_texts = {e["target_text"] for e in edges}
+        assert "arg:0->param:x" in target_texts
+        assert "arg:1->param:y" in target_texts
+        for e in edges:
+            assert e["source"] == "node_bar"
+            assert e["target"] == "node_foo"
+            assert e["kind"] == "data_flows"
+            assert e["provenance"] == "tree-sitter"
+
+    def test_this_method_call(self):
+        """this.method(42) calling void method(int x) -> arg:0->param:x."""
+        code = (
+            "class Foo {\n"
+            "    void helper(int x) { }\n"
+            "    void caller(int a) { this.helper(a); }\n"
+            "}"
+        )
+        tree, source = _parse_java(code)
+        func_node_ids = {
+            "Test.java::Foo::helper": "node_helper",
+            "Test.java::Foo::caller": "node_caller",
+        }
+        edges = _extract(tree, source, func_node_ids, "Test.java", "java")
+        assert len(edges) == 1, f"Got {len(edges)} edges"
+        e = edges[0]
+        assert e["source"] == "node_caller"
+        assert e["target"] == "node_helper"
+        assert e["target_text"] == "arg:0->param:x"
+
+    def test_this_method_multi_arg(self):
+        """this.method(a, b) calling void method(int x, int y) -> 2 edges."""
+        code = (
+            "class Foo {\n"
+            "    void method(int x, int y) { }\n"
+            "    void caller(int a, int b) { this.method(a, b); }\n"
+            "}"
+        )
+        tree, source = _parse_java(code)
+        func_node_ids = {
+            "Test.java::Foo::method": "node_method",
+            "Test.java::Foo::caller": "node_caller",
+        }
+        edges = _extract(tree, source, func_node_ids, "Test.java", "java")
+        assert len(edges) == 2
+        target_texts = {e["target_text"] for e in edges}
+        assert "arg:0->param:x" in target_texts
+        assert "arg:1->param:y" in target_texts
+
+    def test_recursive_call(self):
+        """void recurse(int n) calling recurse(n-1) -> source == target."""
+        code = (
+            "class Foo {\n"
+            "    void recurse(int n) {\n"
+            "        if (n > 0) { recurse(n - 1); }\n"
+            "    }\n"
+            "}"
+        )
+        tree, source = _parse_java(code)
+        func_node_ids = {"Test.java::Foo::recurse": "node_recurse"}
+        edges = _extract(tree, source, func_node_ids, "Test.java", "java")
+        assert len(edges) >= 1
+        for e in edges:
+            assert e["source"] == "node_recurse"
+            assert e["target"] == "node_recurse"
+
+    def test_constructor_call(self):
+        """Constructor calling method -> dataflow mapping works."""
+        code = (
+            "class Foo {\n"
+            "    void helper(int x) { }\n"
+            "    Foo(int a) { helper(a); }\n"
+            "}"
+        )
+        tree, source = _parse_java(code)
+        func_node_ids = {
+            "Test.java::Foo::helper": "node_helper",
+            "Test.java::Foo::Foo": "node_ctor",
+        }
+        edges = _extract(tree, source, func_node_ids, "Test.java", "java")
+        assert len(edges) == 1
+        e = edges[0]
+        assert e["source"] == "node_ctor"
+        assert e["target"] == "node_helper"
+        assert e["target_text"] == "arg:0->param:x"
+
+    def test_three_positional_args(self):
+        """foo(a, b, c) -> 3 mapped edges."""
+        code = (
+            "class Foo {\n"
+            "    void foo(int x, int y, int z) { }\n"
+            "    void bar(int a, int b, int c) { foo(a, b, c); }\n"
+            "}"
+        )
+        tree, source = _parse_java(code)
+        func_node_ids = {
+            "Test.java::Foo::foo": "node_foo",
+            "Test.java::Foo::bar": "node_bar",
+        }
+        edges = _extract(tree, source, func_node_ids, "Test.java", "java")
+        assert len(edges) == 3
+        target_texts = {e["target_text"] for e in edges}
+        assert target_texts == {"arg:0->param:x", "arg:1->param:y", "arg:2->param:z"}
+
+    def test_forward_reference(self):
+        """Caller defined before callee still works."""
+        code = (
+            "class Foo {\n"
+            "    void bar(int a, int b) { foo(a, b); }\n"
+            "    void foo(int x, int y) { }\n"
+            "}"
+        )
+        tree, source = _parse_java(code)
+        func_node_ids = {
+            "Test.java::Foo::foo": "node_foo",
+            "Test.java::Foo::bar": "node_bar",
+        }
+        edges = _extract(tree, source, func_node_ids, "Test.java", "java")
+        assert len(edges) == 2
+        target_texts = {e["target_text"] for e in edges}
+        assert "arg:0->param:x" in target_texts
+        assert "arg:1->param:y" in target_texts
+
+    def test_external_call_no_edges(self):
+        """Call to external method -> 0 DATA_FLOWS edges."""
+        code = "class Foo { void bar() { System.out.println(\"hi\"); } }"
+        tree, source = _parse_java(code)
+        func_node_ids = {"Test.java::Foo::bar": "node_bar"}
+        edges = _extract(tree, source, func_node_ids, "Test.java", "java")
+        assert len(edges) == 0
+
+    def test_empty_method_no_edges(self):
+        """Empty method -> 0 edges."""
+        code = "class Foo { void bar(int x) { } }"
+        tree, source = _parse_java(code)
+        func_node_ids = {"Test.java::Foo::bar": "node_bar"}
+        edges = _extract(tree, source, func_node_ids, "Test.java", "java")
+        assert len(edges) == 0
+
+    def test_no_arg_call_no_edges(self):
+        """Call with 0 arguments -> 0 edges."""
+        code = (
+            "class Foo {\n"
+            "    void foo() { }\n"
+            "    void bar() { foo(); }\n"
+            "}"
+        )
+        tree, source = _parse_java(code)
+        func_node_ids = {
+            "Test.java::Foo::foo": "node_foo",
+            "Test.java::Foo::bar": "node_bar",
+        }
+        edges = _extract(tree, source, func_node_ids, "Test.java", "java")
+        assert len(edges) == 0
+
+    def test_edge_contract(self):
+        """Each edge has all required fields."""
+        code = (
+            "class Foo {\n"
+            "    void foo(int x) { }\n"
+            "    void bar(int a) { foo(a); }\n"
+            "}"
+        )
+        tree, source = _parse_java(code)
+        func_node_ids = {
+            "Test.java::Foo::foo": "node_foo",
+            "Test.java::Foo::bar": "node_bar",
+        }
+        edges = _extract(tree, source, func_node_ids, "Test.java", "java")
+        assert len(edges) >= 1
+        for e in edges:
+            assert isinstance(e["source"], str)
+            assert len(e["source"]) > 0
+            assert isinstance(e["target"], str)
+            assert e["kind"] == "data_flows"
+            assert isinstance(e["target_text"], str)
+            assert e["target_text"].startswith("arg:")
+            assert e["provenance"] == "tree-sitter"
+            assert isinstance(e["source_loc"], str)
+            assert ":" in e["source_loc"]
+
+    def test_call_with_literal_args(self):
+        """Call with literal values mapped by position."""
+        code = (
+            "class Foo {\n"
+            "    void foo(int x, String y) { }\n"
+            "    void bar() { foo(1, \"hi\"); }\n"
+            "}"
+        )
+        tree, source = _parse_java(code)
+        func_node_ids = {
+            "Test.java::Foo::foo": "node_foo",
+            "Test.java::Foo::bar": "node_bar",
+        }
+        edges = _extract(tree, source, func_node_ids, "Test.java", "java")
+        assert len(edges) == 2
+        target_texts = {e["target_text"] for e in edges}
+        assert "arg:0->param:x" in target_texts
+        assert "arg:1->param:y" in target_texts

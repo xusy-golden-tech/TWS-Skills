@@ -99,7 +99,7 @@ class DataFlowPass(Pass):
             tracker.register(
                 AnalyzerRegistration(
                     analyzer_name="dataflow",
-                    file_patterns=["**/*.py", "**/*.ts", "**/*.tsx"],
+                    file_patterns=["**/*.py", "**/*.ts", "**/*.tsx", "**/*.java"],
                     node_kinds=["function", "method"],
                     version=1,
                 )
@@ -221,9 +221,11 @@ class DataFlowPass(Pass):
                 language = "python"
             elif ext in (".ts", ".tsx"):
                 language = "typescript"
+            elif ext == ".java":
+                language = "java"
             else:
                 logger.debug(
-                    "Skipping %s: extension %s not Python/TypeScript",
+                    "Skipping %s: extension %s not Python/TypeScript/Java",
                     file_path, ext,
                 )
                 continue
