@@ -15,7 +15,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext
+from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext, make_structural_node
 
 
 def _node_text(node, source: bytes) -> str:
@@ -50,8 +50,8 @@ def _line(node) -> int:
     return node.start_position().row + 1
 
 
-def scala_extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract edges from a Scala source CST.
+def scala_extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract nodes and edges from a Scala source CST.
 
     Args:
         source: Raw file bytes.
@@ -59,13 +59,22 @@ def scala_extract(source: bytes, tree, file_path: str) -> list[dict]:
         file_path: Logical file path.
 
     Returns:
-        List of edge dicts.
+        Tuple of (node dicts, edge dicts).
     """
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "scala"))
+
     root = tree.root_node()
 
     # File-level source ID
     file_id = hash_id(f"{file_path}::__scala_file__", file_path)
+    _add_node(file_id, "__scala_file__", "scala_file", 1)
 
     def walk(node):
         for child in _named_children(node):
@@ -77,9 +86,11 @@ def scala_extract(source: bytes, tree, file_path: str) -> list[dict]:
                 name = _find_named_child(child, "identifier")
                 if name:
                     name_text = _node_text(name, source)
+                    node_kind = kind.replace("_definition", "")
+                    sid = hash_id(f"{file_path}::{name_text}", file_path)
+                    _add_node(sid, name_text, node_kind, line)
                     edges.append(_make_edge(
-                        hash_id(f"{file_path}::{name_text}", file_path),
-                        name_text, "contains", file_path, line,
+                        sid, name_text, "contains", file_path, line,
                     ))
 
             # --- def method definitions → CONTAINS ---
@@ -87,9 +98,10 @@ def scala_extract(source: bytes, tree, file_path: str) -> list[dict]:
                 name = _find_named_child(child, "identifier")
                 if name:
                     name_text = _node_text(name, source)
+                    sid = hash_id(f"{file_path}::{name_text}", file_path)
+                    _add_node(sid, name_text, "function", line)
                     edges.append(_make_edge(
-                        hash_id(f"{file_path}::{name_text}", file_path),
-                        name_text, "contains", file_path, line,
+                        sid, name_text, "contains", file_path, line,
                     ))
 
             # --- val/var declarations → CONTAINS ---
@@ -99,18 +111,20 @@ def scala_extract(source: bytes, tree, file_path: str) -> list[dict]:
                     name = _find_named_child(pat_def, "identifier")
                     if name:
                         name_text = _node_text(name, source)
+                        sid = hash_id(f"{file_path}::{name_text}", file_path)
+                        _add_node(sid, name_text, "variable", line)
                         edges.append(_make_edge(
-                            hash_id(f"{file_path}::{name_text}", file_path),
-                            name_text, "contains", file_path, line,
+                            sid, name_text, "contains", file_path, line,
                         ))
                 # Simple val/var: val x = ... or var x = ...
                 else:
                     name = _find_named_child(child, "identifier")
                     if name:
                         name_text = _node_text(name, source)
+                        sid = hash_id(f"{file_path}::{name_text}", file_path)
+                        _add_node(sid, name_text, "variable", line)
                         edges.append(_make_edge(
-                            hash_id(f"{file_path}::{name_text}", file_path),
-                            name_text, "contains", file_path, line,
+                            sid, name_text, "contains", file_path, line,
                         ))
 
             # --- function/method calls → CALLS ---
@@ -143,16 +157,17 @@ def scala_extract(source: bytes, tree, file_path: str) -> list[dict]:
                     pkg_text = _node_text(pkg_id, source)
                 else:
                     pkg_text = _node_text(child, source).strip()
+                sid = hash_id(f"{file_path}::{pkg_text}", file_path)
+                _add_node(sid, pkg_text, "package", line)
                 edges.append(_make_edge(
-                    hash_id(f"{file_path}::{pkg_text}", file_path),
-                    pkg_text, "contains", file_path, line,
+                    sid, pkg_text, "contains", file_path, line,
                 ))
 
             # Recurse
             walk(child)
 
     walk(root)
-    return edges
+    return nodes, edges
 
 
 class ScalaExtractor(BaseExtractor):
@@ -163,5 +178,6 @@ class ScalaExtractor(BaseExtractor):
     language_name = "scala"
 
     def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
-        edges = scala_extract(source, tree, ctx.file_path)
-        ctx.result.edges.extend(edges)
+        result_nodes, result_edges = scala_extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
+        ctx.result.edges.extend(result_edges)

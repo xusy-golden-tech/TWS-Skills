@@ -17,7 +17,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext
+from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext, make_structural_node
 
 PROVENANCE = "heuristic"
 
@@ -121,8 +121,8 @@ def _is_definition_form(first_sym: str) -> bool:
     return first_sym in ("def", "defn", "defmacro", "defn-", "defmacro-", "defonce")
 
 
-def clojure_extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract edges from a Clojure source CST.
+def clojure_extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract nodes and edges from a Clojure source CST.
 
     Args:
         source: Raw file bytes.
@@ -130,12 +130,21 @@ def clojure_extract(source: bytes, tree, file_path: str) -> list[dict]:
         file_path: Logical file path.
 
     Returns:
-        List of edge dicts.
+        Tuple of (node dicts, edge dicts).
     """
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "clojure"))
+
     root = tree.root_node()
 
     file_id = hash_id(f"{file_path}::__clojure_file__", file_path)
+    _add_node(file_id, "__clojure_file__", "clojure_file", 1)
 
     def walk(node):
         for child in _named_children(node):
@@ -155,9 +164,10 @@ def clojure_extract(source: bytes, tree, file_path: str) -> list[dict]:
                         if c.kind() == "sym_lit":
                             ns_name = _sym_name_text(c, source)
                             if ns_name != "ns":
+                                sid = hash_id(f"{file_path}::{ns_name}", file_path)
+                                _add_node(sid, ns_name, "namespace", line)
                                 edges.append(_make_edge(
-                                    hash_id(f"{file_path}::{ns_name}", file_path),
-                                    ns_name, "contains", file_path, line,
+                                    sid, ns_name, "contains", file_path, line,
                                 ))
                                 break
                     # Extract imports inside ns
@@ -175,9 +185,10 @@ def clojure_extract(source: bytes, tree, file_path: str) -> list[dict]:
                                 syms.append(c)
                         if len(syms) >= 2:
                             var_name = _sym_name_text(syms[1], source)
+                            sid = hash_id(f"{file_path}::{var_name}", file_path)
+                            _add_node(sid, var_name, "var_def", line)
                             edges.append(_make_edge(
-                                hash_id(f"{file_path}::{var_name}", file_path),
-                                var_name, "contains", file_path, line,
+                                sid, var_name, "contains", file_path, line,
                             ))
 
                 # --- any other list → CALLS (first symbol is the function) ---
@@ -190,7 +201,7 @@ def clojure_extract(source: bytes, tree, file_path: str) -> list[dict]:
             walk(child)
 
     walk(root)
-    return edges
+    return nodes, edges
 
 
 class ClojureExtractor(BaseExtractor):
@@ -201,5 +212,6 @@ class ClojureExtractor(BaseExtractor):
     language_name = "clojure"
 
     def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
-        edges = clojure_extract(source, tree, ctx.file_path)
-        ctx.result.edges.extend(edges)
+        result_nodes, result_edges = clojure_extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
+        ctx.result.edges.extend(result_edges)

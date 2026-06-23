@@ -29,70 +29,70 @@ class TestElixirExtractor:
 
     def test_defmodule(self):
         """defmodule should produce CONTAINS edge."""
-        edges = _parse("defmodule MyApp do end")
+        nodes, edges = _parse("defmodule MyApp do end")
         mod_edges = [e for e in edges if e["kind"] == "contains"
                       and e["target_text"] == "MyApp"]
         assert len(mod_edges) == 1
 
     def test_def_function(self):
         """def should produce CONTAINS edge."""
-        edges = _parse("defmodule M do def greet do end end")
+        nodes, edges = _parse("defmodule M do def greet do end end")
         def_edges = [e for e in edges if e["kind"] == "contains"
                       and e["target_text"] == "greet"]
         assert len(def_edges) == 1
 
     def test_defp_private_function(self):
         """defp should produce CONTAINS edge."""
-        edges = _parse("defmodule M do defp format(x) do end end")
+        nodes, edges = _parse("defmodule M do defp format(x) do end end")
         defp_edges = [e for e in edges if e["kind"] == "contains"
                        and e["target_text"] == "format"]
         assert len(defp_edges) == 1
 
     def test_import_statement(self):
         """import should produce IMPORTS edge."""
-        edges = _parse("import Logger")
+        nodes, edges = _parse("import Logger")
         import_edges = [e for e in edges if e["kind"] == "imports"
                         and e["target_text"] == "Logger"]
         assert len(import_edges) == 1
 
     def test_alias_statement(self):
         """alias should produce IMPORTS edge."""
-        edges = _parse("alias MyApp.Helper")
+        nodes, edges = _parse("alias MyApp.Helper")
         alias_edges = [e for e in edges if e["kind"] == "imports"
                         and e["target_text"] == "MyApp.Helper"]
         assert len(alias_edges) == 1
 
     def test_use_macro(self):
         """use should produce IMPORTS edge."""
-        edges = _parse("use GenServer")
+        nodes, edges = _parse("use GenServer")
         use_edges = [e for e in edges if e["kind"] == "imports"
                       and e["target_text"] == "GenServer"]
         assert len(use_edges) == 1
 
     def test_require_statement(self):
         """require should produce IMPORTS edge."""
-        edges = _parse("require Integer")
+        nodes, edges = _parse("require Integer")
         req_edges = [e for e in edges if e["kind"] == "imports"
                       and e["target_text"] == "Integer"]
         assert len(req_edges) == 1
 
     def test_dot_function_call(self):
         """Module.function calls should produce CALLS edges."""
-        edges = _parse("defmodule M do def f do Logger.info(\"hi\") end end")
+        nodes, edges = _parse("defmodule M do def f do Logger.info(\"hi\") end end")
         call_edges = [e for e in edges if e["kind"] == "calls"
                       and e["target_text"] == "Logger.info"]
         assert len(call_edges) == 1
 
     def test_local_function_call(self):
         """Local function calls should produce CALLS edges."""
-        edges = _parse("defmodule M do def f do local_fn() end end")
+        nodes, edges = _parse("defmodule M do def f do local_fn() end end")
         call_edges = [e for e in edges if e["kind"] == "calls"
                       and e["target_text"] == "local_fn"]
         assert len(call_edges) == 1
 
     def test_no_false_calls_for_def_name(self):
         """def function name should NOT generate a CALLS edge."""
-        edges = _parse("defmodule M do def greet do :ok end end")
+        nodes, edges = _parse("defmodule M do def greet do :ok end end")
         call_edges = [e for e in edges if e["kind"] == "calls"
                       and e["target_text"] == "greet"]
         assert len(call_edges) == 0
@@ -100,7 +100,7 @@ class TestElixirExtractor:
     def test_full_fixture_file(self):
         """Full fixture file should produce a variety of edge types."""
         source, tree = _parse_file("Sample.ex")
-        edges = elixir_extract(source, tree, "Sample.ex")
+        nodes, edges = elixir_extract(source, tree, "Sample.ex")
 
         assert len(edges) > 0
 
@@ -132,7 +132,7 @@ class TestElixirExtractor:
     def test_edge_provenance(self):
         """All edges should have provenance='tree-sitter'."""
         source, tree = _parse_file("Sample.ex")
-        edges = elixir_extract(source, tree, "Sample.ex")
+        nodes, edges = elixir_extract(source, tree, "Sample.ex")
 
         assert len(edges) > 0
         for edge in edges:
@@ -141,7 +141,7 @@ class TestElixirExtractor:
 
     def test_source_hash_consistency(self):
         """Same symbol name should produce consistent hash IDs."""
-        edges = _parse("defmodule M do def f do :a end; def f(x) do :b end end")
+        nodes, edges = _parse("defmodule M do def f do :a end; def f(x) do :b end end")
         f_edges = [e for e in edges if e["target_text"] == "f"
                    and e["kind"] == "contains"]
         assert len(f_edges) == 2
@@ -151,12 +151,12 @@ class TestElixirExtractor:
     def test_source_loc_format(self):
         """Each edge should have a properly formatted source_loc."""
         source, tree = _parse_file("Sample.ex")
-        edges = elixir_extract(source, tree, "Sample.ex")
+        nodes, edges = elixir_extract(source, tree, "Sample.ex")
 
         for edge in edges:
             assert "Sample.ex:" in edge["source_loc"]
 
     def test_empty_file(self):
         """Empty file should produce no edges."""
-        edges = _parse("# just a comment\n")
+        nodes, edges = _parse("# just a comment\n")
         assert len(edges) == 0

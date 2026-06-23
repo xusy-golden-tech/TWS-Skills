@@ -14,7 +14,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext
+from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext, make_structural_node
 
 
 def _node_text(node, source: bytes) -> str:
@@ -92,8 +92,8 @@ def _is_local_name(identifier, source: bytes) -> bool:
     return text and text[0].islower()
 
 
-def elixir_extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract edges from an Elixir source CST.
+def elixir_extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract nodes and edges from an Elixir source CST.
 
     Args:
         source: Raw file bytes.
@@ -101,12 +101,21 @@ def elixir_extract(source: bytes, tree, file_path: str) -> list[dict]:
         file_path: Logical file path.
 
     Returns:
-        List of edge dicts.
+        Tuple of (node dicts, edge dicts).
     """
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "elixir"))
+
     root = tree.root_node()
 
     file_id = hash_id(f"{file_path}::__elixir_file__", file_path)
+    _add_node(file_id, "__elixir_file__", "elixir_file", 1)
 
     def walk(node):
         for child in _named_children(node):
@@ -125,9 +134,10 @@ def elixir_extract(source: bytes, tree, file_path: str) -> list[dict]:
                 if id_text == "defmodule":
                     name_text = _get_call_name_text(child, source)
                     if name_text:
+                        sid = hash_id(f"{file_path}::{name_text}", file_path)
+                        _add_node(sid, name_text, "module", line)
                         edges.append(_make_edge(
-                            hash_id(f"{file_path}::{name_text}", file_path),
-                            name_text, "contains", file_path, line,
+                            sid, name_text, "contains", file_path, line,
                         ))
                     # Only walk into do_block, skip arguments (avoids false CALLS)
                     do_block = _find_named_child(child, "do_block")
@@ -139,9 +149,10 @@ def elixir_extract(source: bytes, tree, file_path: str) -> list[dict]:
                 if id_text in ("def", "defp"):
                     name_text = _get_call_name_text(child, source)
                     if name_text:
+                        sid = hash_id(f"{file_path}::{name_text}", file_path)
+                        _add_node(sid, name_text, "function", line)
                         edges.append(_make_edge(
-                            hash_id(f"{file_path}::{name_text}", file_path),
-                            name_text, "contains", file_path, line,
+                            sid, name_text, "contains", file_path, line,
                         ))
                     # Only walk into do_block, skip arguments
                     do_block = _find_named_child(child, "do_block")
@@ -178,7 +189,7 @@ def elixir_extract(source: bytes, tree, file_path: str) -> list[dict]:
             walk(child)
 
     walk(root)
-    return edges
+    return nodes, edges
 
 
 class ElixirExtractor(BaseExtractor):
@@ -189,5 +200,6 @@ class ElixirExtractor(BaseExtractor):
     language_name = "elixir"
 
     def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
-        edges = elixir_extract(source, tree, ctx.file_path)
-        ctx.result.edges.extend(edges)
+        result_nodes, result_edges = elixir_extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
+        ctx.result.edges.extend(result_edges)

@@ -18,7 +18,7 @@ Usage:
 
 from __future__ import annotations
 
-from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext
+from tws_graph.indexer.base import hash_id, BaseExtractor, ExtractionContext, make_structural_node
 
 PROVENANCE = "heuristic"
 
@@ -89,8 +89,8 @@ def _extract_apply_target(node, source: bytes) -> str | None:
     return None
 
 
-def haskell_extract(source: bytes, tree, file_path: str) -> list[dict]:
-    """Extract edges from a Haskell source CST.
+def haskell_extract(source: bytes, tree, file_path: str) -> tuple[list[dict], list[dict]]:
+    """Extract nodes and edges from a Haskell source CST.
 
     Args:
         source: Raw file bytes.
@@ -98,12 +98,21 @@ def haskell_extract(source: bytes, tree, file_path: str) -> list[dict]:
         file_path: Logical file path.
 
     Returns:
-        List of edge dicts.
+        Tuple of (node dicts, edge dicts).
     """
+    nodes: list[dict] = []
     edges: list[dict] = []
+    seen: set[str] = set()
+
+    def _add_node(source_id: str, name: str, kind: str, line: int):
+        if source_id not in seen:
+            seen.add(source_id)
+            nodes.append(make_structural_node(source_id, name, kind, file_path, line, "haskell"))
+
     root = tree.root_node()
 
     file_id = hash_id(f"{file_path}::__haskell_file__", file_path)
+    _add_node(file_id, "__haskell_file__", "haskell_file", 1)
 
     # Container kinds that we should recurse into for finding more definitions/calls
     _CONTAINER_KINDS = {
@@ -125,18 +134,20 @@ def haskell_extract(source: bytes, tree, file_path: str) -> list[dict]:
             if kind in ("data_type", "newtype", "type_synomym"):
                 name_text = _extract_name(child, source)
                 if name_text:
+                    sid = hash_id(f"{file_path}::{name_text}", file_path)
+                    _add_node(sid, name_text, "type_def", line)
                     edges.append(_make_edge(
-                        hash_id(f"{file_path}::{name_text}", file_path),
-                        name_text, "contains", file_path, line,
+                        sid, name_text, "contains", file_path, line,
                     ))
 
             # --- class/instance definitions → CONTAINS ---
             elif kind in ("class", "instance"):
                 name_text = _extract_name(child, source)
                 if name_text:
+                    sid = hash_id(f"{file_path}::{name_text}", file_path)
+                    _add_node(sid, name_text, kind, line)
                     edges.append(_make_edge(
-                        hash_id(f"{file_path}::{name_text}", file_path),
-                        name_text, "contains", file_path, line,
+                        sid, name_text, "contains", file_path, line,
                     ))
 
             # --- function bindings (top-level) → CONTAINS ---
@@ -147,9 +158,10 @@ def haskell_extract(source: bytes, tree, file_path: str) -> list[dict]:
                     # Only treat as definition if the name starts with lowercase
                     # (PascalCase names in function position are type constructors)
                     if name_text and name_text[0].islower():
+                        sid = hash_id(f"{file_path}::{name_text}", file_path)
+                        _add_node(sid, name_text, "function", line)
                         edges.append(_make_edge(
-                            hash_id(f"{file_path}::{name_text}", file_path),
-                            name_text, "contains", file_path, line,
+                            sid, name_text, "contains", file_path, line,
                         ))
 
             # --- signature (type annotation for function) → CONTAINS ---
@@ -158,9 +170,10 @@ def haskell_extract(source: bytes, tree, file_path: str) -> list[dict]:
                 if var:
                     name_text = _node_text(var, source)
                     if name_text and name_text[0].islower():
+                        sid = hash_id(f"{file_path}::{name_text}", file_path)
+                        _add_node(sid, name_text, "signature", line)
                         edges.append(_make_edge(
-                            hash_id(f"{file_path}::{name_text}", file_path),
-                            name_text, "contains", file_path, line,
+                            sid, name_text, "contains", file_path, line,
                         ))
                 continue  # Don't recurse into type expressions
 
@@ -185,9 +198,10 @@ def haskell_extract(source: bytes, tree, file_path: str) -> list[dict]:
             elif kind == "header":
                 mod_name = _extract_module_name(child, source)
                 if mod_name:
+                    sid = hash_id(f"{file_path}::{mod_name}", file_path)
+                    _add_node(sid, mod_name, "module", line)
                     edges.append(_make_edge(
-                        hash_id(f"{file_path}::{mod_name}", file_path),
-                        mod_name, "contains", file_path, line,
+                        sid, mod_name, "contains", file_path, line,
                     ))
 
             # Recurse into container nodes only (to find nested definitions/calls)
@@ -195,7 +209,7 @@ def haskell_extract(source: bytes, tree, file_path: str) -> list[dict]:
                 walk(child)
 
     walk(root)
-    return edges
+    return nodes, edges
 
 
 class HaskellExtractor(BaseExtractor):
@@ -206,5 +220,6 @@ class HaskellExtractor(BaseExtractor):
     language_name = "haskell"
 
     def extract(self, source: bytes, tree, ctx: ExtractionContext) -> None:
-        edges = haskell_extract(source, tree, ctx.file_path)
-        ctx.result.edges.extend(edges)
+        result_nodes, result_edges = haskell_extract(source, tree, ctx.file_path)
+        ctx.result.nodes.extend(result_nodes)
+        ctx.result.edges.extend(result_edges)
