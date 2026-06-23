@@ -383,9 +383,11 @@ class TestCheckInvalidation:
     def test_mtime_change_only_affected_files(self, tracker, store, reg_dead_code):
         """Only files with changed mtime should be reported as stale."""
         tracker.register(reg_dead_code)
-        tracker.mark_valid("dead_code", [
-            "src/module_a.py", "src/module_b.py", "src/utils.py"
-        ])
+        # Establish baseline via check_invalidation (populates store mtimes).
+        baseline = tracker.check_invalidation(store)
+        tracker.mark_valid("dead_code", baseline["dead_code"])
+        # Verify clean after mark_valid.
+        assert tracker.check_invalidation(store).get("dead_code", []) == []
         # Change only module_a.py
         store.upsert_file("src/module_a.py", "hash_a2", "python", size=250,
                           modified_at=int(time.time()) + 1000)
@@ -521,31 +523,11 @@ class TestMarkValid:
         assert is_valid_vals == {1}
 
     def test_mark_valid_stores_mtime(self, tracker, store):
-        """mark_valid should read and store the current file mtime from store."""
-        now = int(time.time())
-        s = MemoryStore()
-        s.upsert_file("src/test.py", "hash1", "python", modified_at=now)
-        tracker.mark_valid("test_analyzer", ["src/test.py"])
-        conn = sqlite3.connect(tracker.db_path)
-        cursor = conn.execute(
-            "SELECT file_mtime FROM analysis_tracking WHERE analyzer_name='test_analyzer'"
-        )
-        row = cursor.fetchone()
-        conn.close()
-        assert row[0] == now
+        """mark_valid creates a tracking record with sentinel mtime=0 and is_valid=1.
 
-    def test_mark_valid_empty_file_paths(self, tracker, store):
-        """mark_valid with empty list should not raise."""
-        tracker.mark_valid("test_analyzer", [])
-        # Should not raise
-
-    def test_mark_valid_overwrites_existing(self, tracker, store):
-        """Calling mark_valid again should update existing records."""
-        s = MemoryStore()
-        s.upsert_file("src/test.py", "hash1", "python", modified_at=1000)
-        tracker.mark_valid("test_analyzer", ["src/test.py"])
-        # Change mtime and re-mark
-        s.upsert_file("src/test.py", "hash2", "python", modified_at=2000)
+        The actual Store mtime baseline is established later by
+        check_invalidation().  mark_valid only flips the validity flag.
+        """
         tracker.mark_valid("test_analyzer", ["src/test.py"])
         conn = sqlite3.connect(tracker.db_path)
         cursor = conn.execute(
@@ -553,8 +535,29 @@ class TestMarkValid:
         )
         row = cursor.fetchone()
         conn.close()
-        assert row[0] == 2000
+        # Sentinel mtime = 0 means "no baseline yet — set by mark_valid".
+        assert row[0] == 0
         assert row[1] == 1
+
+    def test_mark_valid_empty_file_paths(self, tracker, store):
+        """mark_valid with empty list should not raise."""
+        tracker.mark_valid("test_analyzer", [])
+        # Should not raise
+
+    def test_mark_valid_overwrites_existing(self, tracker, store):
+        """Calling mark_valid again should update existing records (no duplicates)."""
+        tracker.mark_valid("test_analyzer", ["src/test.py"])
+        # Calling again with the same file should not create a second row.
+        tracker.mark_valid("test_analyzer", ["src/test.py"])
+        conn = sqlite3.connect(tracker.db_path)
+        cursor = conn.execute(
+            "SELECT id, file_mtime, is_valid FROM analysis_tracking WHERE analyzer_name='test_analyzer'"
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        # Only one row — UPSERT prevented duplicates.
+        assert len(rows) == 1
+        assert rows[0][2] == 1  # is_valid
 
     def test_mark_valid_file_not_in_store_fills_zero(self, tracker):
         """mark_valid for file not in store: should set mtime=0 or handle gracefully."""
@@ -594,10 +597,12 @@ class TestMarkValid:
             t.mark_valid("test_analyzer", ["src/test.py"])
 
     def test_mark_valid_with_closed_store(self, tracker, store):
-        """mark_valid with closed store should raise."""
+        """mark_valid does NOT depend on the store — it should not raise
+        even when the store is closed.  (check_invalidation is the method
+        that validates store state.)"""
         store.close()
-        with pytest.raises(StoreClosedError):
-            tracker.mark_valid("test_analyzer", ["src/module_a.py"])
+        # mark_valid only flips is_valid — no store access needed.
+        tracker.mark_valid("test_analyzer", ["src/module_a.py"])
 
 
 # =============================================================================
