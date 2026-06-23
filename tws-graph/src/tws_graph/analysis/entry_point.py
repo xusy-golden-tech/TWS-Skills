@@ -15,7 +15,7 @@ Design: P9 Analysis Suite — entry point detection.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from tws_graph.store.interface import Store

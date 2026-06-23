@@ -7,11 +7,16 @@ metrics for each function/method node.
 Supports: Python (.py), TypeScript (.ts, .tsx)
 """
 
+from __future__ import annotations
+
 import math
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, TYPE_CHECKING
 
 from tree_sitter_language_pack import get_parser
+
+if TYPE_CHECKING:
+    from tws_graph.store.interface import Store
 
 
 @dataclass
@@ -415,7 +420,7 @@ class ComplexityAnalyzer:
     # ------------------------------------------------------------------
 
     def analyze(
-        self, store, file_paths: Optional[list[str]] = None
+        self, store: Store, file_paths: Optional[list[str]] = None
     ) -> list[ComplexityMetrics]:
         """Analyze specified files or all indexed files.
 

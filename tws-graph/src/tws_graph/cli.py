@@ -1136,6 +1136,46 @@ def hooks(
 # analyze
 # ============================================================================
 
+# Analyzer registry for --run dispatch.
+# Maps analyzer names to (class_attr, method, registration_info).
+_ANALYZER_REGISTRY: dict[str, tuple[str, str, dict]] = {
+    "entry-point": (
+        "EntryPointDetector", "detect",
+        {"file_patterns": ["**/*.py", "**/*.ts", "**/*.tsx", "**/*.js", "**/*.go", "**/*.java", "**/*.kt", "**/*.rs"],
+         "node_kinds": ["function", "method"]},
+    ),
+    "dead-code": (
+        "DeadCodeDetector", "detect",
+        {"file_patterns": ["**/*.py", "**/*.ts", "**/*.tsx", "**/*.js", "**/*.go", "**/*.java", "**/*.kt", "**/*.rs"],
+         "node_kinds": ["function", "method"]},
+    ),
+    "complexity": (
+        "ComplexityAnalyzer", "analyze",
+        {"file_patterns": ["**/*.py", "**/*.ts", "**/*.tsx"],
+         "node_kinds": ["function", "method"]},
+    ),
+    "test-edges": (
+        "TestEdgeAnalyzer", "analyze",
+        {"file_patterns": ["**/*.py", "**/*.ts", "**/*.tsx", "**/*.js", "**/*.go", "**/*.java", "**/*.kt", "**/*.rs"],
+         "node_kinds": ["function", "method", "class"]},
+    ),
+    "config-links": (
+        "ConfigLinkAnalyzer", "analyze",
+        {"file_patterns": ["**/*.py", "**/*.ts", "**/*.tsx", "**/*.js", "**/*.go", "**/*.java", "**/*.kt", "**/*.rs",
+                           "**/*.yaml", "**/*.yml", "**/*.json", "**/*.toml", "**/*.properties"],
+         "node_kinds": ["constant", "variable"]},
+    ),
+    "git-diff": (
+        "GitDiffAnalyzer", "analyze",
+        {"file_patterns": ["**/*.py", "**/*.ts", "**/*.tsx", "**/*.js", "**/*.go", "**/*.java", "**/*.kt", "**/*.rs"],
+         "node_kinds": ["function", "method", "class"]},
+    ),
+}
+
+# Tracking database path (relative to project root).
+_ANALYSIS_TRACKER_DB = ".tws/codegraph/analysis_tracker.db"
+
+
 @app.command()
 def analyze(
     algorithm: str = typer.Option("all", help="Algorithm: clone/community/centrality/cycle/all"),
@@ -1143,6 +1183,10 @@ def analyze(
     threshold: float = typer.Option(0.8, help="Clone detection similarity threshold"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+    run_analyzer: Optional[str] = typer.Option(
+        None, "--run",
+        help="运行 P9 分析器: entry-point, dead-code, complexity, test-edges, config-links, git-diff, all",
+    ),
 ):
     """Run graph analysis algorithms on the indexed code graph.
 
@@ -1150,7 +1194,19 @@ def analyze(
       tws-graph analyze --algorithm clone
       tws-graph analyze --algorithm community --edge-kinds calls,imports
       tws-graph analyze --algorithm all --json
+      tws-graph analyze --run entry-point
+      tws-graph analyze --run all
     """
+    # ------------------------------------------------------------------
+    # P9 Analysis Suite path (--run)
+    # ------------------------------------------------------------------
+    if run_analyzer is not None:
+        _run_p9_analyzer(run_analyzer, db_path)
+        return
+
+    # ------------------------------------------------------------------
+    # Legacy algorithm path (--algorithm)
+    # ------------------------------------------------------------------
     resolved_db = os.path.abspath(db_path) if db_path else os.path.abspath(DEFAULT_DB)
 
     if not os.path.exists(resolved_db):
@@ -1203,6 +1259,168 @@ def analyze(
                 _print_algorithm_result(algo_name, result)
     finally:
         store.close()
+
+
+def _run_p9_analyzer(analyzer_name: str, db_path: Optional[str]) -> None:
+    """Dispatch --run requests to P9 analysis modules with invalidation tracking.
+
+    Supports: entry-point, dead-code, complexity, test-edges, config-links,
+    git-diff, and ``all`` (runs every registered analyzer).
+    """
+    import dataclasses
+    import time
+
+    resolved_db = os.path.abspath(db_path) if db_path else os.path.abspath(DEFAULT_DB)
+
+    if not os.path.exists(resolved_db):
+        typer.echo(
+            f"错误: 索引数据库不存在 ({resolved_db})。"
+            f"请先运行 tws-graph index。",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Determine which analyzers to run.
+    if analyzer_name == "all":
+        names = list(_ANALYZER_REGISTRY.keys())
+    elif analyzer_name in _ANALYZER_REGISTRY:
+        names = [analyzer_name]
+    else:
+        available = ", ".join(sorted(_ANALYZER_REGISTRY.keys()))
+        typer.echo(
+            f"未知分析器: {analyzer_name}。可用: {available}, all",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    store = _get_store(resolved_db)
+
+    # --- Invalidation tracking ---
+    tracker_db = os.path.join(os.path.dirname(resolved_db), "analysis_tracker.db")
+    from tws_graph.analysis import InvalidationTracker, AnalyzerRegistration
+
+    tracker = InvalidationTracker(tracker_db)
+    stale_info: dict[str, list[str]] = {}
+    try:
+        # Register each selected analyzer.
+        for name in names:
+            _, _, reg_info = _ANALYZER_REGISTRY[name]
+            tracker.register(AnalyzerRegistration(
+                analyzer_name=name,
+                file_patterns=list(reg_info["file_patterns"]),
+                node_kinds=list(reg_info["node_kinds"]),
+                version=1,
+            ))
+
+        # Check which files are stale.
+        stale_info = tracker.check_invalidation(store)
+    except Exception as exc:
+        typer.echo(f"警告: InvalidationTracker 初始化失败: {exc}", err=True)
+
+    # --- Run analyzers ---
+    output: dict = {}
+    try:
+        for name in names:
+            start = time.perf_counter()
+            class_attr, method_name, reg_info = _ANALYZER_REGISTRY[name]
+
+            module = __import__(
+                f"tws_graph.analysis.{_ANALYZER_TO_MODULE[name]}",
+                fromlist=[class_attr],
+            )
+            analyzer_cls = getattr(module, class_attr)
+            analyzer_instance = analyzer_cls()
+
+            # Special handling: dead-code needs entry points from entry-point.
+            if name == "dead-code":
+                from tws_graph.analysis import EntryPointDetector
+                ep = EntryPointDetector()
+                ep_results = ep.detect(store)
+                entry_points = {r.node_id for r in ep_results}
+                result = analyzer_instance.detect(store, entry_points=entry_points)
+            # Special handling: config-links needs project_root.
+            elif name == "config-links":
+                project_root = os.path.dirname(resolved_db).replace("\\", "/")
+                # Navigate up from .tws/codegraph to project root
+                if project_root.endswith("/.tws/codegraph"):
+                    project_root = project_root.rsplit("/.tws/codegraph", 1)[0]
+                elif project_root.endswith("/.tws"):
+                    project_root = project_root.rsplit("/.tws", 1)[0]
+                # Default to cwd if path looks wrong
+                if not os.path.isdir(project_root):
+                    project_root = "."
+                result = analyzer_instance.analyze(store, project_root=project_root)
+            # Special handling: git-diff needs baseline_store for test mode.
+            elif name == "git-diff":
+                result = analyzer_instance.analyze(store, baseline="HEAD")
+            else:
+                method = getattr(analyzer_instance, method_name)
+                result = method(store)
+
+            elapsed_ms = (time.perf_counter() - start) * 1000
+
+            # Serialize results (dataclasses -> dicts).
+            if isinstance(result, list):
+                serialized = [_dc_to_dict(r) for r in result]
+            elif dataclasses.is_dataclass(result):
+                serialized = _dc_to_dict(result)
+            else:
+                serialized = result
+
+            stale_files = stale_info.get(name, [])
+
+            output[name] = {
+                "analyzer": name,
+                "count": len(result) if isinstance(result, list) else 1,
+                "duration_ms": round(elapsed_ms, 2),
+                "stale_files": stale_files,
+                "stale_file_count": len(stale_files),
+                "result": serialized,
+            }
+
+            # Mark as valid after successful run.
+            try:
+                matched_files = tracker._match_patterns(
+                    reg_info["file_patterns"],
+                    set(store.get_file_stats().keys()),
+                )
+                tracker.mark_valid(name, sorted(matched_files))
+            except Exception:
+                pass  # Non-critical: tracking update failure should not block output.
+
+    finally:
+        store.close()
+        tracker.close()
+
+    typer.echo(json.dumps(output, ensure_ascii=False, indent=2))
+
+
+# Map analyzer names to their module names (without package prefix).
+_ANALYZER_TO_MODULE: dict[str, str] = {
+    "entry-point": "entry_point",
+    "dead-code": "dead_code",
+    "complexity": "complexity",
+    "test-edges": "test_edges",
+    "config-links": "config_links",
+    "git-diff": "git_diff",
+}
+
+
+def _dc_to_dict(obj) -> dict:
+    """Convert a dataclass instance (including nested) to a plain dict."""
+    if obj is None:
+        return None
+    if isinstance(obj, list):
+        return [_dc_to_dict(item) for item in obj]
+    if isinstance(obj, dict):
+        return {k: _dc_to_dict(v) for k, v in obj.items()}
+    if hasattr(obj, "__dataclass_fields__"):
+        import dataclasses
+        return {f.name: _dc_to_dict(getattr(obj, f.name)) for f in dataclasses.fields(obj)}
+    # Handle Enum values.
+    if hasattr(obj, "value"):
+        return obj.value
+    return obj
 
 
 def _print_algorithm_result(algo_name: str, result) -> None:
