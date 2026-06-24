@@ -234,3 +234,61 @@ SELECT kind, COUNT(*) FROM edges WHERE kind IN (
 - [x] test_edge ≥ 19,000 → 实际 19,784 ✓
 
 **v4.0.0 结果**: 全部 PASS ✓。独有能力（变量级读写追踪、数据流、异常追踪、测试关联）在功能增加的同时保持不退化。
+
+---
+
+## v5.0.0 门禁
+
+### 门禁 12: 新边类型产出 (P21)
+
+- [ ] g-ass-source 上 `similar_to` 边 > 0（需 --deep）
+- [ ] g-ass-source 上 `emits` 边 > 0
+- [ ] g-ass-source 上 `listens_on` 边 > 0
+- [ ] g-ass-source 上 `grpc_service` 边 ≥ 0（仅 .proto 项目有产出）
+- [ ] g-ass-source 上 `SELECT COUNT(DISTINCT kind) FROM edges` ≥ 18（target 20）
+
+**测试方法**：
+```sql
+SELECT kind, COUNT(*) FROM edges WHERE kind IN (
+  'similar_to', 'emits', 'listens_on', 'grpc_service'
+) GROUP BY kind;
+```
+
+### 门禁 13: 性能达标 (P22)
+
+- [ ] g-ass-source 全量索引 ≤ 30s
+- [ ] TWS-Skills 全量索引 ≤ 10s
+- [ ] 0-change 增量 < 100ms
+- [ ] 节点数/边数不退化（对比 v4.0.0 基准）
+- [ ] 全量回归通过
+
+**v4.0.0 基准**：g-ass-source 283s, TWS-Skills 30.4s
+
+### 门禁 14: 文件覆盖 (P23)
+
+- [ ] g-ass-source 文件数 ≥ 3,000
+- [ ] 新增 Shell/Lua extractor（如对应文件存在）
+- [ ] 不丢失任何当前已索引的文件类型
+
+### 门禁 15: MCP Server 完成 (P24)
+
+- [ ] MCP 生命周期测试通过（initialize → tools/list → tools/call → shutdown）
+- [ ] 全部 17 工具 + 3 资源可调用
+- [ ] 错误处理合规（无效工具/参数返回规范 JSON-RPC 错误）
+- [ ] 脱网验证：`grep -r "http://\|https://\|urllib\|requests\." mcp/` → 0 matches
+- [ ] `tws-graph serve` CLI 入口正常
+- [ ] `tws-graph mcp-config` 输出有效 JSON
+
+### 门禁 16: 独有能力不退化 (P25)
+
+- [ ] g-ass-source 上 data_flows ≥ 37,000（不退化 + 新 return/yield 边）
+- [ ] g-ass-source 上 reads+writes ≥ 300,000（不退化 + 跨函数新产出）
+- [ ] g-ass-source 上 throws ≥ 4,500（不退化 + 跨函数异常链新产出）
+- [ ] test_edge ≥ 19,000
+
+### 门禁 17: 全量回归 + 完整性
+
+- [ ] `pytest --tb=short` — 0 failed, ≥ 3663 collected
+- [ ] `tws-graph lint` — 0 errors
+- [ ] g-ass-source 跨项目索引通过（无崩溃）
+- [ ] 所有 v4.0.0 门禁 (G1-G11) 保持 PASS
