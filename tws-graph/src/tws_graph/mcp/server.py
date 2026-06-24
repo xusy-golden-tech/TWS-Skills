@@ -93,7 +93,7 @@ class MCPServer:
     # =========================================================================
 
     def _register_tools(self) -> None:
-        """Register all 15 MCP tools."""
+        """Register all 16 MCP tools."""
         # Each tool module's register_tools adds tools to the registry
         register_search_tools(self._tool_registry, self._store_factory)
         register_code_tools(self._tool_registry, self._store_factory)

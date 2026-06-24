@@ -1,7 +1,7 @@
 """MCP (Model Context Protocol) server for tws-graph.
 
 Provides a zero-dependency, pure-Python JSON-RPC 2.0 MCP server that exposes
-tws-graph's code symbol graph as 15 tools and 3 resources over stdio transport.
+tws-graph's code symbol graph as 16 tools and 3 resources over stdio transport.
 
 Usage:
     from tws_graph.mcp.server import create_server, run_server

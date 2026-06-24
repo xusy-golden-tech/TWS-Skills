@@ -248,45 +248,51 @@ class ParallelExtractionOrchestrator:
                     })
 
         # Step 5: Batch INSERT into SQLite (main process, single-threaded)
-        for file_result in all_file_results:
-            rel_path = file_result["rel_path"]
-
-            if file_result["status"] == "error":
-                result.files_errored += 1
-                result.errors.extend(file_result["errors"])
-                continue
-
-            valid_nodes = file_result["nodes"]
-            valid_edges = file_result["edges"]
-            fhash = file_result["content_hash"]
-            lang = file_result["language"]
-            fsize = file_result["size"]
-            fmtime = file_result["mtime"]
+        # Group files into write batches of 100 to reduce transaction overhead
+        _WRITE_BATCH_SIZE = 100
+        for batch_start in range(0, len(all_file_results), _WRITE_BATCH_SIZE):
+            batch_files = all_file_results[batch_start:batch_start + _WRITE_BATCH_SIZE]
 
             queries.conn.execute("BEGIN")
             try:
-                if queries.get_file_by_path(rel_path):
-                    queries.delete_file(rel_path)
+                for file_result in batch_files:
+                    rel_path = file_result["rel_path"]
 
-                if valid_nodes:
-                    queries.insert_nodes(valid_nodes)
+                    if file_result["status"] == "error":
+                        result.files_errored += 1
+                        result.errors.extend(file_result["errors"])
+                        continue
 
-                if valid_edges:
-                    queries.insert_edges(valid_edges)
-                    result.edges_created += len(valid_edges)
+                    valid_nodes = file_result["nodes"]
+                    valid_edges = file_result["edges"]
+                    fhash = file_result["content_hash"]
+                    lang = file_result["language"]
+                    fsize = file_result["size"]
+                    fmtime = file_result["mtime"]
 
-                queries.upsert_file(rel_path, fhash, lang, len(valid_nodes),
-                                   size=fsize, modified_at=fmtime)
+                    if queries.get_file_by_path(rel_path):
+                        queries.delete_file(rel_path)
+
+                    if valid_nodes:
+                        queries.insert_nodes(valid_nodes)
+
+                    if valid_edges:
+                        queries.insert_edges(valid_edges)
+                        result.edges_created += len(valid_edges)
+
+                    queries.upsert_file(rel_path, fhash, lang, len(valid_nodes),
+                                       size=fsize, modified_at=fmtime)
+
+                    result.files_indexed += 1
+                    result.nodes_created += len(valid_nodes)
+
+                    if file_result["errors"]:
+                        result.errors.extend(file_result["errors"])
 
                 queries.conn.execute("COMMIT")
             except Exception:
                 queries.conn.execute("ROLLBACK")
                 raise
-
-            result.files_indexed += 1
-            result.nodes_created += len(valid_nodes)
-
-            if file_result["errors"]:
                 result.errors.extend(file_result["errors"])
 
         # Step 6: Post-processing (A1: only if files were actually indexed)

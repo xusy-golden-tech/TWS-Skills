@@ -1,4 +1,4 @@
-"""MCP query tools: query_cypher, detect_cross_service."""
+"""MCP query tools: query_cypher, detect_cross_service, get_edge_distribution."""
 
 from __future__ import annotations
 
@@ -38,6 +38,25 @@ def register_tools(registry: ToolRegistry, store_factory: StoreFactory) -> None:
         handler=lambda args: _query_cypher(store_factory(), args),
     )
 
+    # -- get_edge_distribution ------------------------------------------------
+    registry.register(
+        ToolDefinition(
+            name="get_edge_distribution",
+            description=(
+                "Get the distribution of edge kinds in the code graph. Returns "
+                "count per edge kind (calls, imports, extends, implements, reads, "
+                "writes, data_flows, throws, http_calls, env_accesses, grpc_server, "
+                "grpc_client, grpc_service, test_edge, config_link, emits, "
+                "listens_on, similar_to, etc.)."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        handler=lambda args: _get_edge_distribution(store_factory(), args),
+    )
+
     # -- detect_cross_service -------------------------------------------------
     registry.register(
         ToolDefinition(
@@ -60,6 +79,36 @@ def register_tools(registry: ToolRegistry, store_factory: StoreFactory) -> None:
 # ============================================================================
 # Handler implementations
 # ============================================================================
+
+
+def _get_edge_distribution(store: Store, args: dict) -> dict:
+    """Get edge kind distribution."""
+    try:
+        db_conn = getattr(store, "_conn", None) or getattr(store, "conn", None)
+        if db_conn is None:
+            return {
+                "content": [{"type": "text", "text": json.dumps(
+                    {"error": "Store does not expose a database connection"})}]
+            }
+
+        import sqlite3
+        conn = db_conn if isinstance(db_conn, sqlite3.Connection) else db_conn.conn
+        rows = conn.execute(
+            "SELECT kind, COUNT(*) as cnt FROM edges GROUP BY kind ORDER BY cnt DESC"
+        ).fetchall()
+
+        distribution = {r["kind"]: r["cnt"] for r in rows}
+        total_edges = sum(distribution.values())
+
+        output = {
+            "distribution": distribution,
+            "total_edges": total_edges,
+            "total_kinds": len(distribution),
+        }
+    except Exception as e:
+        output = {"error": str(e)}
+
+    return {"content": [{"type": "text", "text": json.dumps(output, ensure_ascii=False)}]}
 
 
 def _query_cypher(store: Store, args: dict) -> dict:

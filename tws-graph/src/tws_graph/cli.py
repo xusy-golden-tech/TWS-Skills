@@ -2155,6 +2155,57 @@ def _serve_callback(
         pass
 
 
+@serve_app.command(name="mcp-config")
+def _mcp_config(
+    root: str = typer.Option(
+        None, "--root", "-r",
+        help="项目根目录 (默认: 当前目录)",
+    ),
+    db: str = typer.Option(
+        None, "--db", "-d",
+        help="数据库路径 (默认: .tws/codegraph/index.db)",
+    ),
+):
+    """输出 Claude Code MCP 配置 JSON，可直接粘贴到 claude_desktop_config.json。
+
+    示例：
+      tws-graph serve mcp-config                    # 输出当前项目配置
+      tws-graph serve mcp-config --root /my/project # 指定项目根目录
+    """
+    import json as _json
+
+    # Determine database path
+    if db:
+        db_path = db
+    elif root:
+        db_path = os.path.join(os.path.abspath(root), ".tws", "codegraph", "index.db")
+    else:
+        db_path = os.path.abspath(DEFAULT_DB)
+
+    # Reasonable executable path
+    tws_graph_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "bin", "tws-graph")
+    )
+    # Fall back to module invocation
+    if not os.path.exists(tws_graph_path):
+        tws_graph_path = "tws-graph"
+
+    config = {
+        "mcpServers": {
+            "tws-graph": {
+                "command": tws_graph_path,
+                "args": ["serve", "--db", db_path],
+                "description": (
+                    "tws-graph MCP server — zero-dependency, offline-capable "
+                    "code symbol graph queries. 16 tools + 3 resources."
+                ),
+            }
+        }
+    }
+
+    typer.echo(_json.dumps(config, indent=2, ensure_ascii=False))
+
+
 def main():
     app()
 
