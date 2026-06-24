@@ -44,13 +44,23 @@ class ExtractionOrchestrator:
         self.root_dir = root_dir
         self.queries = queries
 
-    def index_all(self, force: bool = False) -> IndexResult:
+    def index_all(self, force: bool = False, parallel: bool = True) -> IndexResult:
         """Full index: scan all source files, parse, and store.
 
         If force=False:
           1. Stat pre-filter (cheap): if mtime + size match DB → skip
           2. Content hash (expensive): read file, compute SHA256, compare
+
+        If parallel=True (default):
+          Uses ProcessPoolExecutor for parallel extraction (P14).
+          Workers parse files in parallel, main process writes SQLite.
+          chunk_size=50, max_workers=min(20, cpu_count).
         """
+        if parallel:
+            from .parallel import ParallelExtractionOrchestrator
+            par_orch = ParallelExtractionOrchestrator(self.root_dir)
+            return par_orch.index_all(self.queries, force=force)
+
         t0 = time.time()
         result = IndexResult()
         import os
