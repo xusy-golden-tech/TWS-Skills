@@ -16,26 +16,44 @@ tws-graph-init 把代码图工具链的安装和初始化封装成一个标准�
 **执行前必须：** 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），获取准确的命令语法和错误处理策略。以下各步骤的命令仅为流程描述，实际执行以 found-tws-graph-usage 为准。
 
 ```
-① 检测 tws-graph 是否可用 → ② 安装（如需要）→ ③ 构建索引 → ④ 创建基线快照 → ⑤ 安装 git hooks
+① 检测 tws-graph 版本 → ② 安装/升级（如需要）→ ③ 构建索引 → ④ 创建基线快照 → ⑤ 安装 git hooks
 ```
 
-## ① 检测 tws-graph 是否可用
+## ① 检测 tws-graph 版本
 
 ```
+# 1. 读源码期望版本
+Bash: grep 'version\s*=' tws-graph/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/'
+# 或 Read tws-graph/pyproject.toml 读 project.version
+
+# 2. 查已安装版本
 Bash: tws-graph --version 2>&1
 
-→ 输出 "tws-graph 0.1.0" 或类似版本号 → 已安装，跳到步骤 ③
-→ 输出 "command not found" 或报错 → 未安装，进入步骤 ②
+→ 未安装（command not found）→ 进入步骤 ②「安装」
+→ 已安装但版本号 < 源码版本 → 进入步骤 ②「升级」
+  （editable install 代码变更自动生效，但新依赖/入口点需要重装才能生效）
+→ 已安装且版本一致 → 跳到步骤 ③
 ```
 
-## ② 安装
+> **版本号判断**：运行 `tws-graph --version` 获取已安装版本（如 `0.1.0`），与 `tws-graph/pyproject.toml` 中的 `version` 比较。小于则升级。
+
+## ② 安装/升级
 
 tws-graph 是随 TWS-Skills 仓库分发的 Python 包，位于项目根目录的 `tws-graph/` 下。
 
+**安装（首次）：**
 ```
 Bash: pip install -e tws-graph/ 2>&1
+```
 
+**升级（版本不匹配）：**
+```
+Bash: pip install -e tws-graph/ --upgrade 2>&1
+```
+
+```
 → 成功 → 验证: tws-graph --version → 继续步骤 ③
+  升级后建议全量重建索引以获取新增符号类型
 → 失败（找不到 tws-graph/ 目录或 pip 报错）→ 输出以下提示并结束：
   「tws-graph 安装失败。请检查：
     1. tws-graph/ 目录是否存在
@@ -79,7 +97,8 @@ Bash: tws-graph hooks install 2>&1
 
 ## 完成标准
 
-- [ ] tws-graph --version 正常输出
+- [ ] tws-graph --version 正常输出版本号
+- [ ] 版本号与 `tws-graph/pyproject.toml` 中一致
 - [ ] tws-graph index 成功运行
 - [ ] .tws/codegraph/index.db 文件存在且 > 0
 - [ ] tws-graph snapshot initial 已创建基线
@@ -89,13 +108,14 @@ Bash: tws-graph hooks install 2>&1
 
 - `flow-new-project` 的 `①.5 初始化代码图` 会调用本技能
 - `tws-init` 完成规约生成后，调用本技能初始化代码图
-- 如果项目已有 `.tws/codegraph/index.db` → 跳过安装和索引，只更新快照
+- 如果已安装且版本匹配 → 跳过安装步骤，直接进入索引
 
 ## 错误处理
 
 | 问题 | 处理 |
 |------|------|
 | tws-graph --version 失败 | 安装 tws-graph |
+| 已安装版本 < 源码版本 | 升级 tws-graph（pip install -e --upgrade） |
 | pip install 失败 | 提示用户，后续退回 grep |
 | tws-graph index 部分失败 | 继续，标注不完整 |
 | tws-graph index 全部失败 | 标注失败，退回 grep |
