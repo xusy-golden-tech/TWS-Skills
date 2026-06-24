@@ -57,6 +57,12 @@ class EdgeKind(str, Enum):
     TEST_EDGE = "test_edge"
     CONFIG_LINK = "config_link"
 
+    # -- P26 v5.2.0 结构边 --
+    OVERRIDES = "overrides"
+    INSTANTIATES = "instantiates"
+    DECORATES = "decorates"
+    TYPE_REF = "type_ref"
+
     def __str__(self) -> str:
         """返回枚举值字符串，而非 'EdgeKind.CALLS'.
 

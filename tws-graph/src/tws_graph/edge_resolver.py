@@ -329,3 +329,120 @@ def is_call_target_external(
 
     # 7. Default: unresolved but could be an internal index gap
     return False
+
+
+def resolve_overrides(queries) -> int:
+    """Detect method overrides from extends relationships and create overrides edges.
+
+    Scans all extends edges to find child→parent class relationships,
+    then checks for same-named methods in both classes. For each match,
+    creates an ``overrides`` edge from the child method to the parent method.
+
+    Multi-level inheritance is handled transitively: if B extends A and
+    C extends B, C's methods are checked against both B's and A's methods.
+
+    Args:
+        queries: QueryBuilder instance connected to the index DB.
+
+    Returns:
+        Number of overrides edges created.
+    """
+    # 1. Build child_class → parent_class map from extends edges
+    extends_rows = queries._exec(
+        "SELECT source, target FROM edges WHERE kind = 'extends'"
+    ).fetchall()
+
+    if not extends_rows:
+        return 0
+
+    child_parent: dict[str, str] = {}
+    for row in extends_rows:
+        child_parent[row["source"]] = row["target"]
+
+    # 2. Collect all method nodes with their simple name and parent class
+    method_rows = queries._exec(
+        "SELECT id, name, qualified_name, kind FROM nodes WHERE kind = 'method'"
+    ).fetchall()
+
+    # method name → parent_class_id → method_id
+    # parent_class_id is extracted from qualified_name: "file.py::ClassName.methodName"
+    method_by_class: dict[str, dict[str, list[str]]] = {}
+    for row in method_rows:
+        qn = row["qualified_name"]
+        # Extract: "file.py::ClassName.methodName" → parent_class_qn = "file.py::ClassName"
+        parts = qn.rsplit("::", 2)
+        if len(parts) >= 2:
+            # parts: ["file.py", "ClassName", "methodName"] or ["file.py::ClassName", "methodName"]
+            class_qn = "::".join(parts[:-1])
+            method_name = parts[-1]
+        else:
+            continue
+
+        method_by_class.setdefault(class_qn, {}).setdefault(method_name, []).append(row["id"])
+
+    # 3. Build transitive ancestor map from child→parent relations
+    def get_ancestors(child_id: str, visited: set | None = None) -> set[str]:
+        if visited is None:
+            visited = set()
+        if child_id in visited:
+            return set()
+        visited.add(child_id)
+        ancestors = set()
+        parent_id = child_parent.get(child_id)
+        if parent_id:
+            ancestors.add(parent_id)
+            ancestors |= get_ancestors(parent_id, visited)
+        return ancestors
+
+    # Also need: class_id → qualified_name
+    class_rows = queries._exec(
+        "SELECT id, qualified_name FROM nodes WHERE kind = 'class'"
+    ).fetchall()
+    class_id_to_qn = {row["id"]: row["qualified_name"] for row in class_rows}
+
+    # 4. For each child class, check its methods against parent class methods
+    edges_to_insert: list[dict] = []
+    seen_edge_keys: set[tuple[str, str]] = set()
+
+    for child_id, parent_id in child_parent.items():
+        ancestors = get_ancestors(child_id)
+
+        child_qn = class_id_to_qn.get(child_id)
+        if not child_qn:
+            continue
+
+        child_methods = method_by_class.get(child_qn, {})
+        if not child_methods:
+            continue
+
+        for ancestor_id in ancestors:
+            ancestor_qn = class_id_to_qn.get(ancestor_id)
+            if not ancestor_qn:
+                continue
+
+            parent_methods = method_by_class.get(ancestor_qn, {})
+            if not parent_methods:
+                continue
+
+            # Find same-named methods
+            for method_name, child_method_ids in child_methods.items():
+                if method_name in parent_methods:
+                    for child_mid in child_method_ids:
+                        for parent_mid in parent_methods[method_name]:
+                            edge_key = (child_mid, parent_mid)
+                            if edge_key not in seen_edge_keys:
+                                seen_edge_keys.add(edge_key)
+                                edges_to_insert.append({
+                                    "source": child_mid,
+                                    "target": parent_mid,
+                                    "kind": "overrides",
+                                    "source_loc": "",
+                                    "target_text": "",
+                                    "provenance": "heuristic",
+                                    "properties": "{}",
+                                })
+
+    if edges_to_insert:
+        queries.insert_edges(edges_to_insert)
+
+    return len(edges_to_insert)

@@ -13,6 +13,7 @@ Design (P14):
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -23,7 +24,7 @@ from ..db.queries import QueryBuilder
 from .scanner import scan_directory
 from .language_detect import detect_language
 from .parser import extract_full
-from ..edge_resolver import resolve_edges, resolve_structural_edges, ResolveResult, is_call_target_external
+from ..edge_resolver import resolve_edges, resolve_structural_edges, resolve_overrides, ResolveResult, is_call_target_external
 from ..framework import detect_frameworks, FrameworkDetectionResult
 
 
@@ -149,6 +150,7 @@ class ParallelExtractionOrchestrator:
         self,
         queries: QueryBuilder,
         force: bool = False,
+        deep: bool = False,
     ) -> IndexResult:
         """Full index with parallel extraction.
 
@@ -220,7 +222,9 @@ class ParallelExtractionOrchestrator:
             files_to_reindex.append(rel_path)
 
         if not files_to_reindex:
-            # No files changed — skip all post-processing (A1: fast return)
+            # No files changed — fast return, but run clone detection if --deep
+            if deep:
+                _detect_clones(queries)
             result.duration_ms = int((time.time() - t0) * 1000)
             return result
 
@@ -299,8 +303,13 @@ class ParallelExtractionOrchestrator:
         if result.files_indexed > 0:
             result.resolve_result = resolve_edges(queries)
             resolve_structural_edges(queries)
+            resolve_overrides(queries)
             _populate_unresolved_refs(queries, result.resolve_result)
             _populate_import_unresolved(queries)
+            _propagate_throws(queries)
+            _propagate_cross_function_rw(queries)
+            if deep:
+                _detect_clones(queries)
             queries.rebuild_fts()
             result.framework_result = detect_frameworks(self.root_dir, queries)
 
@@ -430,3 +439,347 @@ def _populate_import_unresolved(queries: QueryBuilder) -> None:
             "is_external": int(is_external),
         }
         queries.insert_unresolved_ref(ref)
+
+
+def _propagate_throws(queries: QueryBuilder) -> None:
+    """Propagate throws edges along call chains (cross-function exception tracking).
+
+    For every call edge (caller → callee), if the callee has throws edges
+    (direct or previously-propagated), propagate those exception types to the
+    caller.  Limited to depth 3 to avoid unbounded propagation through
+    recursive or deeply-nested call chains.
+
+    Propagated edges use ``provenance = 'propagated'`` to distinguish them
+    from direct tree-sitter ``throws`` edges.
+
+    All propagation is done in memory; results are written in a single batch
+    at the end for performance.
+    """
+    MAX_DEPTH = 3
+
+    # 1. Load all existing throws edges: source → (target, target_text)
+    throws_rows = queries._exec("""
+        SELECT source, target, target_text
+        FROM edges
+        WHERE kind = 'throws'
+    """).fetchall()
+
+    if not throws_rows:
+        return
+
+    # throws_map[source_id] = {(target_id, target_text), ...}
+    throws_map: dict[str, set[tuple[str, str]]] = {}
+    for r in throws_rows:
+        throws_map.setdefault(r["source"], set()).add(
+            (r["target"], r["target_text"] or "")
+        )
+
+    # 2. Load all calls edges: caller → callee
+    call_rows = queries._exec("""
+        SELECT source, target
+        FROM edges
+        WHERE kind = 'calls'
+    """).fetchall()
+
+    if not call_rows:
+        return
+
+    # call_graph[callee] = {caller1, caller2, ...}
+    call_graph: dict[str, set[str]] = {}
+    for r in call_rows:
+        call_graph.setdefault(r["target"], set()).add(r["source"])
+
+    # 3. BFS propagate: for each function with throws, propagate to callers
+    inserted: set[tuple[str, str, str]] = set()
+    for source_id, exc_set in throws_map.items():
+        for target_id, target_text in exc_set:
+            inserted.add((source_id, target_id, target_text))
+
+    # All propagated edges collected here, written once at the end
+    all_new_edges: list[tuple[str, str, str]] = []
+
+    depth = 0
+    # Start with direct throws
+    current_sources: set[str] = set(throws_map.keys())
+
+    while depth < MAX_DEPTH and current_sources:
+        new_batch: list[tuple[str, str, str]] = []
+        next_sources: set[str] = set()
+
+        for source_id in sorted(current_sources):
+            exc_set = throws_map.get(source_id)
+            if not exc_set:
+                continue
+            for caller_id in call_graph.get(source_id, set()):
+                for target_id, target_text in exc_set:
+                    key = (caller_id, target_id, target_text)
+                    if key not in inserted:
+                        inserted.add(key)
+                        new_batch.append((caller_id, target_id, target_text))
+                        next_sources.add(caller_id)
+
+        if not new_batch:
+            break
+
+        all_new_edges.extend(new_batch)
+
+        # Update throws_map with new edges for next depth iteration
+        for s, t, tt in new_batch:
+            throws_map.setdefault(s, set()).add((t, tt))
+
+        current_sources = next_sources
+        depth += 1
+
+    # 4. Write all propagated edges at once
+    if all_new_edges:
+        rows = [
+            {
+                "source": s,
+                "target": t,
+                "target_text": tt,
+                "kind": "throws",
+                "source_loc": "",
+                "provenance": "propagated",
+            }
+            for s, t, tt in all_new_edges
+        ]
+        queries.insert_edges(rows)
+
+
+def _write_throws_batch(
+    queries: QueryBuilder,
+    edges: list[tuple[str, str, str]],
+    depth: int,
+) -> None:
+    """Write a batch of propagated throws edges."""
+    rows = [
+        {
+            "source": s,
+            "target": t,
+            "target_text": tt,
+            "kind": "throws",
+            "source_loc": "",
+            "provenance": "propagated",
+        }
+        for s, t, tt in edges
+    ]
+    queries.insert_edges(rows)
+
+
+def _propagate_cross_function_rw(queries: QueryBuilder) -> None:
+    """Create data_flows edges for variables shared across function boundaries.
+
+    Analyses reads/writes edges to find variables accessed by multiple
+    functions, then creates ``data_flows`` edges from writer → reader with
+    ``provenance='cross-function'``.
+
+    Handles three patterns:
+
+    1. **Global/nonlocal variables** — ``target_text`` ends with ``:global``
+       or ``:nonlocal``.  These are guaranteed cross-function by language
+       semantics.
+
+    2. **Class attributes** — ``target_text`` starts with ``self.`` /
+       ``this.``.  Scoped per-class so ``self.x`` in two different classes
+       does not produce a false edge.
+
+    3. **Attribute writes** — ``target_text`` contains ``.`` (e.g.
+       ``obj.attr``, ``module.var``).  Scoped per-file.
+    """
+    rows = queries._exec("""
+        SELECT e.source, e.target_text, e.kind, n.file_path, n.qualified_name
+        FROM edges e
+        JOIN nodes n ON e.source = n.id
+        WHERE e.kind IN ('reads', 'writes')
+          AND e.target_text IS NOT NULL
+    """).fetchall()
+
+    if not rows:
+        return
+
+    from collections import defaultdict
+
+    # Group by (scope, var_name):
+    # - global / nonlocal / module  → scope = file_path
+    # - self.x / this.x             → scope = class qname (extracted from qualified_name)
+    # - obj.attr (other dot access) → scope = file_path
+    writers: dict[tuple[str, str], set[str]] = defaultdict(set)
+    readers: dict[tuple[str, str], set[str]] = defaultdict(set)
+
+    for row in rows:
+        target_text = row["target_text"]
+        kind = row["kind"]
+        source_id = row["source"]
+        file_path = row["file_path"]
+        qname = row["qualified_name"] or ""
+
+        # Determine scope and variable key
+        is_global = ":global" in target_text
+        is_nonlocal = ":nonlocal" in target_text
+        is_module = ":module" in target_text
+
+        # Extract pure variable name (strip "var:" prefix if present)
+        var_name = target_text
+        if var_name.startswith("var:"):
+            var_name = var_name[4:]
+
+        # Decide scoping
+        if is_global or is_nonlocal or is_module:
+            # Language-guaranteed cross-function — scope at file level
+            scope = file_path
+        elif var_name.startswith("self."):
+            # Class attribute — scope to the class
+            # qname format: file_path::ClassName::method_name or file_path::method_name
+            if qname.count("::") >= 2:
+                # Has class scope: extract ClassName
+                parts = qname.rsplit("::", 1)[0]  # file_path::ClassName
+                scope = parts
+            else:
+                scope = file_path
+        elif var_name.startswith("this."):
+            # TypeScript/Java this.attr — scope to the class
+            if qname.count("::") >= 2:
+                parts = qname.rsplit("::", 1)[0]
+                scope = parts
+            else:
+                scope = file_path
+        elif "." in var_name:
+            # Other dot access (obj.attr, module.var) — scope at file level
+            scope = file_path
+        else:
+            # Plain variable — skip (could be same-named locals, not cross-function)
+            continue
+
+        key = (scope, var_name)
+        if kind == "writes":
+            writers[key].add(source_id)
+        elif kind == "reads":
+            readers[key].add(source_id)
+
+    # Create data_flows edges from writers to readers
+    new_edges: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for (scope, var_name), writer_set in writers.items():
+        reader_set = readers.get((scope, var_name), set())
+        if not reader_set:
+            continue
+        for writer_id in writer_set:
+            for reader_id in reader_set:
+                if writer_id == reader_id:
+                    continue
+                key = (writer_id, reader_id, var_name)
+                if key not in seen:
+                    seen.add(key)
+                    new_edges.append({
+                        "source": writer_id,
+                        "target": reader_id,
+                        "kind": "data_flows",
+                        "target_text": var_name,
+                        "source_loc": "",
+                        "provenance": "cross-function",
+                    })
+
+    if new_edges:
+        queries.insert_edges(new_edges)
+
+
+def _detect_clones(queries: QueryBuilder) -> None:
+    """Run MinHash+LSH clone detection on function/method bodies.
+
+    Finds near-duplicate function/method pairs and creates ``similar_to``
+    edges.  Only runs when ``--deep`` is passed because it is O(n^2) in the
+    worst case after LSH bucketing.
+
+    Requires function/method nodes to have non-empty ``body`` field (populated
+    by Python/TypeScript/Java extractors).
+    """
+    try:
+        from tws_graph.graph.algorithms.similarity import CloneDetector
+        from tws_graph.graph.algorithms.minhash import MinHash, LSHIndex, extract_ast_tokens, estimate_jaccard
+    except ImportError:
+        return
+
+    # Load function/method nodes with non-empty body
+    rows = queries._exec("""
+        SELECT id, name, body, kind
+        FROM nodes
+        WHERE kind IN ('function', 'method')
+          AND body IS NOT NULL
+          AND body != ''
+    """).fetchall()
+
+    if len(rows) < 2:
+        return
+
+    nodes = [{"id": r["id"], "name": r["name"], "body": r["body"], "kind": r["kind"]} for r in rows]
+    nodes_by_id = {n["id"]: n for n in nodes}
+
+    # Compute MinHash signatures
+    NUM_PERM = 128
+    mh = MinHash(num_perm=NUM_PERM)
+    signatures: dict[str, list[int]] = {}
+    for node in nodes:
+        body = node.get("body", "") or ""
+        if body:
+            tokens = extract_ast_tokens(body)
+            sig = mh.compute_signature(tokens)
+            signatures[node["id"]] = sig
+
+    if not signatures:
+        return
+
+    # Build LSH index
+    BANDS = 16
+    ROWS = 8
+    lsh = LSHIndex(bands=BANDS, rows=ROWS)
+    for nid, sig in signatures.items():
+        lsh.insert(nid, sig)
+
+    # Find candidate pairs
+    pairs = lsh.find_similar_pairs()
+
+    # Filter by threshold
+    THRESHOLD = 0.7
+    similar_pairs = []
+    seen = set()
+    for id1, id2, _ in pairs:
+        key = tuple(sorted([id1, id2]))
+        if key in seen:
+            continue
+        seen.add(key)
+        jaccard = estimate_jaccard(signatures[id1], signatures[id2])
+        if jaccard >= THRESHOLD:
+            similar_pairs.append({
+                "node_a": id1,
+                "node_b": id2,
+                "similarity": round(jaccard, 4),
+                "name_a": nodes_by_id[id1].get("name", ""),
+                "name_b": nodes_by_id[id2].get("name", ""),
+            })
+
+    if not similar_pairs:
+        return
+
+    # Delete old similar_to edges
+    queries._exec("DELETE FROM edges WHERE kind = 'similar_to'")
+
+    # Insert new edges
+    edge_dicts = []
+    for pair in similar_pairs:
+        edge_dicts.append({
+            "source": pair["node_a"],
+            "target": pair["node_b"],
+            "kind": "similar_to",
+            "source_loc": "",
+            "target_text": pair["name_b"],
+            "provenance": "analysis",
+            "properties": json.dumps({
+                "similarity": pair["similarity"],
+                "name_a": pair["name_a"],
+                "name_b": pair["name_b"],
+            }, ensure_ascii=False) if json else "",
+        })
+
+    if edge_dicts:
+        queries.insert_edges(edge_dicts)

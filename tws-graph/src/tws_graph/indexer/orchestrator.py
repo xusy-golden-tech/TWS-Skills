@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 
 from ..db.queries import QueryBuilder
-from ..edge_resolver import resolve_edges, resolve_structural_edges, ResolveResult, is_call_target_external
+from ..edge_resolver import resolve_edges, resolve_structural_edges, resolve_overrides, ResolveResult, is_call_target_external
 from .scanner import scan_directory
 from .language_detect import detect_language
 from .parser import extract_full
@@ -44,7 +44,7 @@ class ExtractionOrchestrator:
         self.root_dir = root_dir
         self.queries = queries
 
-    def index_all(self, force: bool = False, parallel: bool = True) -> IndexResult:
+    def index_all(self, force: bool = False, parallel: bool = True, deep: bool = False) -> IndexResult:
         """Full index: scan all source files, parse, and store.
 
         If force=False:
@@ -59,7 +59,7 @@ class ExtractionOrchestrator:
         if parallel:
             from .parallel import ParallelExtractionOrchestrator
             par_orch = ParallelExtractionOrchestrator(self.root_dir)
-            return par_orch.index_all(self.queries, force=force)
+            return par_orch.index_all(self.queries, force=force, deep=deep)
 
         t0 = time.time()
         result = IndexResult()
@@ -170,6 +170,7 @@ class ExtractionOrchestrator:
             # Resolve cross-file call edges
             result.resolve_result = resolve_edges(self.queries)
             resolve_structural_edges(self.queries)
+            resolve_overrides(self.queries)
 
             # Populate unresolved_refs from unresolved/ambiguous edges
             self._populate_unresolved_refs(result.resolve_result)

@@ -40,6 +40,11 @@ EXPECTED_MEMBERS: set[str] = {
     # P9 分析
     "TEST_EDGE",
     "CONFIG_LINK",
+    # P26 v5.2.0 结构边
+    "OVERRIDES",
+    "INSTANTIATES",
+    "DECORATES",
+    "TYPE_REF",
 }
 
 
@@ -64,14 +69,18 @@ EXPECTED_VALUES: dict[str, str] = {
     "SIMILAR_TO": "similar_to",
     "TEST_EDGE": "test_edge",
     "CONFIG_LINK": "config_link",
+    "OVERRIDES": "overrides",
+    "INSTANTIATES": "instantiates",
+    "DECORATES": "decorates",
+    "TYPE_REF": "type_ref",
 }
 
 
 class TestMembers:
     """Verify all 20 members exist with correct values."""
 
-    def test_exactly_17_members(self):
-        assert len(EdgeKind) == 20
+    def test_exactly_24_members(self):
+        assert len(EdgeKind) == 24
 
     def test_all_expected_names_present(self):
         actual = set(EdgeKind.__members__.keys())
@@ -228,7 +237,7 @@ class TestIterationAndMembership:
 
     def test_iter_all_members(self):
         members = list(EdgeKind)
-        assert len(members) == 20
+        assert len(members) == 24
 
     def test_contains_by_name(self):
         assert "CALLS" in EdgeKind.__members__
