@@ -177,8 +177,8 @@ class QueryBuilder:
                 (id, kind, name, qualified_name, file_path, language,
                  start_line, end_line, signature, docstring,
                  visibility, is_abstract, is_exported, decorators,
-                 framework, updated_at)
-            VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?)
+                 framework, properties, body, updated_at)
+            VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?)
         """, (
             node["id"], node["kind"], node["name"], node["qualified_name"],
             node["file_path"], node["language"],
@@ -186,7 +186,8 @@ class QueryBuilder:
             node.get("signature"), node.get("docstring"),
             node.get("visibility"), node.get("is_abstract", 0),
             node.get("is_exported", 0), _to_json(node.get("decorators")),
-            node.get("framework"), _now_ms(),
+            node.get("framework"), node.get("properties", "{}"),
+            node.get("body"), _now_ms(),
         ))
 
     def insert_nodes(self, nodes: list[dict]):

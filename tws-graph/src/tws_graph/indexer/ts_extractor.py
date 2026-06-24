@@ -128,7 +128,10 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
                 is_method = p and p.kind() in ("class_body", "object")
 
                 if not is_method:
-                    nid = add_node("function", name, node, signature=sig)
+                    body_node = node.child_by_field_name("body")
+                    body_text = _node_text(body_node, source) if body_node else ""
+                    nid = add_node("function", name, node, signature=sig,
+                                   body=body_text)
 
                     if node_stack:
                         add_edge(node_stack[-1], nid, "contains", node.start_position().row + 1)
@@ -149,7 +152,8 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
                     name = _node_text(name_node, source)
                     sig = _build_signature(value_node, source, name)
 
-                    nid = add_node("function", name, value_node, signature=sig)
+                    nid = add_node("function", name, value_node, signature=sig,
+                                   body=_node_text(value_node, source))
 
                     if node_stack:
                         add_edge(node_stack[-1], nid, "contains", node.start_position().row + 1)
@@ -174,7 +178,10 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
                 name = _node_text(name_node, source)
                 sig = _build_signature(node, source, name)
 
-                nid = add_node("method", name, node, signature=sig)
+                body_node = node.child_by_field_name("body")
+                body_text = _node_text(body_node, source) if body_node else ""
+                nid = add_node("method", name, node, signature=sig,
+                               body=body_text)
 
                 if node_stack:
                     add_edge(node_stack[-1], nid, "contains", node.start_position().row + 1)
@@ -283,6 +290,22 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
                                  kind, node.start_position().row + 1,
                                  target_text=grpc_target)
 
+                    # Event emit detection
+                    emit_info = _detect_emit_ts(callee)
+                    if emit_info:
+                        kind, event_name = emit_info
+                        add_edge(caller_id, _hash_id(event_name, file_path),
+                                 kind, node.start_position().row + 1,
+                                 target_text=event_name)
+
+                    # Event listen detection
+                    listen_info = _detect_listen_ts(callee)
+                    if listen_info:
+                        kind, event_name = listen_info
+                        add_edge(caller_id, _hash_id(event_name, file_path),
+                                 kind, node.start_position().row + 1,
+                                 target_text=event_name)
+
         # --- Env access (process.env.KEY) ---
         elif node_kind == "member_expression":
             if node_stack:
@@ -316,6 +339,21 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
                         add_edge(caller_id, _hash_id(grpc_target, file_path),
                                  kind, node.start_position().row + 1,
                                  target_text=grpc_target)
+
+                    # Event emit/listen detection
+                    emit_info = _detect_emit_ts(callee)
+                    if emit_info:
+                        kind, event_name = emit_info
+                        add_edge(caller_id, _hash_id(event_name, file_path),
+                                 kind, node.start_position().row + 1,
+                                 target_text=event_name)
+
+                    listen_info = _detect_listen_ts(callee)
+                    if listen_info:
+                        kind, event_name = listen_info
+                        add_edge(caller_id, _hash_id(event_name, file_path),
+                                 kind, node.start_position().row + 1,
+                                 target_text=event_name)
 
         # --- Recurse into children ---
         _walk_children(node)
@@ -389,6 +427,18 @@ def _detect_grpc_ts(callee_name: str) -> tuple[str, str] | None:
     """Detect gRPC call patterns in TS/JS. Returns (edge_kind, service_name) or None."""
     from .grpc_detect import detect_typescript_grpc
     return detect_typescript_grpc(callee_name)
+
+
+def _detect_emit_ts(callee_name: str) -> tuple[str, str] | None:
+    """Detect event emit patterns in TS/JS. Returns (edge_kind, event_name) or None."""
+    from .event_detect import detect_ts_emit
+    return detect_ts_emit(callee_name)
+
+
+def _detect_listen_ts(callee_name: str) -> tuple[str, str] | None:
+    """Detect event listener patterns in TS/JS. Returns (edge_kind, event_name) or None."""
+    from .event_detect import detect_ts_listen
+    return detect_ts_listen(callee_name)
 
 
 # HTTP call detection (TypeScript/JavaScript)

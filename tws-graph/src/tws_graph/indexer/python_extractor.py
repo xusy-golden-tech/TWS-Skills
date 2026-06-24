@@ -142,8 +142,10 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
                 body_node = node.child_by_field_name("body")
                 doc = _get_docstring(body_node, source) if body_node else ""
 
+                body_text = _node_text(body_node, source) if body_node else ""
                 nid = add_node(kind, name, node,
-                               signature=sig, docstring=doc)
+                               signature=sig, docstring=doc,
+                               body=body_text)
 
                 if node_stack:
                     add_edge(node_stack[-1], nid, "contains", node.start_position().row + 1)
@@ -206,8 +208,19 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
                 if child.kind() in ("function_definition", "class_definition"):
                     walk(child)
                     # Tag the last added node with these decorators
-                    if result.nodes:
+                    if result.nodes and decs:
                         result.nodes[-1]["decorators"] = decs
+                        # Check for event listener decorators (e.g. @receiver, @on_click)
+                        from .event_detect import is_python_listen_decorator
+                        for dec in decs:
+                            if is_python_listen_decorator(dec):
+                                listener_id = result.nodes[-1]["id"]
+                                add_edge(listener_id,
+                                         _hash_id(dec, file_path),
+                                         "listens_on",
+                                         node.start_position().row + 1,
+                                         target_text=dec)
+                                break
                     return
 
         # --- Subscript expressions (for os.environ['KEY']) ---
@@ -270,6 +283,22 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
                         add_edge(caller_id, _hash_id(grpc_target, file_path),
                                  kind, node.start_position().row + 1,
                                  target_text=grpc_target)
+
+                    # Event emit detection
+                    emit_info = _detect_emit(callee_name, "python")
+                    if emit_info:
+                        kind, event_name = emit_info
+                        add_edge(caller_id, _hash_id(event_name, file_path),
+                                 kind, node.start_position().row + 1,
+                                 target_text=event_name)
+
+                    # Event listen detection
+                    listen_info = _detect_listen(callee_name, "python")
+                    if listen_info:
+                        kind, event_name = listen_info
+                        add_edge(caller_id, _hash_id(event_name, file_path),
+                                 kind, node.start_position().row + 1,
+                                 target_text=event_name)
 
         # --- Import statements ---
         elif node_kind == "import_statement":
@@ -413,6 +442,26 @@ def _detect_grpc(callee_name: str, language: str) -> tuple[str, str] | None:
         return detect_java_grpc(callee_name)
     elif language == "go":
         return detect_go_grpc(callee_name)
+    return None
+
+
+def _detect_emit(callee_name: str, language: str) -> tuple[str, str] | None:
+    """Detect event emit patterns. Returns (edge_kind, event_name) or None."""
+    from .event_detect import detect_python_emit, detect_ts_emit
+    if language == "python":
+        return detect_python_emit(callee_name)
+    elif language in ("typescript", "tsx"):
+        return detect_ts_emit(callee_name)
+    return None
+
+
+def _detect_listen(callee_name: str, language: str) -> tuple[str, str] | None:
+    """Detect event listener registration. Returns (edge_kind, event_name) or None."""
+    from .event_detect import detect_python_listen, detect_ts_listen
+    if language == "python":
+        return detect_python_listen(callee_name)
+    elif language in ("typescript", "tsx"):
+        return detect_ts_listen(callee_name)
     return None
 
 

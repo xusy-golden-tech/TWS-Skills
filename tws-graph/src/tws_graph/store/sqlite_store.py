@@ -74,8 +74,8 @@ _INSERT_NODES_SQL = (
     " (id, kind, name, qualified_name, file_path, language,"
     "  start_line, end_line, signature, docstring,"
     "  visibility, is_abstract, is_exported, decorators,"
-    "  framework, properties, updated_at)"
-    " VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?)"
+    "  framework, properties, body, updated_at)"
+    " VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?)"
 )
 
 _INSERT_EDGES_SQL = (
@@ -1144,6 +1144,7 @@ class SqliteStore(Store):
                 _to_json(n.get("decorators")),
                 n.get("framework"),
                 n.get("properties", "{}"),
+                n.get("body"),
                 now,
             ))
         return params

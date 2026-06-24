@@ -183,7 +183,12 @@ def visit_java(file_path: str, source: str, tree) -> ExtractionResult:
             c.kind() == "abstract" for c in _children(node)
         ) else 0
 
-        nid = add_node(mkind, name, node, signature=sig, is_abstract=is_abstract)
+        # Extract body text for clone detection
+        body_node = _find_child(node, "block")
+        body_text = _node_text(body_node, src_bytes) if body_node else ""
+
+        nid = add_node(mkind, name, node, signature=sig, is_abstract=is_abstract,
+                       body=body_text)
 
         # contains edge from parent class
         if node_stack:
@@ -194,9 +199,8 @@ def visit_java(file_path: str, source: str, tree) -> ExtractionResult:
         node_stack.append(nid)
 
         # Walk body for calls
-        body = _find_child(node, "block")
-        if body:
-            _extract_calls(body, nid, src_bytes)
+        if body_node:
+            _extract_calls(body_node, nid, src_bytes)
 
         name_stack.pop()
         node_stack.pop()

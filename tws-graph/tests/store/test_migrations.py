@@ -64,13 +64,13 @@ class TestMigrationRunnerMigrate:
 
         runner = MigrationRunner(conn)
         count = runner.migrate()
-        assert count == 7
+        assert count == 8
 
-        # Verify schema_versions has 7 rows
+        # Verify schema_versions has 8 rows
         rows = conn.execute("SELECT version, description FROM schema_versions ORDER BY version").fetchall()
-        assert len(rows) == 7
+        assert len(rows) == 8
         assert rows[0][0] == 1
-        assert rows[6][0] == 7
+        assert rows[7][0] == 8
 
         conn.close()
 
@@ -84,7 +84,7 @@ class TestMigrationRunnerMigrate:
 
         runner = MigrationRunner(conn)
         count1 = runner.migrate()
-        assert count1 == 7
+        assert count1 == 8
 
         count2 = runner.migrate()
         assert count2 == 0
@@ -122,12 +122,12 @@ class TestMigrationRunnerMigrate:
 
         runner = MigrationRunner(conn)
         count = runner.migrate()
-        # v4-v7 should be applied
-        assert count == 4
+        # v4-v8 should be applied
+        assert count == 5
 
         rows = conn.execute("SELECT version FROM schema_versions ORDER BY version").fetchall()
         versions = [r[0] for r in rows]
-        assert versions == [1, 2, 3, 4, 5, 6, 7]
+        assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
 
         conn.close()
 
@@ -487,8 +487,8 @@ class TestMigrationRunnerFindPending:
         pending = runner._find_pending(current=0)
         versions = [v for v, _n, _m in pending]
         assert versions == sorted(versions)
-        assert len(versions) == 7
-        assert versions == [1, 2, 3, 4, 5, 6, 7]
+        assert len(versions) == 8
+        assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
         conn.close()
 
 

@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     is_exported     INTEGER DEFAULT 0,
     decorators      TEXT,                   -- JSON array
     framework       TEXT,                   -- fastapi/express/spring (route nodes only)
+    properties      TEXT DEFAULT '{}',      -- JSON object for arbitrary properties
+    body            TEXT,                   -- function/method body source text
     updated_at      INTEGER NOT NULL
 );
 
