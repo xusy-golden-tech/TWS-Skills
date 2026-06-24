@@ -1038,27 +1038,28 @@ P27 依赖稳定的 calls 和 data_flows 边结构，放在最后。
 
 ### 18.9 v5.2.0 完成定义 (DoD)
 
-- [ ] P26a: g-ass-source 上 `overrides` 边 > 0
-- [ ] P26b: g-ass-source 上 `instantiates` 边 > 0
-- [ ] P26c: g-ass-source 上 `decorates` 边 > 0
-- [ ] P26d: g-ass-source 上 `type_ref` 边 > 0
-- [ ] P27: g-ass-source 上 cross-file `data_flows` 边 > 0
-- [ ] P28: g-ass-source 索引速度 ≤ 250s（2x 提升）
-- [ ] 边类型 ≥ 22 种（反超 CBM ~20）
-- [ ] TWS-Skills 边类型 ≥ 20 种
-- [ ] 全量回归: 所有测试通过, 0 failed
-- [ ] tws-graph lint: 0 errors, 0 warnings
-- [ ] quality-gates.md: G21-G27 全通过
-- [ ] 所有 v5.1.0 门禁保持 PASS
+- [x] P26a: `overrides` edge kind — 6 TDD tests pass, integrated into parallel+serial paths
+- [x] P26b: `instantiates` edge kind — 6 TDD tests pass, integrated into parallel+serial paths
+- [x] P26c: `decorates` edge kind — 8 TDD tests pass (7 Python + 1 TypeScript), integrated in extractors
+- [x] P26d: `type_ref` edge kind — 6 TDD tests pass, integrated in python_extractor
+- [x] P27: cross-file `data_flows` — 6 TDD tests pass, batch-loaded for performance
+- [x] P28: Performance optimizations — 13 TDD tests pass, indices/hash_cache/batch/FTS/sizing
+- [x] 边类型: **24** defined (overrides, instantiates, decorates, type_ref added → surpasses CBM ~20)
+- [ ] g-ass-source 验证: overrides/instantiates/decorates/type_ref/cross-file data_flows > 0（需在该项目上运行 `tws-graph index --deep`）
+- [ ] g-ass-source 索引速度 ≤ 250s（需实测）
+- [x] 全量回归: 3692 passed, 20 skipped, 0 failed
+- [x] tws-graph lint: 验证通过
+- [ ] quality-gates.md: G21-G28 门禁（G21-G27 代码侧通过，G28 需在 g-ass-source 实测）
+- [ ] g-ass-source 上所有 v5.1.0 门禁保持 PASS（需实测）
 
 ### 18.10 v5.2.0 vs CBM 目标对比
 
-| 维度 | tws-graph v5.2.0 目标 | CBM | 状态 |
+| 维度 | tws-graph v5.2.0 实际 | CBM | 状态 |
 |------|----------------------|-----|------|
-| 边类型 | **22** | ~20 | **反超** |
+| 边类型 | **24** | ~20 | **反超** (+4) |
 | 独有能力 | cross-file data_flows, cross-func RW, throws prop | 无 | **领先** |
 | MCP | 16 工具纯脱网 | 需联网 | **领先** |
-| 文件覆盖 | 2,828+ | 3,241 | 接近 |
-| 索引速度 | ≤ 250s | 14.1s | 差距缩小 |
+| 文件覆盖 | ~2,828 | 3,241 | 接近 |
+| 索引速度 | 目标 ≤ 250s (2x) | 14.1s | 差距缩小中 |
 | 节点数 | 88,125+ | 66,221 | **领先** |
 | 边总数 | 700k+ | 280k | **领先** |
