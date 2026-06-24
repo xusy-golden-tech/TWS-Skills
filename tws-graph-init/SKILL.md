@@ -114,13 +114,15 @@ Bash: tws-graph hooks install 2>&1
 tws-graph index    ← 增量索引（只处理修改过的文件）
 ```
 
-如果要强制全量重建：
+如果要强制全量重建（如索引版本升级、提取器扩展后想获得新增符号类型）：
 
 ```
 rm .tws/codegraph/index.db
 tws-graph index
 tws-graph snapshot initial
 ```
+
+> **索引版本升级**：tws-graph 提取器持续扩展。如果项目索引是较早版本构建的，增量 index 不会重建已有文件。全量重建后可获得新增的符号类型（如结构式语言的节点、新编程语言的符号）。不影响已有查询，只是让 `search` 覆盖面更广。
 
 ## Rationalization Prevention
 
