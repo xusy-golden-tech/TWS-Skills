@@ -11,8 +11,30 @@ from tree_sitter_language_pack import get_language, get_parser  # type: ignore[i
 from .base import ExtractionResult, ExtractionContext
 from .registry import get_extractor
 
+
+# =============================================================================
+# Parser pool — caches Language + Parser objects per worker process
+# =============================================================================
+
 # Languages that support variable-usage / dataflow analysis
 _DATAFLOW_LANGUAGES = frozenset({"python", "typescript", "tsx", "java"})
+
+# Per-process parser cache: avoids recreating Parser+Language for each file.
+# In parallel mode, each worker process has its own cache, so files of the
+# same language share Parser objects without cross-process conflicts.
+_parser_cache: dict[str, Parser] = {}
+
+
+def _get_cached_parser(lang_name: str) -> Parser:
+    """Get or create a tree-sitter Parser for the given language.
+
+    Reuses the same Parser instance for all files of the same language
+    within a worker process, avoiding repeated Language object creation
+    which is a measurable cost in high-throughput indexing.
+    """
+    if lang_name not in _parser_cache:
+        _parser_cache[lang_name] = _get_parser_for(lang_name)
+    return _parser_cache[lang_name]
 
 
 def _get_language_obj(lang_name: str) -> Language:
@@ -50,7 +72,7 @@ def extract_from_source(
 
     try:
         lang_obj = _get_language_obj(language)
-        parser_obj = _get_parser_for(language)
+        parser_obj = _get_cached_parser(language)
     except Exception as e:
         ctx.result.errors.append({
             "message": f"Failed to load language '{language}': {e}",
@@ -81,12 +103,8 @@ def extract_full(
 ) -> ExtractionResult:
     """Parse one source file and extract structural + dataflow symbols/edges.
 
-    Compared to ``extract_from_source``, this also runs variable-usage and
-    data-flow analysis on the same parse tree, avoiding a costly re-parse
-    in the post-processing phase.
-
-    Only applicable to languages in ``_DATAFLOW_LANGUAGES``; for other
-    languages, falls back to structural-only extraction.
+    Uses a cached Parser per language to avoid recreating Language objects
+    for every file.  Dataflow extraction shares the same parse tree (no re-parsing).
     """
     ctx = ExtractionContext(file_path, language)
 
@@ -100,7 +118,7 @@ def extract_full(
         return ctx.result
 
     try:
-        parser_obj = _get_parser_for(language)
+        parser_obj = _get_cached_parser(language)
     except Exception as e:
         ctx.result.errors.append({
             "message": f"Failed to load language '{language}': {e}",
