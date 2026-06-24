@@ -372,6 +372,48 @@ class TestVariableUsageExtractorPython:
         assert "var:x:nonlocal" in write_targets, \
             f"Nonlocal x should be annotated var:x:nonlocal, got {write_targets}"
 
+    # ------------------------------------------------------------------
+    # self/cls parameter filtering — Regression test for self false-positive
+    # ------------------------------------------------------------------
+
+    def test_method_self_not_in_write_set(self, parser, file_path):
+        """self parameter in method MUST NOT produce a var:self write edge.
+
+        Regression: self was incorrectly treated as a variable write,
+        contributing 4,428 false-positive writes (21% of all writes).
+        """
+        code = "class C:\n    def m(self, a):\n        self.x = 1\n        return a\n"
+        fid = _hash_id("test.py::C::m", file_path)
+        func_node_ids = {"test.py::C::m": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        writes = [e for e in edges if e["kind"] == EdgeKind.WRITES.value]
+        write_targets = {e["target_text"] for e in writes}
+        # var:a is a legit parameter write; var:x is NOT tracked via usage edges
+        assert "var:self" not in write_targets, \
+            f"self must NOT be in write_set (method binding param): {write_targets}"
+        assert "var:a" in write_targets, \
+            f"Parameter a should be in write_set: {write_targets}"
+
+    def test_classmethod_cls_not_in_write_set(self, parser, file_path):
+        """cls parameter in @classmethod MUST NOT produce a var:cls write edge."""
+        code = (
+            "class C:\n"
+            "    @classmethod\n"
+            "    def m(cls, a):\n"
+            "        return a\n"
+        )
+        fid = _hash_id("test.py::C::m", file_path)
+        func_node_ids = {"test.py::C::m": fid}
+        edges = self._extract(code, parser, file_path, func_node_ids)
+
+        writes = [e for e in edges if e["kind"] == EdgeKind.WRITES.value]
+        write_targets = {e["target_text"] for e in writes}
+        assert "var:cls" not in write_targets, \
+            f"cls must NOT be in write_set (method binding param): {write_targets}"
+        assert "var:a" in write_targets, \
+            f"Parameter a should be in write_set: {write_targets}"
+
     def test_global_variable(self, parser, file_path):
         """global x: the variable is detected, annotated as global."""
         code = "def foo():\n    global x\n    x = 1\n"

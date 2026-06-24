@@ -74,6 +74,7 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
     # Stack for building qualified names and contains edges
     name_stack: list[str] = []
     node_stack: list[str] = []
+    node_id_set: set[str] = set()  # all node IDs created so far — O(1) lookup
 
     def make_qualified(simple_name: str) -> str:
         parts = [file_path] + name_stack + [simple_name]
@@ -97,6 +98,7 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
             "is_exported": int(_is_exported(node)),
             **extra,
         })
+        node_id_set.add(nid)
         return nid
 
     def add_edge(source: str, target: str, kind: str, line: int, target_text: str | None = None):
@@ -192,7 +194,11 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
                                 base_qname = f"{file_path}::{base_name}"
                                 base_id = _hash_id(base_qname, file_path)
                                 edge_kind = "extends" if child.kind() == "extends_clause" else "implements"
-                                add_edge(nid, base_id, edge_kind, node.start_position().row + 1)
+                                # Only emit edge if base type is defined in this file
+                                if base_id in node_id_set:
+                                    add_edge(nid, base_id, edge_kind,
+                                             node.start_position().row + 1,
+                                             target_text=base_qname)
 
                 name_stack.append(name)
                 node_stack.append(nid)

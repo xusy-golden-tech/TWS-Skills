@@ -173,7 +173,9 @@ class VariableUsageExtractor:
             for child in _children(params_node):
                 if child.is_named() and child.kind() == "identifier":
                     name = _node_text(child, source)
-                    write_set[name] = child.start_position().row + 1
+                    # self/cls are method binding parameters, not real variable writes
+                    if name not in ("self", "cls"):
+                        write_set[name] = child.start_position().row + 1
 
         read_set: dict[str, int] = {}
         throw_set: dict[str, int] = {}

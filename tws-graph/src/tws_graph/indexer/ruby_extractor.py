@@ -84,6 +84,7 @@ def visit_ruby(file_path: str, content: str, tree) -> ExtractionResult:
 
     name_stack: list[str] = []
     node_stack: list[str] = []
+    node_id_set: set[str] = set()  # all node IDs created so far — O(1) lookup
     scope_kinds: list[str] = []
     file_id = ""  # Pre-declared; assigned after add_node is defined
 
@@ -107,6 +108,7 @@ def visit_ruby(file_path: str, content: str, tree) -> ExtractionResult:
             "end_line": ep.row + 1,
             **extra,
         })
+        node_id_set.add(nid)
         return nid
 
     def add_edge(source_id: str, target: str, kind: str, line: int, target_text: str | None = None):
@@ -164,9 +166,10 @@ def visit_ruby(file_path: str, content: str, tree) -> ExtractionResult:
                     kind = "implements" if ident_text == "include" else "extends"
                     target_qname = f"{file_path}::{const_name}"
                     target_id = _hash_id(target_qname, file_path)
-                    add_edge(source_id, target_id, kind,
-                             call_node.start_position().row + 1,
-                             target_text=const_name)
+                    if target_id in node_id_set:
+                        add_edge(source_id, target_id, kind,
+                                 call_node.start_position().row + 1,
+                                 target_text=target_qname)
             _walk_children(call_node)
             return
 

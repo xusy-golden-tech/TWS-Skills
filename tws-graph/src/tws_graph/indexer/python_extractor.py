@@ -87,6 +87,7 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
     # Stack for building qualified names and contains edges
     name_stack: list[str] = []   # [ClassName, NestedClass, ...]
     node_stack: list[str] = []   # node IDs for contains edges
+    node_id_set: set[str] = set()  # all node IDs created so far — O(1) lookup
 
     def make_qualified(simple_name: str) -> str:
         parts = [file_path] + name_stack + [simple_name]
@@ -109,6 +110,7 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
             "visibility": _visibility_from_name(simple_name),
             **extra,
         })
+        node_id_set.add(nid)
         return nid
 
     def add_edge(source: str, target: str, kind: str, line: int, target_text: str | None = None):
@@ -180,7 +182,14 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
                             base = _node_text(child, source)
                             base_qname = f"{file_path}::{base}"
                             base_id = _hash_id(base_qname, file_path)
-                            add_edge(nid, base_id, "extends", node.start_position().row + 1)
+                            # Only emit extends edge if base class is in same file
+                            # (node_id_set tracks all nodes defined in this file).
+                            # Cross-file / external bases are skipped — they would
+                            # produce dangling edges that can't be resolved statically.
+                            if base_id in node_id_set:
+                                add_edge(nid, base_id, "extends",
+                                         node.start_position().row + 1,
+                                         target_text=base_qname)
 
                 name_stack.append(name)
                 node_stack.append(nid)

@@ -207,6 +207,7 @@ def visit_kotlin(file_path: str, content: str, tree) -> ExtractionResult:
     # Scope stacks for qualified names
     name_stack: list[str] = []
     node_stack: list[str] = []
+    node_id_set: set[str] = set()  # all node IDs created so far — O(1) lookup
     scope_kinds: list[str] = []
 
     # Type environment — scoped {variable_name: type_name}
@@ -274,6 +275,7 @@ def visit_kotlin(file_path: str, content: str, tree) -> ExtractionResult:
             "end_line": ep.row + 1,
             **extra,
         })
+        node_id_set.add(nid)
         return nid
 
     def add_edge(source: str, target: str, kind: str, line: int, target_text: str | None = None):
@@ -468,7 +470,10 @@ def visit_kotlin(file_path: str, content: str, tree) -> ExtractionResult:
                             if base_name:
                                 base_qname = f"{file_path}::{base_name}"
                                 base_id = _hash_id(base_qname, file_path)
-                                add_edge(nid, base_id, "extends", node.start_position().row + 1)
+                                if base_id in node_id_set:
+                                    add_edge(nid, base_id, "extends",
+                                             node.start_position().row + 1,
+                                             target_text=base_qname)
                     else:
                         ut = _find_named_child(ds, "user_type")
                         if ut:
@@ -476,7 +481,10 @@ def visit_kotlin(file_path: str, content: str, tree) -> ExtractionResult:
                             if base_name:
                                 base_qname = f"{file_path}::{base_name}"
                                 base_id = _hash_id(base_qname, file_path)
-                                add_edge(nid, base_id, "implements", node.start_position().row + 1)
+                                if base_id in node_id_set:
+                                    add_edge(nid, base_id, "implements",
+                                             node.start_position().row + 1,
+                                             target_text=base_qname)
 
                 # Push scope
                 name_stack.append(name)

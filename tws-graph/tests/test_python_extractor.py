@@ -110,3 +110,57 @@ class TestPythonExtractorEdgeCases:
         # (tree-sitter is error-tolerant; errors here would be our own)
         assert all(e.get("severity") != "error" for e in result.errors
                    if "Failed to load" not in e.get("message", ""))
+
+    # ------------------------------------------------------------------
+    # extends edge validation — regression for dangling extends edges
+    # ------------------------------------------------------------------
+
+    def test_extends_same_file_inheritance_has_valid_target(self):
+        """Same-file class inheritance produces extends edge with non-empty target."""
+        code = "class Parent:\n    pass\n\nclass Child(Parent):\n    pass\n"
+        result = extract_from_source("test.py", code, "python")
+
+        extends = [e for e in result.edges if e["kind"] == "extends"]
+        assert len(extends) == 1, f"Expected 1 extends edge, got {len(extends)}"
+        assert extends[0]["target"] != "", \
+            "Same-file extends should have non-empty target (parent exists in nodes)"
+        assert "target_text" in extends[0], \
+            "Extends edge should set target_text for traceability"
+
+    def test_extends_external_builtin_is_skipped(self):
+        """Inheriting from Python builtins (Exception) should NOT produce extends edge."""
+        code = "class MyError(Exception):\n    pass\n"
+        result = extract_from_source("test.py", code, "python")
+
+        extends = [e for e in result.edges if e["kind"] == "extends"]
+        assert len(extends) == 0, \
+            "External/builtin base class should be skipped (no extends edge)"
+
+    def test_extends_cross_file_imported_base_is_skipped(self):
+        """Inheriting from an imported class (not same-file) should NOT produce extends edge."""
+        code = (
+            "from other_module import BaseService\n\n"
+            "class MyService(BaseService):\n    pass\n"
+        )
+        result = extract_from_source("test.py", code, "python")
+
+        extends = [e for e in result.edges if e["kind"] == "extends"]
+        assert len(extends) == 0, \
+            "Cross-file imported base class should be skipped (not in same file)"
+
+    def test_extends_multiple_inheritance(self):
+        """Multiple inheritance: same-file parent generates edge, imported base is skipped."""
+        code = (
+            "from library import Mixin\n\n"
+            "class Parent:\n    pass\n\n"
+            "class Child(Parent, Mixin):\n    pass\n"
+        )
+        result = extract_from_source("test.py", code, "python")
+
+        extends = [e for e in result.edges if e["kind"] == "extends"]
+        assert len(extends) == 1, f"Expected 1 extends edge (same-file only), got {len(extends)}"
+        # Only Parent (same-file) should produce an edge; Mixin (import) is skipped
+        assert "Parent" in extends[0].get("target_text", ""), \
+            "Only same-file parent should produce extends edge"
+        assert extends[0]["target"] != "", \
+            "Same-file Parent should have non-empty target"

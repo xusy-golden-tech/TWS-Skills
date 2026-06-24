@@ -41,6 +41,7 @@ def visit_java(file_path: str, source: str, tree) -> ExtractionResult:
 
     name_stack: list[str] = []
     node_stack: list[str] = []
+    node_id_set: set[str] = set()  # all node IDs created so far — O(1) lookup
 
     def make_qualified(simple_name: str) -> str:
         parts = [file_path] + name_stack + [simple_name]
@@ -66,6 +67,7 @@ def visit_java(file_path: str, source: str, tree) -> ExtractionResult:
         }
         record.update(extra)
         result.nodes.append(record)
+        node_id_set.add(nid)
         return nid
 
     def add_edge(source: str, target: str, kind: str, line: int, target_text: str | None = None):
@@ -120,9 +122,13 @@ def visit_java(file_path: str, source: str, tree) -> ExtractionResult:
             for child in _named_children(sc):
                 if child.kind() == "type_identifier":
                     super_name = _node_text(child, src_bytes)
-                    add_edge(nid, _hash_id(f"{file_path}::{super_name}", file_path),
-                             "extends", child.start_position().row + 1,
-                             f"{file_path}::{super_name}")
+                    super_qname = f"{file_path}::{super_name}"
+                    super_id = _hash_id(super_qname, file_path)
+                    # Only emit edge if superclass is defined in this file
+                    if super_id in node_id_set:
+                        add_edge(nid, super_id, "extends",
+                                 child.start_position().row + 1,
+                                 super_qname)
 
         # Implements
         si = _find_child(node, "super_interfaces")
@@ -132,9 +138,12 @@ def visit_java(file_path: str, source: str, tree) -> ExtractionResult:
                     for tc in _named_children(child):
                         if tc.kind() == "type_identifier":
                             iface_name = _node_text(tc, src_bytes)
-                            add_edge(nid, _hash_id(f"{file_path}::{iface_name}", file_path),
-                                     "implements", tc.start_position().row + 1,
-                                     f"{file_path}::{iface_name}")
+                            iface_qname = f"{file_path}::{iface_name}"
+                            iface_id = _hash_id(iface_qname, file_path)
+                            if iface_id in node_id_set:
+                                add_edge(nid, iface_id, "implements",
+                                         tc.start_position().row + 1,
+                                         iface_qname)
 
         # Contains edge for body
         body = _find_child(node, "class_body") or _find_child(node, "interface_body")

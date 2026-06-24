@@ -123,7 +123,9 @@ class TestRubyEdges:
 
     def test_extends_edges(self, result):
         extends = [e for e in result.edges if e["kind"] in ("extends", "implements")]
-        assert len(extends) > 0
+        # Enumerable and Forwardable are Ruby stdlib — skipped for dangling prevention.
+        # The fixture no longer produces extends edges.
+        assert len(extends) == 0
 
     def test_call_target_text(self, result):
         calls = [e for e in result.edges if e["kind"] == "calls"]
@@ -145,6 +147,30 @@ class TestRubyEdgeCases:
     def test_syntax_error(self):
         result = extract_from_source("bad.rb", "class Broken {", "ruby")
         assert isinstance(result.errors, list)
+
+    def test_same_file_extends_produces_edge(self):
+        """Module defined in same file that is extended should produce extends edge."""
+        code = (
+            "module Helper\n  def help; end\nend\n\n"
+            "class Service\n  extend Helper\nend\n"
+        )
+        result = extract_from_source("test.rb", code, "ruby")
+        extends = [e for e in result.edges if e["kind"] == "extends"]
+        assert len(extends) == 1, f"Same-file extend should produce 1 edge, got {len(extends)}"
+        assert extends[0]["target"] != "", "Same-file target should be non-empty"
+        assert "Helper" in extends[0].get("target_text", "")
+
+    def test_same_file_include_produces_implements_edge(self):
+        """Module defined in same file that is included should produce implements edge."""
+        code = (
+            "module Mixin\n  def mix; end\nend\n\n"
+            "class Worker\n  include Mixin\nend\n"
+        )
+        result = extract_from_source("test.rb", code, "ruby")
+        implements = [e for e in result.edges if e["kind"] == "implements"]
+        assert len(implements) == 1, f"Same-file include should produce 1 implements edge, got {len(implements)}"
+        assert implements[0]["target"] != "", "Same-file target should be non-empty"
+        assert "Mixin" in implements[0].get("target_text", "")
 
     def test_nodes_have_proper_ids(self, result):
         for node in result.nodes:
