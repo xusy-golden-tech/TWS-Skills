@@ -69,6 +69,75 @@ def _extract_decorators(decorated_node, source: bytes) -> list[str]:
     return decs
 
 
+# Built-in types that should NOT produce type_ref edges
+_BUILTIN_TYPES = frozenset({
+    "int", "str", "float", "bool", "list", "dict", "tuple", "set",
+    "bytes", "complex", "type", "object", "None", "NoneType",
+    "Any", "Optional", "Union", "Callable", "Iterable", "Iterator",
+    "Generator", "Coroutine", "Awaitable", "Protocol", "TypedDict",
+    "Literal", "Final", "ClassVar", "TypeVar", "TypeGuard",
+    "Self", "NoReturn", "Never", "TypeAlias",
+    # TypeScript/JavaScript
+    "number", "string", "boolean", "void", "undefined", "null",
+    "any", "unknown", "never", "object", "Array", "Map", "Set",
+    "Promise", "Record", "Partial", "Required", "Readonly",
+})
+
+
+def _extract_type_names(type_node, source: bytes) -> list[str]:
+    """Extract type names from a type annotation node, filtering built-ins.
+
+    Handles:
+      - ``type`` wrapper node (Python tree-sitter wraps annotations)
+      - Simple identifier types: ``int``, ``MyClass``
+      - Subscript types: ``List[str]`` → ``List``
+      - Attribute types: ``module.Type`` → ``module.Type``
+      - Generic types: ``Optional[str]`` → ``Optional``
+      - Union types: ``int | str`` → each part
+    """
+    if type_node is None:
+        return []
+
+    kind = type_node.kind()
+
+    # Python tree-sitter wraps type annotations in a ``type`` node
+    if kind == "type":
+        names = []
+        for child in _children(type_node):
+            if child.is_named():
+                names.extend(_extract_type_names(child, source))
+        return names
+
+    if kind == "identifier":
+        name = _node_text(type_node, source)
+        return [] if name in _BUILTIN_TYPES else [name]
+
+    if kind == "attribute":
+        return [_node_text(type_node, source)]
+
+    if kind in ("subscript", "generic_type"):
+        # Extract the base type (first child)
+        for child in _children(type_node):
+            if child.is_named():
+                return _extract_type_names(child, source)
+        return []
+
+    if kind in ("union_type", "binary_operator"):
+        names = []
+        for child in _children(type_node):
+            if child.is_named():
+                names.extend(_extract_type_names(child, source))
+        return names
+
+    if kind == "splat_type":
+        for child in _children(type_node):
+            if child.is_named():
+                return _extract_type_names(child, source)
+        return []
+
+    return []
+
+
 def _visibility_from_name(name: str) -> str:
     """Heuristic: names starting with _ are private, __ are name-mangled."""
     if name.startswith("__") and not name.endswith("__"):
@@ -146,6 +215,24 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
                 nid = add_node(kind, name, node,
                                signature=sig, docstring=doc,
                                body=body_text)
+
+                # Type annotation references (P26d)
+                param_node = node.child_by_field_name("parameters")
+                if param_node:
+                    for child in _children(param_node):
+                        if child.kind() in ("typed_parameter", "typed_default_parameter",
+                                             "list_splat_pattern", "dictionary_splat_pattern"):
+                            type_node = child.child_by_field_name("type")
+                            for type_name in _extract_type_names(type_node, source):
+                                add_edge(nid, _hash_id(type_name, file_path),
+                                         "type_ref", node.start_position().row + 1,
+                                         target_text=type_name)
+                # Return type
+                return_type_node = node.child_by_field_name("return_type")
+                for type_name in _extract_type_names(return_type_node, source):
+                    add_edge(nid, _hash_id(type_name, file_path),
+                             "type_ref", node.start_position().row + 1,
+                             target_text=type_name)
 
                 if node_stack:
                     add_edge(node_stack[-1], nid, "contains", node.start_position().row + 1)
