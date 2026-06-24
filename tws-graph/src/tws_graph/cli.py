@@ -27,12 +27,14 @@ from .indexer.scanner import scan_directory
 from .indexer.language_detect import detect_language
 from .pipeline.engine import PipelineEngine
 from .pipeline.passes import (
-    StatFilterPass,
-    ParseExtractPass,
-    NodeInsertPass,
-    EdgeInsertPass,
-    DataFlowPass,
+    ConfigLinkAnalysisPass,
     CrossFileResolvePass,
+    DataFlowPass,
+    EdgeInsertPass,
+    NodeInsertPass,
+    ParseExtractPass,
+    StatFilterPass,
+    TestEdgeAnalysisPass,
 )
 from .search.semantic import semantic_query
 from .store import SqliteStore
@@ -165,14 +167,17 @@ def _get_store(db_path: str) -> SqliteStore:
 
 
 def _build_pipeline_engine(store: SqliteStore) -> PipelineEngine:
-    """Build the standard 5-Pass indexing pipeline.
+    """Build the standard indexing pipeline.
 
     Passes (in dependency order):
-        1. StatFilterPass    — mtime/size filtering
-        2. ParseExtractPass  — tree-sitter parse + extract
-        3. NodeInsertPass    — write symbol nodes to Store
-        4. EdgeInsertPass    — write call/ref edges to Store
-        5. CrossFileResolvePass — resolve cross-file dangling edges
+        1. StatFilterPass       — mtime/size filtering
+        2. ParseExtractPass     — tree-sitter parse + extract
+        3. NodeInsertPass       — write symbol nodes to Store
+        4. EdgeInsertPass       — write call/ref edges to Store
+        5. DataFlowPass         — reads/writes/throws/data_flows
+        6. CrossFileResolvePass — resolve cross-file dangling edges
+        7. TestEdgeAnalysisPass — test<->source associations (test_edge)
+        8. ConfigLinkAnalysisPass — constant<->config key links (config_link)
     """
     engine = PipelineEngine(store=store)
     engine.register_pass(StatFilterPass())
@@ -181,6 +186,8 @@ def _build_pipeline_engine(store: SqliteStore) -> PipelineEngine:
     engine.register_pass(EdgeInsertPass())
     engine.register_pass(DataFlowPass())
     engine.register_pass(CrossFileResolvePass())
+    engine.register_pass(TestEdgeAnalysisPass())
+    engine.register_pass(ConfigLinkAnalysisPass())
     return engine
 
 
@@ -238,16 +245,150 @@ def _upsert_file_records(
 # index
 # ============================================================================
 
+def _run_test_edge_analysis(store: SqliteStore) -> int:
+    """Run TestEdgeAnalyzer and insert test_edge edges into the Store."""
+    try:
+        from .analysis.test_edges import TestEdgeAnalyzer
+        from .edges.kind import EdgeKind
+        analyzer = TestEdgeAnalyzer()
+        test_edges = analyzer.analyze(store)
+        if not test_edges:
+            return 0
+        try:
+            store.delete_edges_by_kind(EdgeKind.TEST_EDGE.value)
+        except Exception:
+            pass
+        edge_dicts = []
+        for te in test_edges:
+            try:
+                edge_dicts.append({
+                    "source": te.test_node_id, "target": te.source_node_id,
+                    "kind": EdgeKind.TEST_EDGE.value,
+                    "source_loc": te.test_file_path,
+                    "target_text": te.source_name,
+                    "provenance": "analysis",
+                    "properties": json.dumps(
+                        {"confidence": te.confidence, "derivation": te.derivation},
+                        ensure_ascii=False),
+                })
+            except Exception:
+                continue
+        if edge_dicts:
+            store.insert_edges(edge_dicts)
+        return len(edge_dicts)
+    except Exception:
+        return 0
+
+
+def _run_config_link_analysis(store: SqliteStore, root_dir: str) -> int:
+    """Run ConfigLinkAnalyzer and insert config_link edges into the Store."""
+    try:
+        from .analysis.config_links import ConfigLinkAnalyzer
+        from .edges.kind import EdgeKind
+        analyzer = ConfigLinkAnalyzer()
+        links = analyzer.analyze(store, project_root=root_dir)
+        if not links:
+            return 0
+        try:
+            store.delete_edges_by_kind(EdgeKind.CONFIG_LINK.value)
+        except Exception:
+            pass
+        edge_dicts = []
+        for link in links:
+            try:
+                edge_dicts.append({
+                    "source": link.node_id, "target": "",
+                    "kind": EdgeKind.CONFIG_LINK.value,
+                    "source_loc": link.file_path,
+                    "target_text": link.config_key,
+                    "provenance": "analysis",
+                    "properties": json.dumps(
+                        {"config_file": link.config_file, "config_key": link.config_key,
+                         "confidence": link.confidence, "derivation": link.derivation},
+                        ensure_ascii=False),
+                })
+            except Exception:
+                continue
+        if edge_dicts:
+            store.insert_edges(edge_dicts)
+        return len(edge_dicts)
+    except Exception:
+        return 0
+
+
 @app.command()
 def index(
     project_path: str = typer.Argument(".", help="项目根目录"),
     force: bool = typer.Option(False, "--force", help="强制全量重建索引（跳过 content-hash 检查）"),
+    serial: bool = typer.Option(False, "--serial", help="强制串行提取（调试/对比用，默认并行）"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径（默认: 项目目录/.tws/codegraph/index.db）"),
 ):
     """索引项目的所有源文件，构建代码关系图。"""
     root_dir = os.path.abspath(project_path)
     default_db = os.path.join(root_dir, DEFAULT_DB)
     db_path_resolved = db_path or default_db
+
+    if not serial:
+        # 并行路径（默认）: ExtractionOrchestrator + ProcessPoolExecutor
+        typer.echo(f"正在索引: {root_dir}")
+        db_dir = os.path.dirname(db_path_resolved)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        db = (DatabaseConnection.open(db_path_resolved)
+              if os.path.exists(db_path_resolved)
+              else DatabaseConnection.initialize(db_path_resolved))
+        queries = QueryBuilder(db.conn)
+        try:
+            orch = ExtractionOrchestrator(root_dir, queries)
+            result = orch.index_all(force=force, parallel=True)
+        finally:
+            db.close()
+        # Handle empty project (no source files found)
+        if result.files_indexed == 0 and result.files_skipped == 0:
+            has_no_files = any(
+                "No source files" in e.get("message", "")
+                for e in result.errors
+            )
+            if has_no_files:
+                from .indexer.registry import get_all_extensions
+                exts = sorted(get_all_extensions())
+                typer.echo(f"  警告: 未找到源文件 ({', '.join(exts)})", err=True)
+                raise typer.Exit(1)
+        store = _get_store(db_path_resolved)
+        skill_count = _index_skills(root_dir, store)
+        # P9 analysis: run test_edge + config_link after core indexing
+        if result.files_indexed > 0 or skill_count > 0:
+            result.edges_created += _run_test_edge_analysis(store)
+            result.edges_created += _run_config_link_analysis(store, root_dir)
+        if result.files_indexed > 0 or skill_count > 0:
+            store.rebuild_fts()
+            store.optimize()
+        typer.echo(f"  索引完成: {result.files_indexed} 个文件"
+                   f"{f' (+{result.files_skipped} 跳过)' if result.files_skipped else ''},"
+                   f" {result.nodes_created} 个符号,"
+                   f" {result.edges_created} 条关系,"
+                   f" 耗时 {result.duration_ms}ms")
+        if result.files_errored:
+            typer.echo(f"  {result.files_errored} 个文件解析失败", err=True)
+            for err in result.errors[:3]:
+                err_file = err.get("file_path", "")
+                err_msg = err.get("message", str(err))
+                typer.echo(f"    - {err_file}: {err_msg}", err=True)
+        stats = store.stats()
+        typer.echo(f"  数据库: {stats['node_count']} 节点, {stats['edge_count']} 边,"
+                   f" {stats['file_count']} 文件")
+        if result.resolve_result:
+            rr = result.resolve_result
+            total_checked = rr.resolved + rr.ambiguous + rr.unresolved
+            if total_checked > 0:
+                typer.echo(f"  边解析: {rr.resolved} 补全, {rr.ambiguous} 歧义, {rr.unresolved} 未解析"
+                           f" (共检查 {total_checked} 条)")
+        if skill_count > 0:
+            typer.echo(f"  技能索引: {skill_count} 个 TWS skill")
+        store.close()
+        return
+
+    # 串行路径（--serial）: PipelineEngine
 
     # 1. Scan source files
     files = scan_directory(root_dir)
@@ -271,11 +412,7 @@ def index(
     # 4. Manage file records (for StatFilterPass on subsequent runs)
     _upsert_file_records(store, ctx.files, root_dir)
 
-    # 5. Post-processing
-    store.rebuild_fts()
-    store.optimize()
-
-    # 6. Map pipeline context to output
+    # 5. Map pipeline context to output
     files_indexed = len(ctx.files)
     files_skipped = ctx.metadata.get("filtered_out", 0)
     nodes_created = ctx.metadata.get("node_count", 0)
@@ -284,6 +421,15 @@ def index(
         1 for results in ctx.parsed_results.values()
         if results.get("errors")
     )
+
+    # 6. Skill indexing (no internal FTS rebuild — caller controls)
+    store.flush()
+    skill_count = _index_skills(root_dir, store)
+
+    # 7. Post-processing (A1: only when files or skills changed)
+    if files_indexed > 0 or skill_count > 0:
+        store.rebuild_fts()
+        store.optimize()
 
     typer.echo(f"  索引完成: {files_indexed} 个文件"
                f"{f' (+{files_skipped} 跳过)' if files_skipped else ''},"
@@ -297,10 +443,6 @@ def index(
             err_file = err.get("file_path", "")
             err_msg = err.get("error", str(err))
             typer.echo(f"    - {err_file}: {err_msg}", err=True)
-
-    # 7. Skill indexing (uses store interface)
-    store.flush()
-    skill_count = _index_skills(root_dir, store)
 
     # 8. Database stats
     stats = store.stats()
@@ -357,9 +499,8 @@ def _index_skills(root_dir: str, store) -> int:
         if ref_edges:
             store.insert_edges(ref_edges)
 
-    # Flush buffered writes, then rebuild FTS after skill nodes
+    # Flush buffered writes (FTS rebuild is handled by caller)
     store.flush()
-    store.rebuild_fts()
 
     return count
 
@@ -793,18 +934,19 @@ def sync(
     engine = _build_pipeline_engine(store)
     ctx = engine.execute(files=list(files), root_dir=root_dir, force=False)
 
-    # 4. Manage file records for changed files
+    # 5. Manage file records for changed files
     _upsert_file_records(store, ctx.files, root_dir)
-
-    # 5. Post-processing
-    store.rebuild_fts()
-    store.optimize()
 
     # 6. Map pipeline context to output
     files_indexed = len(ctx.files)
     files_skipped = ctx.metadata.get("filtered_out", 0)
     nodes_created = ctx.metadata.get("node_count", 0)
     edges_created = ctx.metadata.get("edge_count", 0)
+
+    # 7. Post-processing (A1: only when files changed)
+    if files_indexed > 0:
+        store.rebuild_fts()
+        store.optimize()
 
     if files_indexed == 0:
         typer.echo(f"  同步完成: 无变化 ({files_skipped} 个文件无需更新)"

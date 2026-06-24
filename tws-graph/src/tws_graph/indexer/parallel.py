@@ -220,10 +220,7 @@ class ParallelExtractionOrchestrator:
             files_to_reindex.append(rel_path)
 
         if not files_to_reindex:
-            # No files to reindex, but still run post-processing
-            result.resolve_result = resolve_edges(queries)
-            queries.rebuild_fts()
-            result.framework_result = detect_frameworks(self.root_dir, queries)
+            # No files changed — skip all post-processing (A1: fast return)
             result.duration_ms = int((time.time() - t0) * 1000)
             return result
 
@@ -292,12 +289,13 @@ class ParallelExtractionOrchestrator:
             if file_result["errors"]:
                 result.errors.extend(file_result["errors"])
 
-        # Step 6: Post-processing
-        result.resolve_result = resolve_edges(queries)
-        _populate_unresolved_refs(queries, result.resolve_result)
-        _populate_import_unresolved(queries)
-        queries.rebuild_fts()
-        result.framework_result = detect_frameworks(self.root_dir, queries)
+        # Step 6: Post-processing (A1: only if files were actually indexed)
+        if result.files_indexed > 0:
+            result.resolve_result = resolve_edges(queries)
+            _populate_unresolved_refs(queries, result.resolve_result)
+            _populate_import_unresolved(queries)
+            queries.rebuild_fts()
+            result.framework_result = detect_frameworks(self.root_dir, queries)
 
         result.duration_ms = int((time.time() - t0) * 1000)
         return result

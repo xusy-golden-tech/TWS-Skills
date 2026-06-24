@@ -107,6 +107,7 @@ class TestIndexCommand:
         result = runner.invoke(app, [
             "index", str(empty_dir),
             "--db", db_path,
+            "--serial",
         ])
         assert result.exit_code == 1
         assert "警告" in result.output or "未找到源文件" in result.output
@@ -260,11 +261,12 @@ class TestPipelineParameterPassing:
 
         monkeypatch.setattr(PipelineEngine, "execute", fake_execute)
 
-        # Run with --force
+        # Run with --force and --serial (parallel path does not use PipelineEngine)
         runner.invoke(app, [
             "index", str(sample_py_project),
             "--db", db_path,
             "--force",
+            "--serial",
         ])
         assert any(captured_forces), "force=True should be passed to PipelineEngine"
 
@@ -284,14 +286,15 @@ class TestPipelineParameterPassing:
 
         monkeypatch.setattr(PipelineEngine, "execute", fake_execute)
 
-        # Run without --force
+        # Run without --force, --serial to use PipelineEngine path
         runner.invoke(app, [
             "index", str(sample_py_project),
             "--db", db_path,
+            "--serial",
         ])
-        # The index command now uses force=True for full re-index
-        # Actually, index currently defaults to force=False in old code.
-        # Let's verify the default behavior.
+        # The index command defaults to force=False
+        assert len(captured_forces) > 0
+        assert not any(captured_forces), "force should be False by default"
 
     def test_root_dir_passed_to_pipeline(self, runner, sample_py_project, db_path, monkeypatch):
         """Verify root_dir reaches PipelineEngine."""
@@ -312,6 +315,7 @@ class TestPipelineParameterPassing:
         runner.invoke(app, [
             "index", str(sample_py_project),
             "--db", db_path,
+            "--serial",
         ])
         assert len(captured_dirs) > 0
         assert str(sample_py_project) in captured_dirs[0]
@@ -335,6 +339,7 @@ class TestPipelineParameterPassing:
         runner.invoke(app, [
             "index", str(sample_py_project),
             "--db", db_path,
+            "--serial",
         ])
         assert len(captured_files) > 0
         # Should have found the sample.py file
@@ -514,10 +519,11 @@ class TestFileRecordManagement:
         py_file = sample_py_project / "fixtures" / "sample.py"
         os.unlink(py_file)
 
-        # Re-index
+        # Re-index (use --serial to go through PipelineEngine path with cleanup)
         r2 = runner.invoke(app, [
             "index", str(sample_py_project),
             "--db", db_path,
+            "--serial",
         ])
         # May warn about no source files, which is OK
         # The point is that deleted file records are cleaned up

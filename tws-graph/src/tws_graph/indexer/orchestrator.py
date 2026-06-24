@@ -165,20 +165,22 @@ class ExtractionOrchestrator:
                     "file_path": rel_path,
                     "severity": "error",
                 })
-        # Post-processing: resolve cross-file call edges
-        result.resolve_result = resolve_edges(self.queries)
+        # Post-processing (A1: only if files were actually indexed)
+        if result.files_indexed > 0:
+            # Resolve cross-file call edges
+            result.resolve_result = resolve_edges(self.queries)
 
-        # Populate unresolved_refs from unresolved/ambiguous edges
-        self._populate_unresolved_refs(result.resolve_result)
+            # Populate unresolved_refs from unresolved/ambiguous edges
+            self._populate_unresolved_refs(result.resolve_result)
 
-        # Populate unresolved_refs from import edges with externality classification
-        self._populate_import_unresolved()
+            # Populate unresolved_refs from import edges with externality classification
+            self._populate_import_unresolved()
 
-        # Rebuild FTS index (triggers handle incremental, but rebuild ensures consistency)
-        self.queries.rebuild_fts()
+            # Rebuild FTS index
+            self.queries.rebuild_fts()
 
-        # Framework detection
-        result.framework_result = detect_frameworks(self.root_dir, self.queries)
+            # Framework detection
+            result.framework_result = detect_frameworks(self.root_dir, self.queries)
 
         result.duration_ms = int((time.time() - t0) * 1000)
         return result
