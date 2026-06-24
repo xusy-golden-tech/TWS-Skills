@@ -1012,6 +1012,47 @@ class TestEdgeCases:
         store.close()
         store.close()  # should not raise
 
+    def test_close_flushes_buffered_edges(self, store):
+        """close() must flush buffered writes before clearing buffers."""
+        # Set auto_flush high so edges stay buffered
+        store._auto_flush_size = 10000
+
+        # Insert nodes first (required for edge FK validation)
+        n1 = _make_node(kind="function", name="test_func")
+        n2 = _make_node(kind="function", name="source_func")
+        store.insert_node(n1)
+        store.insert_node(n2)
+        store.flush()
+        assert store.get_node_by_id(n1["id"]) is not None
+        assert store.get_node_by_id(n2["id"]) is not None
+
+        # Insert edges below auto_flush threshold — purely buffered
+        edges = [
+            _make_edge(n1["id"], n2["id"], kind="test_edge",
+                       source_loc="test.py",
+                       target_text="source_func",
+                       provenance="analysis",
+                       properties='{"confidence":0.9}')
+            for _ in range(50)
+        ]
+        store.insert_edges(edges)
+        # Before close, edges are only in buffer (not yet flushed to DB)
+        # Note: count_edges reads from DB, not buffer
+
+        # close() must flush before clearing buffers
+        store.close()
+
+        # Reopen with fresh connection to verify persistence
+        import sqlite3
+        conn = sqlite3.connect(store._conn_mgr.db_path)
+        try:
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM edges WHERE kind='test_edge'")
+            count = c.fetchone()[0]
+            assert count == 50, f"Expected 50 edges after close, got {count}"
+        finally:
+            conn.close()
+
     def test_get_outgoing_empty_source(self, store):
         with pytest.raises(ValueError):
             store.get_outgoing_edges("")

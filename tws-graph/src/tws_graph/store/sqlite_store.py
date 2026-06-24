@@ -179,9 +179,18 @@ class SqliteStore(Store):
     # =========================================================================
 
     def close(self) -> None:
-        """Close the connection and release resources. Idempotent."""
+        """Close the connection and release resources. Idempotent.
+
+        Flushes any remaining buffered writes before closing so that
+        unpushed inserts are not silently discarded.
+        """
         if self._closed:
             return
+        # Flush before marking closed — flush() checks _closed
+        try:
+            self.flush()
+        except Exception:
+            pass  # best-effort — discard buffered data on flush failure
         self._closed = True
         self._node_buffer.clear()
         self._edge_buffer.clear()

@@ -23,7 +23,7 @@ from ..db.queries import QueryBuilder
 from .scanner import scan_directory
 from .language_detect import detect_language
 from .parser import extract_from_source
-from ..edge_resolver import resolve_edges, ResolveResult
+from ..edge_resolver import resolve_edges, ResolveResult, is_call_target_external
 from ..framework import detect_frameworks, FrameworkDetectionResult
 
 
@@ -351,9 +351,18 @@ def _module_in_project(module_name: str, source_file: str,
 
 def _populate_unresolved_refs(queries: QueryBuilder,
                                resolve_result: ResolveResult) -> None:
-    """Populate unresolved_refs table from edges with provenance 'unresolved'."""
+    """Populate unresolved_refs table from edges with provenance 'unresolved'.
+
+    Classifies each unresolved call target as external (stdlib / built-in /
+    third-party) or internal (possible index gap) via
+    :func:`is_call_target_external`.
+    """
     if not resolve_result or resolve_result.unresolved == 0:
         return
+
+    project_files = frozenset(
+        row["path"] for row in queries.get_all_files()
+    )
 
     rows = queries._exec("""
         SELECT e.*, n.file_path, n.language
@@ -363,14 +372,17 @@ def _populate_unresolved_refs(queries: QueryBuilder,
     """).fetchall()
 
     for row in rows:
+        target_text = row["target_text"] or ""
+        is_ext = is_call_target_external(target_text, project_files)
         ref = {
             "from_node_id": row["source"],
-            "reference_name": row["target_text"] or "",
+            "reference_name": target_text,
             "reference_kind": row["kind"] or "call",
             "line": 0,
             "col": 0,
             "file_path": row["file_path"] or "",
             "language": row["language"] or "",
+            "is_external": int(is_ext),
         }
         queries.insert_unresolved_ref(ref)
 

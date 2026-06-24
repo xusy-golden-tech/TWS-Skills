@@ -3,7 +3,11 @@
 import pytest
 from tws_graph.db.connection import DatabaseConnection
 from tws_graph.db.queries import QueryBuilder
-from tws_graph.edge_resolver import resolve_edges, ResolveResult
+from tws_graph.edge_resolver import (
+    resolve_edges,
+    ResolveResult,
+    is_call_target_external,
+)
 from tws_graph.indexer.orchestrator import ExtractionOrchestrator
 
 
@@ -83,3 +87,100 @@ def consumer(y):
         assert result.total_checked >= 0
         # Check that we have at least some resolved edges
         assert result.resolved + result.unresolved + result.ambiguous == result.total_checked
+
+
+# =============================================================================
+# Tests for is_call_target_external
+# =============================================================================
+
+
+class TestIsCallTargetExternal:
+    """Tests for unresolved call target external/internal classification."""
+
+    # ── Built-in types ────────────────────────────────────────────────
+
+    def test_str_method_is_external(self):
+        assert is_call_target_external("str::lower") is True
+
+    def test_list_method_is_external(self):
+        assert is_call_target_external("list::append") is True
+
+    def test_dict_method_is_external(self):
+        assert is_call_target_external("dict::get") is True
+
+    def test_int_is_external(self):
+        assert is_call_target_external("int::bit_length") is True
+
+    def test_max_is_builtin_external(self):
+        """Built-in 'max' is in _PYTHON_BUILTIN_TYPES and edge_resolver
+        would have resolved a project-defined 'max' — so unresolved 'max' is external."""
+        assert is_call_target_external("max") is True
+
+    # ── String / number literals ──────────────────────────────────────
+
+    def test_string_literal_receiver(self):
+        assert is_call_target_external('" "::join') is True
+        assert is_call_target_external("'x'::split") is True
+
+    def test_number_literal_receiver(self):
+        assert is_call_target_external("123::bit_length") is True
+
+    # ── Known external prefixes ───────────────────────────────────────
+
+    def test_tree_sitter_node(self):
+        assert is_call_target_external("node::child_by_field_name") is True
+
+    def test_parser_prefix(self):
+        assert is_call_target_external("Parser::parse") is True
+
+    # ── Stdlib modules ────────────────────────────────────────────────
+
+    def test_os_path_join(self):
+        assert is_call_target_external("os::path::join") is True
+
+    def test_json_dumps(self):
+        assert is_call_target_external("json::dumps") is True
+
+    def test_re_sub(self):
+        assert is_call_target_external("re::sub") is True
+
+    def test_sys_exit(self):
+        assert is_call_target_external("sys::exit") is True
+
+    def test_csv_dictreader(self):
+        assert is_call_target_external("csv::DictReader") is True
+
+    # ── Project files ─────────────────────────────────────────────────
+
+    def test_project_file_is_internal(self):
+        pfs = frozenset({"src/my_module.py", "tests/test_foo.py"})
+        assert is_call_target_external("src/my_module.py::my_func", pfs) is False
+
+    def test_non_project_file_is_external(self):
+        pfs = frozenset({"src/my_module.py"})
+        assert is_call_target_external("external_lib.py::some_func", pfs) is True
+
+    def test_project_file_calling_builtin_is_external(self):
+        """Even when the first segment is a project file, if the actual
+        target (last segment) is a built-in, it's external."""
+        pfs = frozenset({"src/my_module.py"})
+        assert is_call_target_external("src/my_module.py::int", pfs) is True
+
+    # ── Edge cases ────────────────────────────────────────────────────
+
+    def test_empty_target_text(self):
+        assert is_call_target_external("") is False
+        assert is_call_target_external(None, None) is False  # type: ignore[arg-type]
+
+    def test_single_segment_no_project_files(self):
+        """Without project_files, a bare name defaults to internal."""
+        assert is_call_target_external("ClassName::method") is False
+
+    def test_relative_import_prefix(self):
+        """Relative import prefix '.' should stay internal."""
+        pfs = frozenset({"src/my_module.py"})
+        assert is_call_target_external(".::sibling_func", pfs) is False
+
+    def test_unknown_first_segment(self):
+        """Unknown first segment with no project_files is internal (conservative)."""
+        assert is_call_target_external("UnknownClass::some_method") is False

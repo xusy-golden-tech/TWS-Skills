@@ -24,6 +24,53 @@ Algorithm:
 from __future__ import annotations
 from dataclasses import dataclass
 
+# ---------------------------------------------------------------------------
+# Known external call target prefixes
+# ---------------------------------------------------------------------------
+
+# Python built-in types whose method calls are always external
+_PYTHON_BUILTIN_TYPES: frozenset[str] = frozenset({
+    'str', 'list', 'dict', 'int', 'float', 'bool', 'tuple', 'set',
+    'frozenset', 'bytes', 'bytearray', 'object', 'type', 'range',
+    'slice', 'complex', 'memoryview', 'property', 'classmethod',
+    'staticmethod', 'super', 'enumerate', 'zip', 'filter', 'map',
+    'reversed', 'sorted', 'iter', 'next', 'any', 'all', 'sum',
+    'min', 'max', 'abs', 'round', 'pow', 'len', 'input', 'print',
+    'open', 'format', 'chr', 'ord', 'hex', 'oct', 'bin', 'repr',
+    'ascii', 'hash', 'id', 'isinstance', 'issubclass', 'callable',
+    'getattr', 'setattr', 'delattr', 'hasattr', 'dir', 'vars',
+    'globals', 'locals', 'compile', 'eval', 'exec',
+})
+
+# Tree-sitter / common library class prefixes whose methods are external
+_KNOWN_EXTERNAL_PREFIXES: frozenset[str] = frozenset({
+    'node', 'Parser', 'Query', 'Language', 'Tree',
+    'TreeCursor', 'Node', 'Point', 'Range', 'response',
+    'Request', 'Session', 'Client',
+})
+
+# Python stdlib modules — first segment that indicates external
+_STDLIB_MODULES: frozenset[str] = frozenset({
+    'os', 'sys', 're', 'json', 'math', 'random', 'datetime',
+    'collections', 'itertools', 'functools', 'pathlib', 'io',
+    'tempfile', 'shutil', 'glob', 'fnmatch', 'linecache',
+    'pickle', 'shelve', 'marshal', 'sysconfig',
+    'time', 'argparse', 'getopt', 'logging', 'getpass',
+    'curses', 'platform', 'errno', 'ctypes', 'struct',
+    'threading', 'multiprocessing', 'subprocess', 'signal',
+    'email', 'mailbox', 'mimetypes', 'base64', 'binascii',
+    'binhex', 'quopri', 'uu', 'csv', 'configparser',
+    'tomllib', 'netrc', 'plistlib', 'hashlib', 'hmac',
+    'secrets', 'statistics', 'string', 'textwrap', 'unicodedata',
+    'difflib', 'pprint', 'reprlib', 'enum', 'graphlib',
+    'fractions', 'decimal', 'random', 'statistics',
+    'sqlite3', 'gzip', 'bz2', 'lzma', 'zipfile', 'tarfile',
+    'typing', 'dataclasses', 'abc', 'atexit', 'contextlib',
+    'contextvars', 'copy', 'copyreg', 'gc', 'inspect',
+    'traceback', 'warnings', 'weakref', 'dataclasses',
+    'pytest', 'unittest', 'doctest',
+})
+
 
 @dataclass
 class ResolveResult:
@@ -139,3 +186,85 @@ def resolve_edges(queries) -> ResolveResult:
             result.unresolved += 1
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# External target classification (used by _populate_unresolved_refs)
+# ---------------------------------------------------------------------------
+
+def is_call_target_external(
+    target_text: str,
+    project_files: frozenset[str] | set[str] | None = None,
+) -> bool:
+    """Determine whether an unresolved call target_text is likely external.
+
+    An **external** target is a method/function from the Python standard
+    library, a built-in type, or a third-party package --- not a project
+    symbol whose index entry is simply missing.
+
+    Heuristics (evaluated in order, first match wins):
+      1. Empty target_text --- internal (cannot classify)
+      2. String literal receiver (" "::join) --- external
+      3. Number literal receiver --- external
+      4. Python built-in type prefix (str::lower, list::append) --- external
+      5. Known tree-sitter / common library class prefix --- external
+      6. Python stdlib module prefix (os::path::join) --- external
+      7. First segment looks like a project file --- check project_files
+      8. Default --- internal (conservative --- may be an index gap)
+    """
+    import os as _os
+
+    if not target_text:
+        return False
+
+    parts = target_text.split("::")
+    first = parts[0]
+
+    # 1. String literal receiver
+    if first.startswith('"') or first.startswith("'"):
+        return True
+
+    # 2. Number literal receiver
+    if first.lstrip("-").isdigit():
+        return True
+
+    # 3. Python built-in types
+    if first in _PYTHON_BUILTIN_TYPES:
+        return True
+
+    # 4. Known external library prefixes
+    if first in _KNOWN_EXTERNAL_PREFIXES:
+        return True
+
+    # 5. Python stdlib modules
+    if first in _STDLIB_MODULES:
+        return True
+
+    # 6. First segment looks like a file path --- check project_files
+    if project_files is not None:
+        has_file_ext = "." in first and any(
+            first.endswith(ext)
+            for ext in (
+                ".py", ".ts", ".tsx", ".js", ".jsx", ".java", ".go",
+                ".rs", ".kt", ".swift", ".c", ".cpp", ".cc", ".cxx",
+                ".cs", ".rb", ".php", ".scala", ".ex", ".exs", ".hs",
+                ".clj", ".cljs", ".cljc", ".edn",
+            )
+        )
+        if has_file_ext:
+            if first not in project_files:
+                return True
+            # First segment IS a project file — but the actual call target
+            # (last segment) may still be a built-in.  edge_resolver already
+            # tried to find it in the project and failed, so if the last
+            # segment matches a built-in type/function it is external.
+            last = parts[-1]
+            if last in _PYTHON_BUILTIN_TYPES:
+                return True
+            return False
+
+        if first.startswith(".") and _os.path.sep not in first:
+            return False
+
+    # 7. Default: unresolved but could be an internal index gap
+    return False
