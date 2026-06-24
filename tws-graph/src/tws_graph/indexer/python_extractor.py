@@ -210,12 +210,19 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
                     # Tag the last added node with these decorators
                     if result.nodes and decs:
                         result.nodes[-1]["decorators"] = decs
+                        decorated_id = result.nodes[-1]["id"]
+                        # Create decorates edges for each decorator
+                        for dec in decs:
+                            add_edge(decorated_id,
+                                     _hash_id(dec, file_path),
+                                     "decorates",
+                                     node.start_position().row + 1,
+                                     target_text=dec)
                         # Check for event listener decorators (e.g. @receiver, @on_click)
                         from .event_detect import is_python_listen_decorator
                         for dec in decs:
                             if is_python_listen_decorator(dec):
-                                listener_id = result.nodes[-1]["id"]
-                                add_edge(listener_id,
+                                add_edge(decorated_id,
                                          _hash_id(dec, file_path),
                                          "listens_on",
                                          node.start_position().row + 1,

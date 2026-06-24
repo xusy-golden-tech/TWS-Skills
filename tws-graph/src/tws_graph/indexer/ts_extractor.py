@@ -75,6 +75,7 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
     name_stack: list[str] = []
     node_stack: list[str] = []
     node_id_set: set[str] = set()  # all node IDs created so far — O(1) lookup
+    pending_decorators: list[str] = []  # decorators preceding the next definition
 
     def make_qualified(simple_name: str) -> str:
         parts = [file_path] + name_stack + [simple_name]
@@ -114,7 +115,14 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
         result.edges.append(edge)
 
     def walk(node):
+        nonlocal pending_decorators
         node_kind = node.kind()
+
+        # --- Decorator nodes (collected for next definition) ---
+        if node_kind == "decorator":
+            pending_decorators.append(_node_text(node, source))
+            _walk_children(node)
+            return
 
         # --- Function declarations ---
         if node_kind == "function_declaration":
@@ -132,6 +140,12 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
                     body_text = _node_text(body_node, source) if body_node else ""
                     nid = add_node("function", name, node, signature=sig,
                                    body=body_text)
+
+                    # Decorator edges
+                    for dec in pending_decorators:
+                        add_edge(nid, _hash_id(dec, file_path), "decorates",
+                                 node.start_position().row + 1, target_text=dec)
+                    pending_decorators.clear()
 
                     if node_stack:
                         add_edge(node_stack[-1], nid, "contains", node.start_position().row + 1)
@@ -183,6 +197,12 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
                 nid = add_node("method", name, node, signature=sig,
                                body=body_text)
 
+                # Decorator edges
+                for dec in pending_decorators:
+                    add_edge(nid, _hash_id(dec, file_path), "decorates",
+                             node.start_position().row + 1, target_text=dec)
+                pending_decorators.clear()
+
                 if node_stack:
                     add_edge(node_stack[-1], nid, "contains", node.start_position().row + 1)
 
@@ -201,6 +221,12 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
                 is_abstract = any(c.kind() == "abstract" for c in _children(node))
 
                 nid = add_node("class", name, node, is_abstract=int(is_abstract))
+
+                # Decorator edges
+                for dec in pending_decorators:
+                    add_edge(nid, _hash_id(dec, file_path), "decorates",
+                             node.start_position().row + 1, target_text=dec)
+                pending_decorators.clear()
 
                 if node_stack:
                     add_edge(node_stack[-1], nid, "contains", node.start_position().row + 1)
