@@ -24,7 +24,7 @@ from ..db.queries import QueryBuilder
 from .scanner import scan_directory
 from .language_detect import detect_language
 from .parser import extract_full
-from ..edge_resolver import resolve_edges, resolve_structural_edges, resolve_overrides, ResolveResult, is_call_target_external
+from ..edge_resolver import resolve_edges, resolve_structural_edges, resolve_overrides, resolve_instantiates, ResolveResult, is_call_target_external
 from ..framework import detect_frameworks, FrameworkDetectionResult
 
 
@@ -304,6 +304,7 @@ class ParallelExtractionOrchestrator:
             result.resolve_result = resolve_edges(queries)
             resolve_structural_edges(queries)
             resolve_overrides(queries)
+            resolve_instantiates(queries)
             _populate_unresolved_refs(queries, result.resolve_result)
             _populate_import_unresolved(queries)
             _propagate_throws(queries)

@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 
 from ..db.queries import QueryBuilder
-from ..edge_resolver import resolve_edges, resolve_structural_edges, resolve_overrides, ResolveResult, is_call_target_external
+from ..edge_resolver import resolve_edges, resolve_structural_edges, resolve_overrides, resolve_instantiates, ResolveResult, is_call_target_external
 from .scanner import scan_directory
 from .language_detect import detect_language
 from .parser import extract_full
@@ -171,6 +171,7 @@ class ExtractionOrchestrator:
             result.resolve_result = resolve_edges(self.queries)
             resolve_structural_edges(self.queries)
             resolve_overrides(self.queries)
+            resolve_instantiates(self.queries)
 
             # Populate unresolved_refs from unresolved/ambiguous edges
             self._populate_unresolved_refs(result.resolve_result)

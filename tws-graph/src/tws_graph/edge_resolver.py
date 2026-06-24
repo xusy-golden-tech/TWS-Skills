@@ -446,3 +446,86 @@ def resolve_overrides(queries) -> int:
         queries.insert_edges(edges_to_insert)
 
     return len(edges_to_insert)
+
+
+# Known constructor method names across languages
+_CONSTRUCTOR_NAMES = frozenset({"__init__", "__new__", "constructor", "<init>"})
+
+
+def resolve_instantiates(queries) -> int:
+    """Detect class instantiations from calls edges and create instantiates edges.
+
+    Scans all resolved ``calls`` edges where the target is a constructor method
+    (``__init__`` for Python, ``constructor`` for TypeScript, ``<init>`` for Java/Kotlin),
+    then looks up the parent class and creates an ``instantiates`` edge from the
+    caller to the class node.
+
+    Args:
+        queries: QueryBuilder instance connected to the index DB.
+
+    Returns:
+        Number of instantiates edges created.
+    """
+    # 1. Find calls edges targeting constructor methods
+    rows = queries._exec("""
+        SELECT e.source AS caller_id, e.target AS ctor_id, n.qualified_name
+        FROM edges e
+        JOIN nodes n ON e.target = n.id
+        WHERE e.kind = 'calls'
+          AND n.kind = 'method'
+          AND n.name IN ('__init__', '__new__', 'constructor', '<init>')
+    """).fetchall()
+
+    if not rows:
+        return 0
+
+    # 2. Build method qualified_name → class qualified_name mapping
+    # "file.py::ClassName::__init__" → class_qn = "file.py::ClassName"
+    ctor_to_class: dict[str, str] = {}
+    for row in rows:
+        qn = row["qualified_name"]
+        parts = qn.rsplit("::", 1)
+        if len(parts) == 2:
+            ctor_to_class[row["ctor_id"]] = parts[0]
+
+    if not ctor_to_class:
+        return 0
+
+    # 3. Build class qualified_name → class node_id mapping
+    class_rows = queries._exec(
+        "SELECT id, qualified_name FROM nodes WHERE kind = 'class'"
+    ).fetchall()
+    qn_to_class_id: dict[str, str] = {r["qualified_name"]: r["id"] for r in class_rows}
+
+    # 4. Create instantiates edges (deduplicate)
+    edges_to_insert: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    for row in rows:
+        caller_id = row["caller_id"]
+        ctor_id = row["ctor_id"]
+        class_qn = ctor_to_class.get(ctor_id)
+        if not class_qn:
+            continue
+
+        class_id = qn_to_class_id.get(class_qn)
+        if not class_id:
+            continue
+
+        edge_key = (caller_id, class_id)
+        if edge_key not in seen:
+            seen.add(edge_key)
+            edges_to_insert.append({
+                "source": caller_id,
+                "target": class_id,
+                "kind": "instantiates",
+                "source_loc": "",
+                "target_text": "",
+                "provenance": "heuristic",
+                "properties": "{}",
+            })
+
+    if edges_to_insert:
+        queries.insert_edges(edges_to_insert)
+
+    return len(edges_to_insert)
