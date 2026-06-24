@@ -280,6 +280,111 @@ def _run_test_edge_analysis(store: SqliteStore) -> int:
         return 0
 
 
+def _run_dataflow_analysis(store: SqliteStore, root_dir: str) -> int:
+    """Run VariableUsageExtractor and DataFlowExtractor and insert
+    reads, writes, throws, data_flows edges into the Store.
+
+    Processes all Python (.py), TypeScript (.ts/.tsx), and Java (.java)
+    files that have function/method nodes.  On a no-change incremental
+    run this function is skipped entirely (files_indexed == 0 guard
+    at the call site).
+    """
+    try:
+        from tree_sitter_language_pack import get_parser
+        from .indexer.extractors.usage import VariableUsageExtractor
+        from .indexer.extractors.dataflow import DataFlowExtractor
+        from .edges.kind import EdgeKind
+    except ImportError:
+        return 0
+
+    # Delete all existing dataflow edges (full rebuild per invocation)
+    dataflow_kinds = (
+        EdgeKind.READS, EdgeKind.WRITES, EdgeKind.THROWS, EdgeKind.DATA_FLOWS,
+    )
+    for kind in dataflow_kinds:
+        try:
+            store.delete_edges_by_kind(kind.value)
+        except Exception:
+            pass
+
+    ext_to_lang = {
+        ".py": "python",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".java": "java",
+    }
+    total_edges = 0
+
+    for file_record in store.get_all_files():
+        file_path = file_record.get("path", "")
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext not in ext_to_lang:
+            continue
+        language = ext_to_lang[ext]
+
+        # Collect function/method node IDs for this file
+        func_node_ids: dict[str, str] = {}
+        try:
+            for node in store.iter_nodes_by_file(file_path):
+                if node.get("kind") in ("function", "method"):
+                    qname = node.get("qualified_name", "")
+                    nid = node.get("id", "")
+                    if qname and nid:
+                        func_node_ids[qname] = nid
+        except Exception:
+            continue
+
+        if not func_node_ids:
+            continue
+
+        # Read and parse the file
+        full_path = os.path.join(root_dir, file_path)
+        try:
+            with open(full_path, "rb") as fh:
+                source_bytes = fh.read()
+        except OSError:
+            continue
+
+        try:
+            parser = get_parser(language)
+            tree = parser.parse(source_bytes.decode("utf-8", errors="replace"))
+        except Exception:
+            continue
+
+        all_edges: list[dict] = []
+
+        # Variable usage extractor → reads / writes / throws
+        try:
+            usage_extractor = VariableUsageExtractor()
+            all_edges.extend(
+                usage_extractor.extract(
+                    source_bytes, tree, func_node_ids, file_path, language,
+                )
+            )
+        except Exception:
+            pass
+
+        # Data flow extractor → data_flows (arg→param mappings)
+        try:
+            df_extractor = DataFlowExtractor()
+            all_edges.extend(
+                df_extractor.extract(
+                    source_bytes, tree, func_node_ids, file_path, language,
+                )
+            )
+        except Exception:
+            pass
+
+        if all_edges:
+            try:
+                store.insert_edges(all_edges)
+                total_edges += len(all_edges)
+            except Exception:
+                pass
+
+    return total_edges
+
+
 def _run_config_link_analysis(store: SqliteStore, root_dir: str) -> int:
     """Run ConfigLinkAnalyzer and insert config_link edges into the Store."""
     try:
@@ -356,8 +461,9 @@ def index(
                 raise typer.Exit(1)
         store = _get_store(db_path_resolved)
         skill_count = _index_skills(root_dir, store)
-        # P9 analysis: run test_edge + config_link after core indexing
+        # P9 analysis: run dataflow + test_edge + config_link after core indexing
         if result.files_indexed > 0 or skill_count > 0:
+            result.edges_created += _run_dataflow_analysis(store, root_dir)
             result.edges_created += _run_test_edge_analysis(store)
             result.edges_created += _run_config_link_analysis(store, root_dir)
         if result.files_indexed > 0 or skill_count > 0:
