@@ -12,10 +12,10 @@ import time
 from dataclasses import dataclass, field
 
 from ..db.queries import QueryBuilder
-from ..edge_resolver import resolve_edges, ResolveResult, is_call_target_external
+from ..edge_resolver import resolve_edges, resolve_structural_edges, ResolveResult, is_call_target_external
 from .scanner import scan_directory
 from .language_detect import detect_language
-from .parser import extract_from_source
+from .parser import extract_full
 from ..framework import detect_frameworks, FrameworkDetectionResult
 
 
@@ -122,7 +122,7 @@ class ExtractionOrchestrator:
                     if self.queries.get_file_by_path(rel_path):
                         self.queries.delete_file(rel_path)
 
-                    extraction = extract_from_source(rel_path, content, lang)
+                    extraction = extract_full(rel_path, content, lang)
 
                     # Store valid nodes
                     valid_nodes = [
@@ -169,6 +169,7 @@ class ExtractionOrchestrator:
         if result.files_indexed > 0:
             # Resolve cross-file call edges
             result.resolve_result = resolve_edges(self.queries)
+            resolve_structural_edges(self.queries)
 
             # Populate unresolved_refs from unresolved/ambiguous edges
             self._populate_unresolved_refs(result.resolve_result)

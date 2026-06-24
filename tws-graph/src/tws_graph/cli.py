@@ -461,10 +461,10 @@ def index(
                 raise typer.Exit(1)
         store = _get_store(db_path_resolved)
         skill_count = _index_skills(root_dir, store)
-        # P9 analysis: run dataflow + test_edge + config_link after core indexing
-        # Only when source files actually changed (skills don't affect code-level edges)
+        # P9 analysis: dataflow is now integrated into parallel extraction
+        # (extract_full in worker processes). test_edge + config_link still
+        # run as post-processing passes.
         if result.files_indexed > 0:
-            result.edges_created += _run_dataflow_analysis(store, root_dir)
             result.edges_created += _run_test_edge_analysis(store)
             result.edges_created += _run_config_link_analysis(store, root_dir)
         if result.files_indexed > 0 or skill_count > 0:

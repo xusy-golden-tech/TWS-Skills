@@ -22,8 +22,8 @@ from typing import Optional
 from ..db.queries import QueryBuilder
 from .scanner import scan_directory
 from .language_detect import detect_language
-from .parser import extract_from_source
-from ..edge_resolver import resolve_edges, ResolveResult, is_call_target_external
+from .parser import extract_full
+from ..edge_resolver import resolve_edges, resolve_structural_edges, ResolveResult, is_call_target_external
 from ..framework import detect_frameworks, FrameworkDetectionResult
 
 
@@ -81,7 +81,7 @@ def _process_file_batch(args: tuple) -> list[dict]:
                 content = f.read()
             fhash = hash_content(content)
 
-            extraction = extract_from_source(rel_path, content, lang)
+            extraction = extract_full(rel_path, content, lang)
 
             # Filter valid nodes (must have id, kind, name)
             valid_nodes = [
@@ -292,6 +292,7 @@ class ParallelExtractionOrchestrator:
         # Step 6: Post-processing (A1: only if files were actually indexed)
         if result.files_indexed > 0:
             result.resolve_result = resolve_edges(queries)
+            resolve_structural_edges(queries)
             _populate_unresolved_refs(queries, result.resolve_result)
             _populate_import_unresolved(queries)
             queries.rebuild_fts()

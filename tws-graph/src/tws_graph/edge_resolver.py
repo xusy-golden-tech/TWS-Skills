@@ -192,6 +192,67 @@ def resolve_edges(queries) -> ResolveResult:
 # External target classification (used by _populate_unresolved_refs)
 # ---------------------------------------------------------------------------
 
+def resolve_structural_edges(queries) -> ResolveResult:
+    """Resolve dangling extends/implements edges using target_text.
+
+    Unlike call edges, structural edges use simple qualified names:
+    ``FilePath::ClassName`` — just look up the class name across all nodes.
+
+    Args:
+        queries: QueryBuilder instance connected to the index DB.
+
+    Returns:
+        ResolveResult with counts.
+    """
+    result = ResolveResult()
+
+    dangling = queries.get_dangling_structural_edges()
+    result.total_checked = len(dangling)
+    if not dangling:
+        return result
+
+    # Build simple name → [node_id] index for class/interface nodes
+    name_index: dict[str, list[str]] = {}
+    node_file: dict[str, str] = {}
+    all_nodes = queries.get_all_callable_nodes()
+    for node in all_nodes:
+        if node["kind"] in ("class", "interface"):
+            simple_name = node["qualified_name"].rsplit("::", 1)[-1]
+            name_index.setdefault(simple_name, []).append(node["id"])
+            node_file[node["id"]] = node["file_path"]
+
+    for edge in dangling:
+        target_text = edge["target_text"]
+        if not target_text:
+            continue
+
+        # target_text looks like "file.py::ClassName" or just "ClassName"
+        simple_name = target_text.rsplit("::", 1)[-1]
+        source_file = (edge["source_loc"] or "").rsplit(":", 1)[0]
+
+        candidates = name_index.get(simple_name, [])
+        edge_rowid = edge["edge_rowid"]
+
+        if len(candidates) == 1:
+            queries.update_edge_target(edge_rowid, candidates[0], "resolved")
+            result.resolved += 1
+        elif len(candidates) > 1:
+            # Try same-file disambiguation
+            same_file = [cid for cid in candidates
+                         if node_file.get(cid) == source_file]
+            if len(same_file) == 1:
+                queries.update_edge_target(edge_rowid, same_file[0], "resolved")
+                result.resolved += 1
+            else:
+                queries.mark_edge_provenance(edge_rowid, "ambiguous")
+                result.ambiguous += 1
+        else:
+            queries.mark_edge_provenance(edge_rowid, "unresolved")
+            result.unresolved += 1
+
+    return result
+
+
 def is_call_target_external(
     target_text: str,
     project_files: frozenset[str] | set[str] | None = None,

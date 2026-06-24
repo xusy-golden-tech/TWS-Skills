@@ -451,6 +451,15 @@ class QueryBuilder:
             WHERE e.kind = 'calls' AND tgt.id IS NULL AND e.target_text IS NOT NULL
         """).fetchall()
 
+    def get_dangling_structural_edges(self) -> list[sqlite3.Row]:
+        """Return extends/implements edges whose target does not exist in nodes."""
+        return self._exec("""
+            SELECT e.rowid as edge_rowid, e.id as edge_id, e.source, e.target, e.target_text, e.kind, e.source_loc
+            FROM edges e
+            LEFT JOIN nodes tgt ON e.target = tgt.id
+            WHERE e.kind IN ('extends', 'implements') AND tgt.id IS NULL AND e.target_text IS NOT NULL
+        """).fetchall()
+
     def get_all_callable_nodes(self) -> list[sqlite3.Row]:
         """Return all nodes that can be call targets."""
         return self._exec("""

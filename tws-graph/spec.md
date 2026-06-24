@@ -1,355 +1,271 @@
-# tws-graph v3.0.0 Specification
+# tws-graph v4.0.0 Specification
 
-> 2026-06-23 | 全面赶超 codebase-memory-mcp
-> 设计原则：完全自研、离线可用、深度解耦、TDD 驱动
+> 2026-06-24 | 全面超越 CBM — 边类型补齐 + 性能追平
+> 原则：TDD 驱动、每边可验证、质量门禁先于数量
 
 ---
 
-## 一、背景与目标
+## 零、v3.0.0 收官验证（已完成）
 
-### 1.1 现状
+### 质量门禁全通过
 
-tws-graph v0.2.0 已完成 P0-P13 全部 phase 的实现（3377 tests, 110 test files），具备以下能力：
+| 门禁 | TWS-Skills | g-ass-source | 状态 |
+|------|-----------|-------------|------|
+| G1: self/cls writes = 0 | 0 | 0 | PASS |
+| G2: dangling extends < 10% | 0/77 (0%) | 0/177 (0%) | PASS |
+| G3: built-in types not in [internal] | 0 | 0 | PASS |
+| G4: test_edge 持久性 | 4,484→4,484 | 19,767→19,767 | PASS |
+| G5: 跨项目 | N/A | 2,810 files, 564,808 edges | PASS |
+| G7: 全量回归 | 3643 passed, 0 failed | N/A | PASS |
 
-| 能力 | 状态 |
-|------|------|
-| 26 语言 tree-sitter 提取（含节点+边） | 完成 |
-| 21 种 EdgeKind 边类型 | 完成 |
-| LSP 类型解析（Python/TS/Java/C/C++/C#/PHP/Ruby） | 完成 |
-| 数据流分析（VariableUsage + DataFlow + DataFlowPass） | 完成 |
-| 语义搜索（11-signal 排序） | 完成 |
-| 分析套件（DeadCode, EntryPoint, Complexity, TestEdges, ConfigLinks, GitDiff） | 完成 |
-| 跨服务检测（Route, Channel, gRPC） | 完成 |
-| IoC/Infra 索引（YAML, K8s, HCL, JSON, Kustomize） | 完成 |
-| Cypher 查询引擎 | 完成 |
-| 代码克隆检测（MinHash LSH） | 完成 |
-| InvalidationTracker + 增量更新 | 完成 |
-| SQLite 性能调优 + 基准测试套件 | 完成 |
-| Git hooks 自动同步 | 完成 |
-| 15 个 CLI 命令 | 完成 |
+### v4.0.0 最终与 CBM 的差距 (g-ass-source)
 
-### 1.2 与 CBM 的关键差距
-
-| 维度 | tws-graph v0.2.0 | CBM | 差距 |
+| 维度 | tws-graph v4.0.0 | CBM | 差距 |
 |------|-----------------|-----|------|
-| MCP 服务器 | **无** | 15 个 MCP 工具 | 致命 |
-| 索引速度 | 52.2s (串行) | 3.18s (20 workers) | 16x |
-| 语言数 | 26 | 158 | 6x |
-| MCP 工具数 | 0 | 15 | ∞ |
+| 边类型（有产出） | **15** | ~20 | -5 |
+| 索引速度 | 283s | 14.1s | 20x |
+| 文件覆盖 | 2,828 | 3,241 | -413 |
+| 节点数 | 88,125 | 66,221 | +21,904 |
+| 边总数 | 611,585 | 280,121 | +331,464 |
+| 语言数 | 26 (15 extractors) | 158 | 渐近追赶 |
 
-### 1.3 v3.0.0 目标
-
-**全面赶超 CBM**，补齐三个致命差距，成为最强的离线代码图引擎。
+**v4.0.0 核心成果：**
+- 边类型从 10 → 15（+50%），差距从 -10 → -5（缩小 50%）
+- 新增: implements, http_calls, env_accesses, grpc_server, grpc_client
+- config_link: TWS-Skills 上 5,196 edges
+- JS/JSX/MJS 文件纳入索引（+595 文件）
+- 数据流分析集成到主提取（消除 re-parsing）
 
 ---
 
-## 二、架构总览
+## 一、v4.0.0 目标
+
+**在边类型覆盖和索引速度上全面追平/超越 CBM，同时保持 tws-graph 独有的数据流分析优势。**
+
+三个 Phase：
 
 ```
-                    ┌──────────────────────────────┐
-                    │       MCP Server (P15)        │
-                    │   JSON-RPC 2.0 / stdio       │
-                    │   15+ tools / 3 resources     │
-                    └──────────┬───────────────────┘
-                               │
-              ┌────────────────┼────────────────┐
-              │                │                │
-     ┌────────▼──────┐  ┌──────▼──────┐  ┌─────▼─────┐
-     │ Search/Query  │  │  Analysis   │  │  Impact   │
-     │ FTS5/Cypher   │  │  Dead/Comp  │  │ Trace/Call│
-     └───────┬───────┘  └──────┬──────┘  └─────┬─────┘
-             │                 │                │
-     ┌───────▼─────────────────▼────────────────▼──────┐
-     │              Store Layer (SQLite)                │
-     │   SqliteStore + MemoryStore + QueryBuilder       │
-     └──────────────────────┬──────────────────────────┘
-                            │
-     ┌──────────────────────▼──────────────────────────┐
-     │         Parallel Pipeline (P14)                  │
-     │   20 workers × ProcessPoolExecutor              │
-     │   File → Parse → Extract → Dedup → Insert       │
-     └──────────────────────┬──────────────────────────┘
-                            │
-     ┌──────────────────────▼──────────────────────────┐
-     │          Extractors (26 languages)               │
-     │   Tree-sitter + LSP adapters + dataflow         │
-     └─────────────────────────────────────────────────┘
+P17: 边类型补齐（结构+跨服务）    → 10 → 16 种有产出边类型
+P18: 边类型补齐（动态+语义）      → 16 → 20 种有产出边类型
+P19: 性能追平                     → 235s → ≤ 30s（目标 8x，差距缩小到 2x 内）
+P20: 文件覆盖 + 独有能力巩固      → 文件数追平 CBM + data_flow 深化
 ```
 
 ---
 
-## 三、P14: 并行提取管线（性能）
+## 二、P17: 结构边类型补齐
 
-### 3.1 目标
+### 2.1 implements 边
 
-索引速度从 52.2s 降至 ≤ 4s（目标 13x 提升），在 4 核机器上不超过 CBM 的 1.5x。
+**问题**：Java/Kotlin/TypeScript/Python 接口实现关系未产出 `implements` 边。
 
-### 3.2 设计
+**实现范围**：
+- Python: `class Foo(Bar)` → 只查 ABC/Protocol 基类
+- Java: `class Foo implements Bar` → tree-sitter 已有此节点类型
+- TypeScript: `class Foo implements Bar` → tree-sitter 已有
+- Kotlin: `class Foo : Bar` where Bar is interface
 
-```
-File List
-    │
-    ▼
-┌─────────────────────────────────┐
-│  Stat Pre-filter (main process) │  ← mtime/size 跳过未改文件
-│  Content Hash Filter            │  ← SHA256 跳过相同内容
-└─────────────┬───────────────────┘
-              │ files_to_reindex
-              ▼
-┌─────────────────────────────────┐
-│  Chunk files → batches of 50    │
-└─────────────┬───────────────────┘
-              │
-              ▼
-┌─────────────────────────────────┐
-│  ProcessPoolExecutor(N=20)      │
-│  ┌─────┐ ┌─────┐ ... ┌─────┐   │
-│  │ W1  │ │ W2  │     │ W20 │   │
-│  │parse│ │parse│     │parse│   │
-│  │extr.│ │extr.│     │extr.│   │
-│  └──┬──┘ └──┬──┘     └──┬──┘   │
-│     │       │           │       │
-│     └───────┴─────┬─────┘       │
-│                   ▼             │
-│         ResultCollector         │
-│     (dedup + merge nodes/edges) │
-└─────────────┬───────────────────┘
-              │
-              ▼
-┌─────────────────────────────────┐
-│  Batch INSERT (main process)    │  ← 单线程写 SQLite
-│  Cross-file resolve             │
-│  FTS rebuild                    │
-└─────────────────────────────────┘
-```
+**关键技术**：在各语言 extractor 的 class 处理中添加接口检测。Python 中检查基类是否继承自 `abc.ABC` 或 `typing.Protocol`。
 
-### 3.3 关键技术决策
+### 2.2 http_calls 边
 
-1. **ProcessPoolExecutor 而非 ThreadPoolExecutor** — Python GIL 使线程对 CPU 密集任务无用
-2. **pickle 序列化 worker 结果** — 标准库，零外部依赖
-3. **批量写入** — worker 结果收集后在主进程批量 INSERT，避免 SQLite 并发写锁
-4. **chunk size = 50** — 平衡进程创建开销与负载均衡
-5. **worker count = min(20, cpu_count)** — 不超过 CBM 的并发度上限
+**问题**：HTTP 调用关系未跨文件连接。
 
-### 3.4 测试门禁
+**实现范围**：
+- Python: `requests.get/post/put/delete`, `httpx.*`, `urllib.request.*`
+- TypeScript/JavaScript: `fetch()`, `axios.*`
+- Java: `HttpClient.send`, `RestTemplate.*`
+- 边结构: source=调用者函数, target=URL 字符串节点（新建 url 类节点）
+
+### 2.3 grpc_service / grpc_client / grpc_server 边
+
+**问题**：gRPC 服务定义和调用关系未产出。
+
+**实现范围**：
+- `.proto` 文件: 解析 service 定义 → 创建 service 节点 + rpc 方法节点
+- Python: `grpc.insecure_channel` / `*_pb2_grpc.*Stub` 调用
+- TypeScript: `@grpc/grpc-js` 调用
+- 边: `grpc_service`(proto→impl), `grpc_client`(caller→stub), `grpc_server`(impl→proto)
+
+### 2.4 env_accesses 边
+
+**问题**：环境变量/配置访问未追踪。
+
+**实现范围**：
+- Python: `os.environ.get()`, `os.getenv()`, `environ[]`
+- TypeScript: `process.env.*`
+- Java: `System.getenv()`, `System.getProperty()`
+- 边: source=访问函数, target=环境变量名字符串节点
+
+### 2.5 测试门禁 (P17)
 
 | 门禁 | 标准 | 测试方法 |
 |------|------|---------|
-| 正确性 | 串行/并行结果一致（节点数、边数、文件数） | `test_parallel_correctness` |
-| 速度 | ≤ 4s on 200-file project | `test_benchmark_parallel_index` |
-| 错误隔离 | 单文件解析失败不影响其他文件 | `test_parallel_error_isolation` |
-| 空项目 | 0 文件不崩溃 | `test_parallel_empty_project` |
-| 单文件 | 1 文件正常完成 | `test_parallel_single_file` |
-| Worker 数上限 | workers ≤ 20 | `test_parallel_max_workers` |
-| 增量模式 | stat pre-filter 仍然生效 | `test_parallel_incremental` |
+| implements 边 > 0 | 有接口/ABC 的项目上产出 implements 边 | `test_implements_edges` |
+| http_calls 边 > 0 | 含 HTTP 调用代码的项目上产出 http_calls 边 | `test_http_calls_edges` |
+| grpc_* 边 > 0 | 含 .proto 的项目上产出三类 gRPC 边 | `test_grpc_edges` |
+| env_accesses 边 > 0 | 含环境变量访问的项目上产出 env_accesses 边 | `test_env_accesses_edges` |
+| 不引入回归 | 全部现有 3643 测试继续通过 | `pytest --tb=short` |
+| g-ass-source 10→14+ | 在 g-ass-source 上边类型 ≥ 14 种 | `SELECT COUNT(DISTINCT kind) FROM edges` |
 
 ---
 
-## 四、P15: MCP 服务器（离线原生）
+## 三、P18: 动态+语义边类型补齐
+
+### 3.1 emits / listens_on 边（事件系统）
+
+**问题**：事件发射/监听关系未追踪。
+
+**实现范围**：
+- Python: `signal.send()`, `@receiver`, `EventBus.emit`, `blinker.signal`
+- TypeScript: `EventEmitter.emit()`, `.on()`, `.addEventListener()`
+- 边: `emits`(emitter→event_name), `listens_on`(listener→event_name)
+
+### 3.2 similar_to 边（代码克隆）
+
+**问题**：代码克隆检测已有 MinHash LSH 实现但未产出边。
+
+**解决**：将 CloneDetectPass 的结果写入 edges 表（`kind='similar_to'`），阈值默认 0.7。在全量索引后运行（--deep flag）。
+
+### 3.3 config_link 边
+
+**问题**：ConfigLinkPass 已有但未产出边。
+
+**解决**：修复 ConfigLinkAnalysisPass，使其产出 `config_link` 边连接源码和配置文件（YAML/JSON/TOML）。
+
+### 3.4 测试门禁 (P18)
+
+| 门禁 | 标准 | 测试方法 |
+|------|------|---------|
+| emits/listens_on 边 | Python signal + TS EventEmitter 项目上产出 | `test_event_edges` |
+| similar_to 边 > 0 | --deep 模式下产出克隆边 | `test_clone_edges` |
+| config_link 边 > 0 | 含 YAML/JSON 配置的项目上产出 config_link 边 | `test_config_link_edges` |
+| g-ass-source 16→20 | 边类型达 20 种 | `SELECT COUNT(DISTINCT kind) FROM edges` |
+| 不引入回归 | 全部测试通过 | `pytest --tb=short` |
+
+---
+
+## 四、P19: 性能追平
 
 ### 4.1 目标
 
-实现完整的 MCP (Model Context Protocol) 服务器，纯 Python 自研，零外部依赖，完全离线可用。
+索引速度从 235s 降至 ≤ 30s（~8x 提升），在 g-ass-source 上与 CBM 的 14.1s 差距缩小到 2x 内。
 
-### 4.2 协议实现
+### 4.2 优化方向
 
-MCP 基于 JSON-RPC 2.0，在 stdio 上运行：
+**A. 文件扫描优化**：
+- 用 `os.scandir()` 替代 `os.walk()` (已有，确认)
+- 减少 stat 调用次数
+- 批量文件读取
 
-```
-┌───────────────────────────────────┐
-│         MCP Client (Claude)       │
-│     stdin/stdout JSON-RPC 2.0    │
-└───────────────┬───────────────────┘
-                │
-┌───────────────▼───────────────────┐
-│       MCP Server (tws-graph)      │
-│  ┌─────────────────────────────┐  │
-│  │  Transport (stdio)          │  │
-│  ├─────────────────────────────┤  │
-│  │  Router (method dispatch)   │  │
-│  ├─────────────────────────────┤  │
-│  │  Tool Registry              │  │
-│  │  Resource Registry          │  │
-│  ├─────────────────────────────┤  │
-│  │  Tool Handlers (15+ tools)  │  │
-│  │  Resource Handlers (3 res)  │  │
-│  └─────────────────────────────┘  │
-└───────────────────────────────────┘
-```
+**B. 提取器性能**：
+- Python extractor 热点分析（cProfile）
+- tree-sitter parse 复用（同语言文件共享 Language 对象）
+- 减少正则编译开销
 
-### 4.3 MCP 工具映射
+**C. 数据库写入优化**：
+- WAL 模式确认（已有）
+- 增大 batch INSERT 阈值（当前 10,000，可调至 50,000）
+- 减少事务开销（合并小事务）
 
-以下 15 个工具覆盖 CBM 的全部能力，并利用 tws-graph 的 Semantic Search + Cypher + Analysis Suite 超越其能力范围：
+**D. 并行度优化**：
+- 增加 worker 数的自适应调整
+- chunk size 优化（50→100 可能减少调度开销）
 
-| # | 工具名 | 对应 CLI | 描述 |
-|---|--------|---------|------|
-| 1 | `search_symbols` | `tws-graph search` | FTS5 全文搜索符号（支持 kind:, lang:, path: qualifier） |
-| 2 | `semantic_search` | `tws-graph search --semantic` | 11-signal 语义排序搜索 |
-| 3 | `get_code` | `tws-graph search` + Read | 获取符号源码片段（文件:行号范围） |
-| 4 | `get_dependencies` | `tws-graph calls --inbound` | 查调用者/被调用者依赖关系 |
-| 5 | `get_impact` | `tws-graph impact` | 变更影响范围分析 |
-| 6 | `trace_path` | `tws-graph trace` | 两个符号间调用路径追踪 |
-| 7 | `get_complexity` | `tws-graph analyze --run complexity` | 圈复杂度 + 认知复杂度 + Halstead |
-| 8 | `find_dead_code` | `tws-graph analyze --run dead-code` | 死代码检测（degree=0 非入口） |
-| 9 | `get_test_coverage` | `tws-graph analyze --run test-edges` | test↔source 关联矩阵 |
-| 10 | `get_entry_points` | `tws-graph analyze --run entry-point` | 入口点检测 |
-| 11 | `find_clones` | `tws-graph analyze --algorithm clone` | MinHash LSH 代码克隆检测 |
-| 12 | `get_git_diff_impact` | `tws-graph analyze --run git-diff` | Git diff 影响分析 |
-| 13 | `get_config_links` | `tws-graph analyze --run config-links` | 代码→配置文件关联 |
-| 14 | `query_cypher` | `tws-graph query` | Cypher 图查询（超越 CBM） |
-| 15 | `detect_cross_service` | `tws-graph analyze --run all` | 跨服务 HTTP/gRPC 检测 |
+**E. 低挂果实**：
+- 移除 resolve_edges 中的冗余 SQL 查询
+- `is_call_target_external` 的 project_files 查找优化（用 frozenset 已有）
+- FTS rebuild 延迟（索引结束后一次性）
 
-### 4.4 MCP 资源
+### 4.3 测试门禁 (P19)
 
-| 资源 URI | 描述 |
-|----------|------|
-| `tws://stats` | 项目索引统计（节点数、边数、语言分布） |
-| `tws://languages` | 支持的语言列表及索引状态 |
-| `tws://health` | 服务健康状态（索引就绪、DB 连接数） |
-
-### 4.5 启动方式
-
-```bash
-# 作为 MCP 服务器启动（stdio 传输）
-tws-graph serve
-
-# 指定项目目录
-tws-graph serve --root /path/to/project
-
-# 指定数据库路径
-tws-graph serve --db /path/to/index.db
-```
-
-### 4.6 MCP 配置（Claude Code settings.json）
-
-```json
-{
-  "mcpServers": {
-    "tws-graph": {
-      "command": "tws-graph",
-      "args": ["serve", "--root", "${workspaceFolder}"],
-      "env": {}
-    }
-  }
-}
-```
-
-### 4.7 测试门禁
-
-**单元测试：**
-
-| 门禁 | 标准 | 测试文件 |
+| 门禁 | 标准 | 测试方法 |
 |------|------|---------|
-| JSON-RPC parse | 正确解析 request/notification/response | `tests/mcp/test_protocol.py` |
-| Tool 注册 | 15 个工具全注册，无重复 | `tests/mcp/test_registry.py` |
-| Tool 调用 | 每个工具至少 1 个成功+失败场景 | `tests/mcp/test_tools.py` |
-| Resource 读取 | 3 个资源均可读取 | `tests/mcp/test_resources.py` |
-| initialize handshake | 完整 MCP 握手流程 | `tests/mcp/test_lifecycle.py` |
-| 错误处理 | 无效 method → -32601, 无效 params → -32602 | `tests/mcp/test_errors.py` |
-| 并发请求 | 顺序处理，不交错 | `tests/mcp/test_concurrency.py` |
-
-**集成测试场景：**
-
-| 场景 | 描述 |
-|------|------|
-| 端到端搜索流程 | initialize → tools/list → tools/call search_symbols → 验证 JSON 响应格式 |
-| 端到端分析流程 | tools/call get_impact → 验证影响范围 JSON → tools/call get_complexity → 验证复杂度值 |
-| 资源读取流程 | resources/list → resources/read tws://stats → 验证统计数据 |
-| 错误恢复 | 发送格式错误的 JSON → 验证返回 PARSE_ERROR → 后续正常请求不受影响 |
-| 大结果集 | 搜索返回 500+ 结果时不分页，完整返回 |
+| g-ass-source 索引速度 | ≤ 30s（8x 提升） | `time tws-graph index --force` |
+| TWS-Skills 索引速度 | ≤ 10s | `time tws-graph index --force` |
+| 0-change 增量 | < 100ms（不退化） | `time tws-graph index` |
+| 正确性 | 节点数/边数不变 | 对比优化前后 |
+| 不引入回归 | 3643+ 测试通过 | `pytest --tb=short` |
 
 ---
 
-## 五、P16: 版本规范化与文档同步
+## 五、P20: 文件覆盖 + 独有能力
 
-### 5.1 版本号
+### 5.1 文件扫描改进
 
-| 位置 | 当前值 | 新值 |
-|------|--------|------|
-| `pyproject.toml` | `0.2.0` | `3.0.0` |
-| `src/tws_graph/__init__.py` | `0.2.0` | `3.0.0` |
+**问题**：g-ass-source 上 tws-graph 扫描 2,810 文件，CBM 扫描 3,241（差 431 文件）。
 
-**理由**：P5-P15 累计新增 15+ 功能模块，版本号应反映功能成熟度。3.0.0 表示完整产品。
+**方向**：
+- 检查 scanner.py 的排除规则是否有过度过滤
+- 对比 CBM 多扫描的文件类型
+- 确保所有主流源码文件类型未被过滤
 
-### 5.2 Skill 文档更新
+### 5.2 独有能力深化
 
-| Skill | 更新内容 |
-|-------|---------|
-| `found-tws-graph-usage` | 全部 CLI 命令、21 种 EdgeKind、semantic search qualifier、MCP 工具参考 |
-| `tws-graph-init` | 更新完成标准、添加 MCP 配置步骤 |
-| `using-tws` | 2a 环境检查中添加 MCP 可用性提示 |
+**tws-graph 独有的能力，CBM 不具备**：
 
-### 5.3 测试门禁
+1. **data_flows 深化** — arg→param 精确映射（37,232 edges on g-ass-source），CBM 无此能力
+2. **reads/writes 精确追踪** — 变量级读写（300,683 reads+writes on g-ass-source），CBM 无此能力
+3. **throws 追踪** — 异常传播路径（4,531 on g-ass-source），CBM 无此能力
+4. **Cypher 查询** — 图数据库查询语言，比 MCP 工具更灵活
+
+**深化方向**：
+- data_flows 增加返回值和 yield 追踪
+- reads/writes 增加跨函数传播（当前仅限于函数内）
+- throws 增加跨函数异常传播链
+
+### 5.3 测试门禁 (P20)
 
 | 门禁 | 标准 |
 |------|------|
-| 版本一致性 | `tws-graph --version` 输出 `3.0.0`，与 `pyproject.toml` 一致 |
-| `tws-graph lint` | 0 errors, 0 warnings |
-| Skill 交叉引用 | 所有 skill 文件中的命令名在 CLI --help 中存在 |
+| g-ass-source 文件数 ≥ 3,000 | 文件覆盖 ≥ CBM 的 92% |
+| data_flows 不退化 | g-ass-source 上 ≥ 37,000 |
+| reads+writes 不退化 | g-ass-source 上 ≥ 300,000 |
+| 全量回归 | 全部测试通过 |
 
 ---
 
-## 六、集成测试场景（全量）
+## 六、集成测试场景
 
-### 6.1 性能回归门禁
-
-```
-场景: 200 文件项目全量索引
-  Given: TWS-Skills 项目（~200 源文件）
-  When: tws-graph index --force
-  Then: 耗时 ≤ 4s
-    And: 节点数与串行模式一致
-    And: 边数与串行模式一致
-```
-
-### 6.2 MCP + 图查询端到端
+### 6.1 边类型完整体验
 
 ```
-场景: 通过 MCP 完成一次完整的影响分析
-  Given: tws-graph serve 已启动
-  When: 发送 initialize request → 收到 capabilities
-    And: 发送 tools/call search_symbols {query: "kind:class Skill"}
-    And: 从结果中选择一个符号 ID
-    And: 发送 tools/call get_impact {symbol_id: "..."}
-  Then: 收到完整的影响范围 JSON
-    And: JSON 包含 depth 0/1/2 的影响节点
+场景: 开发者查询所有边类型
+  Given: g-ass-source 已全量索引
+  When: SELECT DISTINCT kind FROM edges
+  Then: 返回 ≥ 20 种边类型（从当前 10 种）
 ```
 
-### 6.3 MCP + 语义搜索 + 克隆检测端到端
+### 6.2 性能不退化
 
 ```
-场景: 语义搜索 + 克隆检测组合查询
-  Given: tws-graph serve 已启动
-  When: tools/call semantic_search {query: "user authentication handler"}
-    And: tools/call find_clones {threshold: 0.7}
-  Then: 两个查询结果可在 JSON 层面关联
-    And: 语义搜索结果包含相关性分数
+场景: 0-change 增量索引速度
+  Given: 索引已是最新
+  When: tws-graph index
+  Then: 耗时 < 100ms (actual work, excl. Python startup)
+```
+
+### 6.3 实用性验证
+
+```
+场景: 用边类型完成实用查询
+  Given: g-ass-source 已全量索引
+  When: 查询 HTTP 调用链: SELECT * FROM edges WHERE kind='http_calls'
+    And: 查询事件流: SELECT * FROM edges WHERE kind='emits' OR kind='listens_on'
+    And: 查询环境变量: SELECT * FROM edges WHERE kind='env_accesses'
+    And: 查询 gRPC: SELECT * FROM edges WHERE kind IN ('grpc_service', 'grpc_client', 'grpc_server')
+    And: 查询克隆: SELECT * FROM edges WHERE kind='similar_to'
+    And: 查询配置: SELECT * FROM edges WHERE kind='config_link'
+  Then: 每种边类型均有合理产出
 ```
 
 ### 6.4 全量回归
 
 ```
-场景: 全部 3377 现有测试通过
-  Given: 所有新模块已实现
+场景: 所有测试通过
+  Given: P17+P18+P19+P20 全部实现
   When: pytest --tb=short
-  Then: ALL PASSED, 0 FAILED
-```
-
-### 6.5 降级场景
-
-```
-场景: LSP 不可用时的优雅降级
-  Given: pyright 未安装
-  When: tws-graph index
-  Then: 索引正常完成（tree-sitter 模式）
-    And: LSP 相关警告输出到 stderr
-    And: 索引结果中包含 "lsp_unavailable" 标记
-
-场景: MCP 启动时索引不存在
-  Given: .tws/codegraph/index.db 不存在
-  When: tws-graph serve
-  Then: 返回错误 "index not found, run tws-graph index first"
-    And: 进程正常退出（exit code 1）
+  Then: 0 failed
 ```
 
 ---
@@ -357,29 +273,31 @@ tws-graph serve --db /path/to/index.db
 ## 七、实现顺序
 
 ```
-P14 (并行提取) ─┐
-                ├── 并行实施
-P15 (MCP 服务器) ┘
-                │
-                ▼
-P16 (版本/文档) ─┐
-                 ├── 顺序实施
-集成测试        ┘
+P17 (结构边) ──┐
+               ├── 顺序实施（P17 改 extractor，需回归）
+P18 (动态边) ──┘
+               │
+               ▼
+P19 (性能追平) ── 独立实施（优化不改逻辑）
+               │
+               ▼
+P20 (文件覆盖 + 独有能力) ── 收尾优化
 ```
 
-P14 和 P15 互不依赖，可并行实施。
-P14 完成后 P15 可利用其快速索引结果。
-P16 在所有功能稳定后执行。
+P17 和 P18 有依赖关系（都改 extractor），顺序实施避免冲突。
+P19 独立于 P17/P18（优化不改逻辑），可在 P18 后实施。
+P20 收尾，确认最终数据。
 
 ---
 
-## 八、完成定义 (Definition of Done)
+## 八、完成定义 (DoD)
 
-- [ ] `spec.md` 所有门禁通过
-- [ ] P14 并行提取: 7/7 测试通过 + benchmark 达标 (≤ 4s)
-- [ ] P15 MCP 服务器: 7/7 单元测试通过 + 5/5 集成场景通过
-- [ ] P16 版本 3.0.0: 3/3 门禁通过
-- [ ] 全量回归: 全部现有测试通过 (≥ 3377 passed)
-- [ ] 基准测试回归: 7 个 benchmark 无 REGRESSION
-- [ ] `tws-graph lint`: 0 errors, 0 warnings
-- [ ] 设计书同步: 所有修改有对应的设计文档
+- [ ] P17: 5/5 测试门禁通过，4 种新边类型有产出
+- [ ] P18: 5/5 测试门禁通过，边类型总数 ≥ 20
+- [ ] P19: 5/5 测试门禁通过，g-ass-source 索引 ≤ 30s
+- [ ] P20: 4/5 测试门禁通过，文件覆盖 ≥ 3,000
+- [ ] g-ass-source 边类型 ≥ 20 种
+- [ ] 全量回归: 0 failed
+- [ ] `tws-graph lint`: 0 errors
+- [ ] quality-gates.md 7 门禁全通过（不退化）
+- [ ] 设计书同步

@@ -4,7 +4,7 @@ from ..base import BaseExtractor, ExtractionContext
 
 
 class TypeScriptExtractor(BaseExtractor):
-    extensions = [".ts", ".tsx"]
+    extensions = [".ts", ".tsx", ".js", ".jsx", ".mjs"]
     tree_sitter_languages = ["typescript", "tsx"]
     language_name = "typescript"
 

@@ -127,17 +127,17 @@ class TestPythonExtractorEdgeCases:
         assert "target_text" in extends[0], \
             "Extends edge should set target_text for traceability"
 
-    def test_extends_external_builtin_is_skipped(self):
-        """Inheriting from Python builtins (Exception) should NOT produce extends edge."""
+    def test_extends_external_builtin_always_created(self):
+        """Inheriting from Python builtins (Exception) produces extends edge (resolved later)."""
         code = "class MyError(Exception):\n    pass\n"
         result = extract_from_source("test.py", code, "python")
 
         extends = [e for e in result.edges if e["kind"] == "extends"]
-        assert len(extends) == 0, \
-            "External/builtin base class should be skipped (no extends edge)"
+        assert len(extends) == 1, \
+            "External base class still produces extends edge (cross-file resolver handles it)"
 
-    def test_extends_cross_file_imported_base_is_skipped(self):
-        """Inheriting from an imported class (not same-file) should NOT produce extends edge."""
+    def test_extends_cross_file_imported_base_always_created(self):
+        """Inheriting from an imported class produces extends edge (cross-file resolver resolves it)."""
         code = (
             "from other_module import BaseService\n\n"
             "class MyService(BaseService):\n    pass\n"
@@ -145,11 +145,11 @@ class TestPythonExtractorEdgeCases:
         result = extract_from_source("test.py", code, "python")
 
         extends = [e for e in result.edges if e["kind"] == "extends"]
-        assert len(extends) == 0, \
-            "Cross-file imported base class should be skipped (not in same file)"
+        assert len(extends) == 1, \
+            "Cross-file base class should produce extends edge (structural resolver handles it)"
 
     def test_extends_multiple_inheritance(self):
-        """Multiple inheritance: same-file parent generates edge, imported base is skipped."""
+        """Multiple inheritance: ALL base classes produce edges (cross-file resolver handles later)."""
         code = (
             "from library import Mixin\n\n"
             "class Parent:\n    pass\n\n"
@@ -158,9 +158,7 @@ class TestPythonExtractorEdgeCases:
         result = extract_from_source("test.py", code, "python")
 
         extends = [e for e in result.edges if e["kind"] == "extends"]
-        assert len(extends) == 1, f"Expected 1 extends edge (same-file only), got {len(extends)}"
-        # Only Parent (same-file) should produce an edge; Mixin (import) is skipped
-        assert "Parent" in extends[0].get("target_text", ""), \
-            "Only same-file parent should produce extends edge"
-        assert extends[0]["target"] != "", \
-            "Same-file Parent should have non-empty target"
+        assert len(extends) == 2, f"Expected 2 extends edges (all base classes), got {len(extends)}"
+        target_texts = [e.get("target_text", "") for e in extends]
+        assert any("Parent" in t for t in target_texts), "Parent should have extends edge"
+        assert any("Mixin" in t for t in target_texts), "Mixin should have extends edge"

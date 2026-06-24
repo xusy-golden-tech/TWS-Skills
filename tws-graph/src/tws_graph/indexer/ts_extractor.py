@@ -154,6 +154,19 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
                     if node_stack:
                         add_edge(node_stack[-1], nid, "contains", node.start_position().row + 1)
 
+                # Module-level const/let/var declarations → variable nodes for config_link
+                elif len(name_stack) == 0:
+                    p = node.parent()
+                    if p and p.kind() in ("lexical_declaration", "variable_declaration"):
+                        name = _node_text(name_node, source)
+                        # Only index uppercase or ALL_CAPS identifiers as config candidates
+                        is_const = any(
+                            c.kind() == "const" for c in _children(p)
+                        )
+                        add_node("variable", name, node,
+                                 is_const=int(is_const),
+                                 properties=f'{{"is_const":{str(is_const).lower()}}}')
+
         # --- Method definitions ---
         elif node_kind == "method_definition":
             name_node = node.child_by_field_name("name")
@@ -195,10 +208,9 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
                                 base_id = _hash_id(base_qname, file_path)
                                 edge_kind = "extends" if child.kind() == "extends_clause" else "implements"
                                 # Only emit edge if base type is defined in this file
-                                if base_id in node_id_set:
-                                    add_edge(nid, base_id, edge_kind,
-                                             node.start_position().row + 1,
-                                             target_text=base_qname)
+                                add_edge(nid, base_id, edge_kind,
+                                         node.start_position().row + 1,
+                                         target_text=base_qname)
 
                 name_stack.append(name)
                 node_stack.append(nid)
@@ -254,6 +266,36 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
                     add_edge(caller_id, target_id, "calls", node.start_position().row + 1,
                              target_text=target_qname)
 
+                    # HTTP call detection (fetch, axios, etc.)
+                    http_info = _detect_http_call_ts(callee)
+                    if http_info:
+                        http_target = f"{http_info['library']}.{http_info['method']}"
+                        add_edge(caller_id, _hash_id(http_target, file_path),
+                                 "http_calls", node.start_position().row + 1,
+                                 target_text=http_target)
+
+                    # gRPC detection
+                    grpc_info = _detect_grpc_ts(callee)
+                    if grpc_info:
+                        kind, svc_name = grpc_info
+                        grpc_target = svc_name or callee
+                        add_edge(caller_id, _hash_id(grpc_target, file_path),
+                                 kind, node.start_position().row + 1,
+                                 target_text=grpc_target)
+
+        # --- Env access (process.env.KEY) ---
+        elif node_kind == "member_expression":
+            if node_stack:
+                # Fast-path: only inspect if object might start with "process"
+                obj_node = node.child_by_field_name("object")
+                if obj_node and obj_node.is_named():
+                    env_var = _detect_env_access_ts(node, source)
+                    if env_var:
+                        caller_id = node_stack[-1]
+                        add_edge(caller_id, _hash_id(env_var, file_path),
+                                 "env_accesses", node.start_position().row + 1,
+                                 target_text=env_var)
+
         # --- New expressions ---
         elif node_kind == "new_expression":
             func_node = node.child_by_field_name("constructor")
@@ -265,6 +307,15 @@ def visit_typescript(file_path: str, content: str, tree) -> ExtractionResult:
                     target_id = _hash_id(target_qname, file_path)
                     add_edge(caller_id, target_id, "calls", node.start_position().row + 1,
                              target_text=target_qname)
+
+                    # gRPC detection (new expressions like `new GreeterClient()`)
+                    grpc_info = _detect_grpc_ts(callee)
+                    if grpc_info:
+                        kind, svc_name = grpc_info
+                        grpc_target = svc_name or callee
+                        add_edge(caller_id, _hash_id(grpc_target, file_path),
+                                 kind, node.start_position().row + 1,
+                                 target_text=grpc_target)
 
         # --- Recurse into children ---
         _walk_children(node)
@@ -295,8 +346,82 @@ def _resolve_call_target(func_node, source: bytes) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Env access detection (TypeScript/JavaScript)
+# ---------------------------------------------------------------------------
+
+def _detect_env_access_ts(node, source: bytes) -> str | None:
+    """Detect process.env.KEY member expression and return the env var name."""
+    obj = node.child_by_field_name("object")
+    if not obj:
+        return None
+    # Fast string check: only member_expression or subscript_expression
+    obj_kind = obj.kind()
+    if obj_kind == "member_expression":
+        # Quick check: obj's first child should be "process"
+        first_child = obj.child_by_field_name("object")
+        if not first_child or _node_text(first_child, source) != "process":
+            return None
+        prop = node.child_by_field_name("property")
+        if prop:
+            return _node_text(prop, source)
+    elif obj_kind == "subscript_expression":
+        obj_text = _node_text(obj, source)
+        if obj_text == "process.env":
+            prop = node.child_by_field_name("property")
+            if prop:
+                return _node_text(prop, source)
+    return None
+
+
 def _resolve_qualified_target(callee_name: str, file_path: str) -> str:
     """Best-effort qualified name for a call target."""
     if "." in callee_name:
         return callee_name.replace(".", "::")
     return f"{file_path}::{callee_name}"
+
+
+# ---------------------------------------------------------------------------
+# gRPC call detection (TypeScript/JavaScript)
+# ---------------------------------------------------------------------------
+
+def _detect_grpc_ts(callee_name: str) -> tuple[str, str] | None:
+    """Detect gRPC call patterns in TS/JS. Returns (edge_kind, service_name) or None."""
+    from .grpc_detect import detect_typescript_grpc
+    return detect_typescript_grpc(callee_name)
+
+
+# HTTP call detection (TypeScript/JavaScript)
+# ---------------------------------------------------------------------------
+
+_TS_HTTP_METHODS: dict[str, set[str]] = {
+    "fetch": set(),  # global fetch(url), matches any call named "fetch"
+    "axios": {"get", "post", "put", "delete", "patch", "head", "options", "request"},
+    "got": {"get", "post", "put", "delete", "patch", "head"},
+    "node-fetch": set(),  # import as 'fetch' — caught by 'fetch'
+    "superagent": {"get", "post", "put", "delete", "patch", "head"},
+}
+
+# Pre-computed set for O(1) lookup
+_KNOWN_TS_HTTP_CALLABLES: frozenset[str] = frozenset(
+    f"{lib}.{method}"
+    for lib, methods in _TS_HTTP_METHODS.items()
+    for method in (methods if methods else ["__any__"])
+)
+
+
+def _detect_http_call_ts(callee_name: str) -> dict | None:
+    """Detect if a TS/JS call expression is an HTTP library call."""
+    # Global fetch
+    if callee_name == "fetch":
+        return {"library": "fetch", "method": "fetch"}
+
+    if "." not in callee_name:
+        return None
+
+    # Fast O(1) lookup
+    if callee_name in _KNOWN_TS_HTTP_CALLABLES:
+        lib, method = callee_name.split(".", 1)
+        return {"library": lib, "method": method}
+
+    return None

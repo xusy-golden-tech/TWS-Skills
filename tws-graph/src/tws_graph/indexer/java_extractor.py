@@ -140,10 +140,9 @@ def visit_java(file_path: str, source: str, tree) -> ExtractionResult:
                             iface_name = _node_text(tc, src_bytes)
                             iface_qname = f"{file_path}::{iface_name}"
                             iface_id = _hash_id(iface_qname, file_path)
-                            if iface_id in node_id_set:
-                                add_edge(nid, iface_id, "implements",
-                                         tc.start_position().row + 1,
-                                         iface_qname)
+                            add_edge(nid, iface_id, "implements",
+                                     tc.start_position().row + 1,
+                                     iface_qname)
 
         # Contains edge for body
         body = _find_child(node, "class_body") or _find_child(node, "interface_body")

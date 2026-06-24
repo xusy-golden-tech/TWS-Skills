@@ -174,7 +174,7 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
                 if node_stack:
                     add_edge(node_stack[-1], nid, "contains", node.start_position().row + 1)
 
-                # Extends edges
+                # Extends / implements edges
                 bases_node = node.child_by_field_name("superclasses")
                 if bases_node:
                     for child in _children(bases_node):
@@ -182,14 +182,15 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
                             base = _node_text(child, source)
                             base_qname = f"{file_path}::{base}"
                             base_id = _hash_id(base_qname, file_path)
-                            # Only emit extends edge if base class is in same file
-                            # (node_id_set tracks all nodes defined in this file).
-                            # Cross-file / external bases are skipped — they would
-                            # produce dangling edges that can't be resolved statically.
-                            if base_id in node_id_set:
-                                add_edge(nid, base_id, "extends",
-                                         node.start_position().row + 1,
-                                         target_text=base_qname)
+                            # Determine edge kind: ABC/Protocol → implements
+                            edge_kind = "extends"
+                            if (base == "ABC" or base == "ABCMeta"
+                                    or base.endswith("Protocol")
+                                    or base in ("Interface", "AbstractBase")):
+                                edge_kind = "implements"
+                            add_edge(nid, base_id, edge_kind,
+                                     node.start_position().row + 1,
+                                     target_text=base_qname)
 
                 name_stack.append(name)
                 node_stack.append(nid)
@@ -209,6 +210,31 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
                         result.nodes[-1]["decorators"] = decs
                     return
 
+        # --- Subscript expressions (for os.environ['KEY']) ---
+        elif node_kind == "subscript":
+            value_node = node.child_by_field_name("value")
+            # Fast-path: only inspect attribute subscripts (os.environ[...])
+            if value_node and value_node.kind() == "attribute" and node_stack:
+                subscript_node = node.child_by_field_name("subscript")
+                if subscript_node:
+                    env_var = _detect_environ_subscript(value_node, subscript_node, source)
+                    if env_var:
+                        caller_id = node_stack[-1]
+                        add_edge(caller_id, _hash_id(env_var, file_path),
+                                 "env_accesses", node.start_position().row + 1,
+                                 target_text=env_var)
+
+        # --- Module-level variable assignments (for config_link detection) ---
+        elif node_kind == "assignment":
+            # Only process at module level (outside classes/functions)
+            if len(name_stack) == 0:
+                lhs = node.child_by_field_name("left")
+                if lhs and lhs.kind() == "identifier":
+                    var_name = _node_text(lhs, source)
+                    if var_name and var_name.upper() == var_name and any(c.isalpha() for c in var_name):
+                        add_node("variable", var_name, node,
+                                 is_const=True, properties='{"is_const":true}')
+
         # --- Call expressions ---
         elif node_kind == "call":
             func_node = node.child_by_field_name("function")
@@ -220,6 +246,30 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
                     target_id = _hash_id(target_qname, file_path)
                     add_edge(caller_id, target_id, "calls", node.start_position().row + 1,
                              target_text=target_qname)
+
+                    # HTTP call detection
+                    http_info = _detect_http_call(callee_name, node, source)
+                    if http_info:
+                        http_target = f"{http_info['library']}.{http_info['method']}"
+                        add_edge(caller_id, _hash_id(http_target, file_path),
+                                 "http_calls", node.start_position().row + 1,
+                                 target_text=http_target)
+
+                    # Env access detection
+                    env_info = _detect_env_access(callee_name, node, source)
+                    if env_info:
+                        add_edge(caller_id, _hash_id(env_info, file_path),
+                                 "env_accesses", node.start_position().row + 1,
+                                 target_text=env_info)
+
+                    # gRPC detection
+                    grpc_info = _detect_grpc(callee_name, "python")
+                    if grpc_info:
+                        kind, svc_name = grpc_info
+                        grpc_target = svc_name or callee_name
+                        add_edge(caller_id, _hash_id(grpc_target, file_path),
+                                 kind, node.start_position().row + 1,
+                                 target_text=grpc_target)
 
         # --- Import statements ---
         elif node_kind == "import_statement":
@@ -285,8 +335,103 @@ def _resolve_call_target(func_node, source: bytes) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Env access detection
+# ---------------------------------------------------------------------------
+
+_KNOWN_ENV_FUNCTIONS = {
+    "os.getenv",
+    "os.environ.get",
+    "os.environ.__getitem__",
+}
+
+
+def _detect_env_access(callee_name: str, call_node, source: bytes) -> str | None:
+    """Detect env-var access via os.getenv / os.environ.get and return the var name."""
+    if callee_name in _KNOWN_ENV_FUNCTIONS:
+        # Try to extract the first string argument
+        args_node = call_node.child_by_field_name("arguments")
+        if args_node:
+            for child in _children(args_node):
+                if child.kind() == "string":
+                    text = _node_text(child, source)
+                    # Strip quotes
+                    return text[1:-1] if len(text) >= 2 else text
+    return None
+
+
+def _detect_environ_subscript(value_node, subscript_node, source: bytes) -> str | None:
+    """Detect os.environ['KEY'] style access."""
+    # value_node should be an attribute: os.environ
+    if value_node.kind() == "attribute":
+        parts = []
+        for child in _children(value_node):
+            if child.is_named():
+                parts.append(_node_text(child, source))
+        if ".".join(parts) == "os.environ":
+            # subscript_node is the key: 'KEY' or "KEY"
+            if subscript_node.kind() == "string":
+                text = _node_text(subscript_node, source)
+                return text[1:-1] if len(text) >= 2 else text
+    return None
+
+
 def _resolve_qualified_target(callee_name: str, file_path: str) -> str:
     """Best-effort qualified name for a call target."""
     if "." in callee_name:
         return callee_name.replace(".", "::")
     return f"{file_path}::{callee_name}"
+
+
+# ---------------------------------------------------------------------------
+# HTTP call detection
+# ---------------------------------------------------------------------------
+
+_HTTP_LIBRARIES: dict[str, set[str]] = {
+    "requests": {"get", "post", "put", "delete", "patch", "head", "options", "request"},
+    "httpx": {"get", "post", "put", "delete", "patch", "head", "options", "request", "stream"},
+    "urllib.request": {"urlopen"},
+    "aiohttp": {},  # ClientSession methods are harder to detect statically
+}
+
+# Pre-computed set of all known HTTP callable names for O(1) lookup
+_KNOWN_HTTP_CALLABLES: frozenset[str] = frozenset(
+    f"{lib}.{method}"
+    for lib, methods in _HTTP_LIBRARIES.items()
+    for method in (methods if methods else ["__any__"])
+)
+
+
+def _detect_grpc(callee_name: str, language: str) -> tuple[str, str] | None:
+    """Detect gRPC call patterns. Returns (edge_kind, service_name) or None."""
+    from .grpc_detect import detect_python_grpc, detect_typescript_grpc, detect_java_grpc, detect_go_grpc
+    if language == "python":
+        return detect_python_grpc(callee_name)
+    elif language in ("typescript", "tsx"):
+        return detect_typescript_grpc(callee_name)
+    elif language == "java":
+        return detect_java_grpc(callee_name)
+    elif language == "go":
+        return detect_go_grpc(callee_name)
+    return None
+
+
+def _detect_http_call(callee_name: str, call_node, source: bytes) -> dict | None:
+    """Detect if a call expression is an HTTP library call.
+
+    Returns dict with 'library' and 'method' keys, or None.
+    """
+    if "." not in callee_name:
+        return None
+
+    # Fast O(1) lookup against pre-computed set
+    if callee_name in _KNOWN_HTTP_CALLABLES:
+        lib, method = callee_name.split(".", 1)
+        return {"library": lib, "method": method}
+
+    # Check aiohttp (has arbitrary method names on ClientSession)
+    if callee_name.startswith("aiohttp."):
+        lib, method = callee_name.split(".", 1)
+        return {"library": lib, "method": method}
+
+    return None

@@ -481,10 +481,9 @@ def visit_kotlin(file_path: str, content: str, tree) -> ExtractionResult:
                             if base_name:
                                 base_qname = f"{file_path}::{base_name}"
                                 base_id = _hash_id(base_qname, file_path)
-                                if base_id in node_id_set:
-                                    add_edge(nid, base_id, "implements",
-                                             node.start_position().row + 1,
-                                             target_text=base_qname)
+                                add_edge(nid, base_id, "implements",
+                                         node.start_position().row + 1,
+                                         target_text=base_qname)
 
                 # Push scope
                 name_stack.append(name)
