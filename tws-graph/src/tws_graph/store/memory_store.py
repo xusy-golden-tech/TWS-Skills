@@ -463,6 +463,35 @@ class MemoryStore(Store):
         del self._outgoing[source_id]
         self._edge_count -= removed_count
 
+    def delete_edges_by_kind(self, kind: str) -> None:
+        """Delete all edges of a given *kind*."""
+        _check_closed(self._closed)
+        if not kind:
+            raise ValueError("kind must be non-empty")
+        sources_to_remove: list[str] = []
+        for src_id, edges in self._outgoing.items():
+            filtered = [
+                (tgt, e) for tgt, e in edges
+                if e.get("kind") != kind
+            ]
+            removed = len(edges) - len(filtered)
+            if removed > 0:
+                self._edge_count -= removed
+                for tgt, e in edges:
+                    if e.get("kind") == kind and tgt in self._incoming:
+                        self._incoming[tgt] = [
+                            (s, ie) for s, ie in self._incoming[tgt]
+                            if s != src_id or ie.get("id") != e.get("id")
+                        ]
+                        if not self._incoming[tgt]:
+                            del self._incoming[tgt]
+            if not filtered:
+                sources_to_remove.append(src_id)
+            else:
+                self._outgoing[src_id] = filtered
+        for src_id in sources_to_remove:
+            del self._outgoing[src_id]
+
     def count_edges(self) -> int:
         """Return the total number of edges."""
         _check_closed(self._closed)

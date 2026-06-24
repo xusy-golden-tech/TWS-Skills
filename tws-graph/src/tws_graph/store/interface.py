@@ -402,6 +402,20 @@ class Store(ABC):
         ...
 
     @abstractmethod
+    def delete_edges_by_kind(self, kind: str) -> None:
+        """Delete all edges of a given *kind*.
+
+        Pre-condition: *kind* is non-empty.
+        Post-condition: all edges with this kind are removed.
+        Exceptions: none (no-op when no edges match).  Raises ValueError if
+            *kind* is empty.
+        Performance:
+            SqliteStore: O(n) — DELETE with WHERE kind=? clause.
+            MemoryStore: O(n) — scans all outgoing edges.
+        """
+        ...
+
+    @abstractmethod
     def count_edges(self) -> int:
         """Return the total number of edges.
 

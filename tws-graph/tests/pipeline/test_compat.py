@@ -30,7 +30,7 @@ class TestExtractionOrchestratorCompat:
         orch.close()
 
     def test_constructor_registers_five_passes(self, sample_py_project, temp_db_path):
-        """After construction the internal engine has all 6 passes registered."""
+        """After construction the internal engine has all 8 passes registered."""
         from tws_graph.pipeline.compat import ExtractionOrchestrator
 
         db = DatabaseConnection.initialize(temp_db_path)
@@ -38,8 +38,8 @@ class TestExtractionOrchestratorCompat:
         try:
             orch = ExtractionOrchestrator(str(sample_py_project), queries)
             engine = orch._engine
-            assert engine.registered_count == 6, (
-                f"Expected 6 passes, got {engine.registered_count}: "
+            assert engine.registered_count == 8, (
+                f"Expected 8 passes, got {engine.registered_count}: "
                 f"{engine.registered_names}"
             )
             names = set(engine.registered_names)
@@ -50,6 +50,8 @@ class TestExtractionOrchestratorCompat:
                 "edge-insert",
                 "dataflow",
                 "cross-file-resolve",
+                "test-edge-analysis",
+                "config-link-analysis",
             }
             assert names == expected, f"Pass names mismatch: {names}"
         finally:

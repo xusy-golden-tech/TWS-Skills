@@ -64,6 +64,7 @@ EXPECTED_METHODS = {
     "get_edges_between",
     "update_edge_target",
     "update_edge_provenance",
+    "delete_edges_by_kind",
     "delete_edges_by_source",
     "count_edges",
     "iter_all_edges",
@@ -99,7 +100,7 @@ EXPECTED_METHODS = {
     "build_def_index",
 }
 
-EXPECTED_COUNT = 48
+EXPECTED_COUNT = 49
 
 # Methods that must NOT be abstract in the ABC
 EXCLUDED_METHODS = {"load_from"}
@@ -262,6 +263,7 @@ class TestPartiallyImplementedSubclassTypeError:
             def get_edges_between(self, source_id, target_id): return []
             def update_edge_target(self, edge_id, new_target, provenance="resolved"): pass
             def update_edge_provenance(self, edge_id, provenance): pass
+            def delete_edges_by_kind(self, kind): pass
             def delete_edges_by_source(self, source_id): pass
             def count_edges(self): return 0
             def iter_all_edges(self, batch_size=1000): return iter(())

@@ -6,6 +6,8 @@ from .node_insert import NodeInsertPass
 from .edge_insert import EdgeInsertPass
 from .cross_file_resolve import CrossFileResolvePass
 from .dataflow_pass import DataFlowPass
+from .test_edge_pass import TestEdgeAnalysisPass
+from .config_link_pass import ConfigLinkAnalysisPass
 
 __all__ = [
     "StatFilterPass",
@@ -14,4 +16,6 @@ __all__ = [
     "EdgeInsertPass",
     "CrossFileResolvePass",
     "DataFlowPass",
+    "TestEdgeAnalysisPass",
+    "ConfigLinkAnalysisPass",
 ]

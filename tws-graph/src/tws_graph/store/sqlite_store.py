@@ -477,6 +477,15 @@ class SqliteStore(Store):
             "DELETE FROM edges WHERE source = ?", (source_id,)
         )
 
+    def delete_edges_by_kind(self, kind: str) -> None:
+        """Delete all edges of a given *kind*."""
+        _check_closed(self._closed)
+        if not kind:
+            raise ValueError("kind must be non-empty")
+        self._conn_mgr.conn.execute(
+            "DELETE FROM edges WHERE kind = ?", (kind,)
+        )
+
     def count_edges(self) -> int:
         """Return the total number of edges."""
         _check_closed(self._closed)

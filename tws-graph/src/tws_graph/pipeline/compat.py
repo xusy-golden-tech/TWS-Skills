@@ -27,12 +27,14 @@ from typing import Optional
 
 from .engine import PipelineEngine
 from .passes import (
+    ConfigLinkAnalysisPass,
     CrossFileResolvePass,
     DataFlowPass,
     EdgeInsertPass,
     NodeInsertPass,
     ParseExtractPass,
     StatFilterPass,
+    TestEdgeAnalysisPass,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,7 +109,7 @@ class ExtractionOrchestrator:
         self._store = SqliteStore(db_path)
         self._engine = PipelineEngine(store=self._store)
 
-        # Register the 5 core Passes in dependency order.
+        # Register the core Passes in dependency order.
         # Dependencies are declared on each Pass class — the engine will
         # topological-sort them automatically.
         self._engine.register_pass(StatFilterPass())
@@ -116,6 +118,8 @@ class ExtractionOrchestrator:
         self._engine.register_pass(EdgeInsertPass())
         self._engine.register_pass(DataFlowPass())
         self._engine.register_pass(CrossFileResolvePass())
+        self._engine.register_pass(TestEdgeAnalysisPass())
+        self._engine.register_pass(ConfigLinkAnalysisPass())
 
     # ── db_path resolution + schema compatibility ─────────────────────────
 
