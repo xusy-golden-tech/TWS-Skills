@@ -3,7 +3,7 @@
 Design (P14):
 - ProcessPoolExecutor (not ThreadPoolExecutor — Python GIL)
 - Worker functions at module level (pickle requirement)
-- chunk_size = 50 files per batch
+- chunk_size = 100 files per batch
 - max_workers = min(20, cpu_count)
 - Main process writes SQLite — workers only parse/extract
 - Stat pre-filter runs in main process before dispatching to pool
@@ -140,7 +140,7 @@ class ParallelExtractionOrchestrator:
         self,
         root_dir: str,
         max_workers: int | None = None,
-        chunk_size: int = 50,
+        chunk_size: int = 100,  # P28: 50→100 reduce scheduling overhead
     ):
         self.root_dir = root_dir
         self.max_workers = min(max_workers or min(20, os.cpu_count() or 1), 20)
@@ -253,7 +253,7 @@ class ParallelExtractionOrchestrator:
 
         # Step 5: Batch INSERT into SQLite (main process, single-threaded)
         # Group files into write batches of 100 to reduce transaction overhead
-        _WRITE_BATCH_SIZE = 100
+        _WRITE_BATCH_SIZE = 500  # P28: 100→500 reduce transaction overhead
         for batch_start in range(0, len(all_file_results), _WRITE_BATCH_SIZE):
             batch_files = all_file_results[batch_start:batch_start + _WRITE_BATCH_SIZE]
 
@@ -309,9 +309,10 @@ class ParallelExtractionOrchestrator:
             _populate_import_unresolved(queries)
             _propagate_throws(queries)
             _propagate_cross_function_rw(queries)
+            _propagate_cross_file_dataflow(queries)
             if deep:
                 _detect_clones(queries)
-            queries.rebuild_fts()
+            # P28: FTS triggers keep index in sync — full rebuild is redundant
             result.framework_result = detect_frameworks(self.root_dir, queries)
 
         result.duration_ms = int((time.time() - t0) * 1000)
@@ -680,6 +681,189 @@ def _propagate_cross_function_rw(queries: QueryBuilder) -> None:
                         "source_loc": "",
                         "provenance": "cross-function",
                     })
+
+    if new_edges:
+        queries.insert_edges(new_edges)
+
+
+def _propagate_cross_file_dataflow(queries: QueryBuilder) -> None:
+    """Propagate data_flows across file boundaries through resolved calls edges.
+
+    For every cross-file call (caller in file A → callee in file B), connect
+    the caller's pre-call data sources to the caller's post-call data consumers
+    by threading through the callee's internal data flow.
+
+    Algorithm:
+      1. Find cross-file ``calls`` edges (source file ≠ target file)
+      2. For each such call, find:
+         a. data_flows in the caller flowing INTO the callee (target = callee_id)
+         b. data_flows in the callee flowing from params to returns
+         c. data_flows in the caller flowing OUT of the callee (source = callee_id)
+      3. Create cross-file data_flows: caller_source → caller_consumer
+         through the callee's internal flow
+
+    Created edges use ``provenance = 'cross-file'`` to distinguish from
+    intra-file ``tree-sitter`` and intra-project ``cross-function`` edges.
+
+    P28: All node lookups are batched into a single pre-load query to avoid
+    N+1 SQLite round-trips in the nested loops.
+    """
+    # 1. Find cross-file calls edges
+    cross_calls = queries._exec("""
+        SELECT e.source AS caller_id, e.target AS callee_id,
+               ns.file_path AS caller_file, nt.file_path AS callee_file
+        FROM edges e
+        JOIN nodes ns ON e.source = ns.id
+        JOIN nodes nt ON e.target = nt.id
+        WHERE e.kind = 'calls'
+          AND ns.file_path != nt.file_path
+    """).fetchall()
+
+    if not cross_calls:
+        return
+
+    # Build set of (caller, callee) pairs for fast lookup
+    cross_call_pairs: set[tuple[str, str]] = set()
+    callee_set: set[str] = set()
+    for row in cross_calls:
+        cross_call_pairs.add((row["caller_id"], row["callee_id"]))
+        callee_set.add(row["callee_id"])
+
+    # 2. Find data_flows edges where target is a cross-file callee (flows INTO call)
+    callee_list = list(callee_set)
+    flows_into_call = queries._exec(f"""
+        SELECT source, target, source_loc
+        FROM edges
+        WHERE kind = 'data_flows'
+          AND provenance = 'tree-sitter'
+          AND target IN ({','.join('?' for _ in callee_list)})
+    """, callee_list).fetchall()
+
+    # 3. Find data_flows edges where source is a cross-file callee (flows OUT of call)
+    flows_out_of_call = queries._exec(f"""
+        SELECT source, target, source_loc
+        FROM edges
+        WHERE kind = 'data_flows'
+          AND provenance = 'tree-sitter'
+          AND source IN ({','.join('?' for _ in callee_list)})
+    """, callee_list).fetchall()
+
+    # 4. Find data_flows within callee functions (param → return chains)
+    callee_internal_flows = queries._exec("""
+        SELECT source, target, source_loc
+        FROM edges
+        WHERE kind = 'data_flows'
+          AND provenance = 'tree-sitter'
+          AND source IN (
+            SELECT id FROM nodes WHERE qualified_name LIKE '%::param:%'
+          )
+          AND target IN (
+            SELECT id FROM nodes WHERE qualified_name LIKE '%::return:%'
+          )
+    """).fetchall()
+
+    if not flows_into_call or not flows_out_of_call:
+        return
+
+    # P28: Batch-load all relevant node qualified_names into a single dict.
+    # Collect all node IDs we'll need to look up.
+    needed_ids: set[str] = set()
+    for flow in callee_internal_flows:
+        needed_ids.add(flow["source"])
+        needed_ids.add(flow["target"])
+    for into in flows_into_call:
+        needed_ids.add(into["source"])
+        needed_ids.add(into["target"])
+    for out in flows_out_of_call:
+        needed_ids.add(out["source"])
+        needed_ids.add(out["target"])
+
+    # Batch query: fetch all needed node info at once
+    node_info: dict[str, tuple[str, str]] = {}  # id → (qualified_name, kind)
+    if needed_ids:
+        rows = queries._exec(f"""
+            SELECT id, qualified_name, kind
+            FROM nodes
+            WHERE id IN ({','.join('?' for _ in needed_ids)})
+        """, list(needed_ids)).fetchall()
+        for r in rows:
+            node_info[r["id"]] = (r["qualified_name"], r["kind"])
+
+    # Also batch-load function/method nodes by qualified_name for fast lookup
+    func_qn_to_id: dict[str, str] = {}
+    func_rows = queries._exec(
+        "SELECT id, qualified_name FROM nodes WHERE kind IN ('function', 'method')"
+    ).fetchall()
+    for r in func_rows:
+        func_qn_to_id[r["qualified_name"]] = r["id"]
+
+    # Build lookup: callee_id → [callee internal flows (param → return)]
+    callee_flows: dict[str, list[dict]] = {}
+    for flow in callee_internal_flows:
+        src_info = node_info.get(flow["source"])
+        if not src_info:
+            continue
+        src_qn = src_info[0]
+        # Extract function qualified_name: "file.py::func::param:x" → "file.py::func"
+        func_qn = "::".join(src_qn.rsplit("::", 1)[:-1])
+        if func_qn and func_qn in func_qn_to_id:
+            callee_flows.setdefault(func_qn_to_id[func_qn], []).append(flow)
+
+    # 5. Create cross-file data_flows edges
+    new_edges: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    for into in flows_into_call:
+        callee_id = into["target"]
+        src_info = node_info.get(into["source"])
+        if not src_info:
+            continue
+        src_qn = src_info[0]
+
+        # Extract function qualified name: strip last :: segment
+        # e.g. "file.py::func::param:x" → "file.py::func"
+        caller_qn = "::".join(src_qn.rsplit("::", 1)[:-1]) if "::" in src_qn else src_qn
+        if not caller_qn:
+            continue
+
+        caller_id = func_qn_to_id.get(caller_qn)
+        if not caller_id:
+            continue
+
+        if (caller_id, callee_id) not in cross_call_pairs:
+            continue
+
+        # Check if callee has internal param→return flows
+        if callee_id not in callee_flows:
+            continue
+
+        # Find matching out-of-call flows
+        for out in flows_out_of_call:
+            if out["source"] != callee_id:
+                continue
+
+            out_info = node_info.get(out["target"])
+            if not out_info:
+                continue
+            out_qn = out_info[0]
+            out_caller_qn = "::".join(out_qn.rsplit("::", 1)[:-1]) if "::" in out_qn else out_qn
+            if out_caller_qn != caller_qn:
+                continue
+
+            # Create cross-file edge: source of into → target of out
+            edge_key = (into["source"], out["target"])
+            if edge_key not in seen:
+                seen.add(edge_key)
+                source_loc = into["source_loc"] if "source_loc" in into.keys() else ""
+                new_edges.append({
+                    "source": into["source"],
+                    "target": out["target"],
+                    "kind": "data_flows",
+                    "source_loc": source_loc,
+                    "target_text": "",
+                    "provenance": "cross-file",
+                    "properties": "{}",
+                })
 
     if new_edges:
         queries.insert_edges(new_edges)

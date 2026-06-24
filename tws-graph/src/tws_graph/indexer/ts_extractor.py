@@ -4,9 +4,12 @@ Uses tree-sitter >= 0.25 method-based API.
 """
 
 import hashlib
+from functools import lru_cache
+
 from .parser import ExtractionResult
 
 
+@lru_cache(maxsize=4096)
 def _hash_id(qualified_name: str, file_path: str) -> str:
     raw = f"{file_path}:{qualified_name}"
     return hashlib.sha256(raw.encode()).hexdigest()[:32]

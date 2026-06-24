@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS edges (
     target_text TEXT,                       -- unhashed qualified name used to compute target (for post-processing)
     kind        TEXT NOT NULL,              -- calls/imports/extends/implements/references/contains
     source_loc  TEXT,                       -- "file:line:col"
-    provenance  TEXT DEFAULT 'tree-sitter'  -- tree-sitter | heuristic | resolved | unresolved | ambiguous
+    provenance  TEXT DEFAULT 'tree-sitter', -- tree-sitter | heuristic | resolved | unresolved | ambiguous
+    properties  TEXT DEFAULT '{}'           -- JSON metadata (e.g. similarity score for similar_to edges)
 );
 
 -- =============================================================================
@@ -72,6 +73,11 @@ CREATE INDEX IF NOT EXISTS idx_nodes_qualified ON nodes(qualified_name);
 CREATE INDEX IF NOT EXISTS idx_edges_source_kind ON edges(source, kind);
 CREATE INDEX IF NOT EXISTS idx_edges_target_kind ON edges(target, kind);
 CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
+-- P28 v5.2.0 performance indices
+CREATE INDEX IF NOT EXISTS idx_edges_provenance ON edges(provenance);
+CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);
+CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
+CREATE INDEX IF NOT EXISTS idx_edges_kind_provenance ON edges(kind, provenance);
 
 -- =============================================================================
 -- Unresolved references: cross-file / external calls not yet resolved

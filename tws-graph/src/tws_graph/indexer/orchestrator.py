@@ -179,9 +179,7 @@ class ExtractionOrchestrator:
             # Populate unresolved_refs from import edges with externality classification
             self._populate_import_unresolved()
 
-            # Rebuild FTS index
-            self.queries.rebuild_fts()
-
+            # P28: FTS triggers keep index in sync — full rebuild is redundant
             # Framework detection
             result.framework_result = detect_frameworks(self.root_dir, self.queries)
 
