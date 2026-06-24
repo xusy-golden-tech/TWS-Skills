@@ -58,6 +58,10 @@ app = typer.Typer(
 lsp_app = typer.Typer(help="LSP (Language Server Protocol) 集成管理")
 app.add_typer(lsp_app, name="lsp", help="LSP 集成管理")
 
+# MCP serve sub-command group
+serve_app = typer.Typer(help="MCP (Model Context Protocol) 服务器")
+app.add_typer(serve_app, name="serve", help="启动 MCP 服务器")
+
 
 @app.callback(invoke_without_command=True)
 def _version_callback(
@@ -1834,6 +1838,72 @@ def _print_lsp_setup_table(results: dict) -> None:
             f"{detail_str:<{path_width}}"
         )
         typer.echo(row)
+
+
+# ============================================================================
+# serve command group — MCP server
+# ============================================================================
+
+
+@serve_app.callback(invoke_without_command=True)
+def _serve_callback(
+    ctx: typer.Context,
+    root: str = typer.Option(
+        None, "--root", "-r",
+        help="项目根目录 (默认: 当前目录)",
+    ),
+    db: str = typer.Option(
+        None, "--db", "-d",
+        help="数据库路径 (默认: .tws/codegraph/index.db)",
+    ),
+):
+    """启动 MCP stdio 服务器，通过 stdin/stdout 与 MCP client 通信。
+
+    示例：
+      tws-graph serve                    # 开启 MCP 服务器，连接当前项目索引
+      tws-graph serve --root /my/project # 指定项目根目录
+      tws-graph serve --db /path/to/index.db # 指定数据库路径
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+
+    # Determine database path
+    if db:
+        db_path = db
+    elif root:
+        db_path = os.path.join(root, ".tws", "codegraph", "index.db")
+    else:
+        db_path = DEFAULT_DB
+
+    # Check index health
+    if not os.path.exists(db_path):
+        typer.echo(
+            f"错误: 索引数据库不存在: {db_path}",
+            err=True,
+        )
+        typer.echo(
+            "请先运行 'tws-graph index' 构建代码符号关系图。",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Redirect stderr to /dev/null to avoid contaminating stdio with log output
+    # The MCP protocol uses stdout for JSON-RPC messages; nothing else should
+    # print to stdout/stderr.
+    import sys as _sys
+    try:
+        _sys.stderr = open(os.devnull, "w")
+    except Exception:
+        pass
+
+    try:
+        from .mcp.server import run_server
+        run_server(db_path)
+    except FileNotFoundError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
+    except KeyboardInterrupt:
+        pass
 
 
 def main():
