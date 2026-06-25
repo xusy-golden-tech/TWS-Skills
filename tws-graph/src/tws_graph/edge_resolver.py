@@ -141,7 +141,7 @@ def resolve_edges(queries) -> ResolveResult:
         nid = node["id"]
         node_file[nid] = node["file_path"]
         node_qname[nid] = qname
-        node_lang[nid] = node.get("language", "")
+        node_lang[nid] = node["language"] if "language" in node.keys() else ""
         parts = qname.rsplit("::", 3)
         for level in range(1, min(len(parts), 3) + 1):
             suffix = "::".join(parts[-level:])
@@ -179,7 +179,7 @@ def resolve_edges(queries) -> ResolveResult:
         edge_rowid = edge["edge_rowid"]
         if matched_id:
             # P47: Check if this is a cross-language resolution
-            source_nid = edge.get("source", "")
+            source_nid = edge["source"]
             source_lang = node_lang.get(source_nid, "")
             target_lang = node_lang.get(matched_id, "")
             if source_lang and target_lang and source_lang != target_lang:

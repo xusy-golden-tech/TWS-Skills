@@ -50,23 +50,26 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
 ```
 你是一个执行子 agent。请完成以下任务：
 
-1. 通过 Skill 工具加载 {comp-skill-name}（如 Skill(skill: "comp-reproduce")）
-2. 按 skill 中的指引执行任务
+1. 通过 Skill 工具加载 found-tws-graph-usage（Skill(skill: "found-tws-graph-usage")）和 {comp-skill-name}（Skill(skill: "{comp-skill-name}")）
+2. 按 skill 中的指引执行任务。涉及代码调查时，优先使用 tws-graph 命令（search/calls/impact/trace），Grep 仅作回退手段
 3. 完成后汇报：做了什么、改了哪些文件、发现了什么
 
 任务背景：{简要描述任务上下文}
 ```
 
+**强制规则：所有子 agent dispatch prompt 必须同时包含 found-tws-graph-usage + comp skill，缺一不可。**
+
+原因：comp skill 描述「查什么」，found-tws-graph-usage 提供「怎么查」的正确命令语法，防止 agent 编造不存在的命令。
+
 禁止：
 ❌ 使用 Explore 类型派需要加载 skill 的子 agent
 ❌ 主 agent 自己写调查 prompt 替代 comp skill 的工作
 ❌ 在 prompt 中写"读 xxx skill"——必须是"通过 Skill 工具加载 xxx skill"
+❌ dispatch prompt 中遗漏 found-tws-graph-usage —— 这是子 agent 默认 grep 的根因
 
 ### 代码图查询任务补充
 
-**所有涉及代码调查的子任务**，dispatch prompt 中必须同时要求子 agent 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")）。
-
-覆盖以下所有 comp skill（这些 skill 的 Step 0 已强制要求加载 `found-tws-graph-usage`）：
+以下所有 comp skill 涉及的代码调查任务，统一使用上述主模板（已内置 found-tws-graph-usage）：
 
 | 子任务 | comp skill | 图查询目的 |
 |--------|-----------|-----------|
@@ -84,20 +87,6 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
 | 影响评估 | comp-impact-assessment | 查影响范围 |
 | 设计同步 | comp-design-sync | 对比 before/after 快照 |
 | 根因分析 | comp-root-cause-analysis | 追踪调用链 |
-
-dispatch prompt 模板：
-
-```
-你是一个执行子 agent。请完成以下任务：
-
-1. 通过 Skill 工具加载 {comp-skill-name}（Skill(skill: "{comp-skill-name}")）和 found-tws-graph-usage（Skill(skill: "found-tws-graph-usage")）
-2. 按 skill 中的指引执行任务
-3. 完成后汇报：做了什么、改了哪些文件、发现了什么
-
-任务背景：{简要描述任务上下文}
-```
-
-原因：comp skill 的 Step 0 描述「查什么」，found-tws-graph-usage 提供「怎么查」的正确命令语法，防止 agent 编造不存在的命令。两个 skill 缺一不可。
 
 主 agent 管规划和验收，子 agent 管执行。两者职责明确分离，避免主 agent 上下文膨胀。
 
@@ -154,11 +143,11 @@ dispatch prompt 模板：
   约 4-6 个文件，~300-400 行
 
 子 agent 只加载——具体执行类（每次一个任务）：
-  design-doc（写设计书）
-  OR implementation（编码）
-  OR test（测试）
-  OR design-sync（同步）
-  每次只加载 1-2 个文件，~100-200 行
+  found-tws-graph-usage（代码图使用指南，必加载） + design-doc（写设计书）
+  OR found-tws-graph-usage（必加载） + implementation（编码）
+  OR found-tws-graph-usage（必加载） + test（测试）
+  OR found-tws-graph-usage（必加载） + design-sync（同步）
+  每次只加载 2 个文件，~200-300 行
 ```
 
 **规则：**

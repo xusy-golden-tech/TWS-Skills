@@ -1,6 +1,6 @@
 ﻿---
 name: flow-fix-bug
-description: 修复 Bug。复杂度门禁 → 简化或完整路径。完整：复现→根因→方案→修复→回归→审查→防复燃→影响评估→集成→同步
+description: 修复 Bug。复杂度门禁 → 简化或完整路径。完整：复现→根因→方案→回归测试→修复→运行测试→审查→防复燃→影响评估→集成→同步
 ---
 
 <SUBAGENT-STOP>
@@ -36,7 +36,7 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 ### 完整路径
 
 ```
-复现 → 根因 → 方案 → 方案架构校验 → 修复 → 回归 → 防复燃 → 影响评估 → 集成 → 同步
+复现 → 根因 → 方案 → 方案架构校验 → 编写回归测试 → 修复 → 运行测试 → 防复燃 → 影响评估 → 集成 → 同步
 ```
 
 ---
@@ -95,25 +95,39 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 此步骤是轻量检查，不需要加载独立 skill。主 agent 在派审查子 agent 时直接附上以上检查清单。
 审查结论为"有风险"时，主 agent 决定是否调整方案；结论为"阻塞"时，必须回到③重新设计。
 
-### ④ 修复
+### ④ 编写回归测试
+
+```
+基于③修复方案设计回归测试：
+1. 编写能复现 Bug 的测试用例（此时应失败——Bug 尚未修复，验证测试能捕获 Bug）
+2. 编写相关模块的回归测试用例（确保修复不会引入新问题）
+3. 确认测试在当前代码上失败（证明测试有效）
+```
+
+### ⑤ 修复
 
 子 agent 通过 Skill 工具加载 `comp-implementation`（最小改动模式）
 
 ```
 1. 实施修复
-2. 验证 Bug 不再复现
+2. 确认④中编写的测试现在通过
+3. 验证 Bug 不再复现
 ```
 
-### ⑤ 单元+回归
+### ⑥ 运行测试
 
 ```
 链式验证 → 检查修复已完成
 
-1. 跑相关测试
+1. 跑所有相关测试（含④编写的回归测试）
 2. 检查连锁影响
+3. 确认 0 failures
+
+如测试失败：按 comp-test 中的「先分类再行动」判定方向。
+④中编写的回归测试失败时，默认判断为修复不完整——不得直接改测试。
 ```
 
-### ⑥ 代码审查
+### ⑦ 代码审查
 
 独立子 agent 通过 Skill 工具加载 `comp-code-review`
 
@@ -125,7 +139,7 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 □ 符合代码规约吗？
 ```
 
-### ⑦ 防复燃（原⑥）
+### ⑧ 防复燃
 
 ```
 这个 Bug 是孤例还是某类问题？
@@ -133,7 +147,7 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 要加什么防护？
 ```
 
-### ⑧ 影响评估（原⑦）
+### ⑨ 影响评估（原⑧）
 
 子 agent 通过 Skill 工具加载 `comp-impact-assessment`
 
@@ -141,7 +155,7 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 如果修复涉及跨模块影响，评估连锁范围。
 ```
 
-### ⑨ 集成测试（原⑧）
+### ⑩ 集成测试（原⑨）
 
 ```
 链式验证 → 检查所有任务完成
@@ -149,7 +163,7 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 跨模块连锁影响检查。
 ```
 
-### ⑩ 同步（原⑨）
+### ⑪ 同步（原⑩）
 
 子 agent 通过 Skill 工具加载 `comp-design-sync`
 
@@ -159,9 +173,10 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 
 ```
 1. 根因 → 找到位置
-2. 修复 → 改代码
-3. 验证 → Bug 不再复现 + 跑核心测试
-4. 同步 → 设计书同步
+2. 编写复现测试 → 确认测试在当前代码上失败，验证测试能捕获 Bug
+3. 修复 → 改代码，使测试通过
+4. 验证 → 跑核心测试，确认 0 failures
+5. 同步 → 设计书同步
 
 简化跳过了：方案确认、完整回归、防复燃、集成测试。
 但「验证」不能跳——必须确认 Bug 不再出现。

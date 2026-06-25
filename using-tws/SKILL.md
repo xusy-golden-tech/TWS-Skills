@@ -72,6 +72,7 @@ If you were dispatched as a subagent with a specific task, skip this skill.
 | 「新建」「从零」「脚手架」 | new-project | 空项目 |
 | 「重构」「重写」「优化」 | refactor | 不改功能只改结构 |
 | 「查一下」「为什么」「排查」 | investigate | 只查不修 |
+| 「方案」「报价」「做方案」「出方案」「提报价」「PPT」「展示」「投标」「售前」 | build-solution | 做方案/报价/展示，产出物是客户方案文档与报价 |
 | 「文档」「README」 | documentation | 产出物是文档 |
 | 其他 / 不明确 | add-feature | 兜底 |
 
@@ -131,6 +132,7 @@ Skill(skill: "flow-refactor")
 Skill(skill: "flow-investigate")
 Skill(skill: "flow-new-project")
 Skill(skill: "flow-documentation")
+Skill(skill: "flow-build-solution")
 ```
 
 加载后：
