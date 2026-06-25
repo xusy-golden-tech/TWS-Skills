@@ -2560,6 +2560,59 @@ def _run_export(fmt: str, db, depth, kind, from_node, limit, output):
 app.add_typer(export_app)
 
 
+# ============================================================================
+# GQL query command (P38 v5.5.0)
+# ============================================================================
+
+@app.command()
+def query(
+    gql_query: str = typer.Argument(..., help="GQL 查询语句"),
+    json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
+    db: str | None = typer.Option(
+        None, "--db",
+        help="数据库路径 (默认: .tws/codegraph/index.db)",
+    ),
+):
+    """图查询语言 (GQL) —— 人性化的代码图查询。
+
+    无需 SQL，用自然语言风格查询代码图。
+
+    例：
+      tws-graph query "FIND function WHERE name MATCHES 'auth'"
+      tws-graph query "FIND class WHERE file_path MATCHES 'src/api/' LIMIT 10"
+      tws-graph query "FIND * WHERE lang = 'python' RETURN name, file_path"
+      tws-graph query "IMPACT OF MyClass.my_method"
+    """
+    from .gql import parse_gql, execute_gql
+
+    db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
+    if db_conn is None:
+        typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
+        raise typer.Exit(1)
+
+    queries = QueryBuilder(db_conn.conn)
+
+    try:
+        result = execute_gql(queries, gql_query)
+    except ValueError as e:
+        typer.echo(f"GQL 语法错误: {e}", err=True)
+        raise typer.Exit(1)
+
+    if not result:
+        typer.echo("(无结果)")
+        return
+
+    if json_output:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        for row in result:
+            name = row.get("name", row.get("qualified_name", ""))
+            fpath = row.get("file_path", "")
+            kind = row.get("kind", "")
+            line = row.get("start_line", "")
+            typer.echo(f"{kind:<12} {name:<40} {fpath}:{line}")
+
+
 def main():
     app()
 
