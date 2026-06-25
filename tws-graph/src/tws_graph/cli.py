@@ -2458,6 +2458,108 @@ def taint(
         typer.echo(f"(显示前 20 条路径，共 {len(paths)} 条)")
 
 
+# ============================================================================
+# Export commands (P32 v5.3.0)
+# ============================================================================
+
+# Shared export options
+_export_db_opt = typer.Option(None, "--db", "-d", help="数据库路径")
+_export_depth_opt = typer.Option(5, "--depth", help="BFS 导出深度 (用 --from 指定起始节点时)")
+_export_kind_opt = typer.Option(None, "--kind", "-k", help="只导出指定边类型 (如 calls, data_flows)")
+_export_from_opt = typer.Option(None, "--from", "-f", help="起始节点 ID，导出以该节点为中心的子图")
+_export_limit_opt = typer.Option(500, "--limit", "-l", help="最大导出边数")
+
+# Create a parent app for export subcommands
+export_app = typer.Typer(name="export", help="导出图到标准格式")
+
+
+@export_app.command("dot")
+def export_dot_cmd(
+    db: str | None = _export_db_opt,
+    depth: int = _export_depth_opt,
+    kind: str | None = _export_kind_opt,
+    from_node: str | None = _export_from_opt,
+    limit: int = _export_limit_opt,
+    output: str | None = typer.Option(None, "--output", "-o", help="输出文件路径 (默认: stdout)"),
+):
+    """导出为 Graphviz DOT 格式。
+
+    例：
+      tws-graph export dot --kind calls --depth 3 > graph.dot
+      tws-graph export dot --from NODE_ID --depth 2 -o subgraph.dot
+    """
+    _run_export("dot", db, depth, kind, from_node, limit, output)
+
+
+@export_app.command("mermaid")
+def export_mermaid_cmd(
+    db: str | None = _export_db_opt,
+    depth: int = _export_depth_opt,
+    kind: str | None = _export_kind_opt,
+    from_node: str | None = _export_from_opt,
+    limit: int = _export_limit_opt,
+    output: str | None = typer.Option(None, "--output", "-o", help="输出文件路径 (默认: stdout)"),
+):
+    """导出为 Mermaid 格式（可嵌入 Markdown）。
+
+    例：
+      tws-graph export mermaid --kind imports > deps.md
+      tws-graph export mermaid --from NODE_ID -o arch.mermaid
+    """
+    _run_export("mermaid", db, depth, kind, from_node, limit, output)
+
+
+@export_app.command("json")
+def export_json_cmd(
+    db: str | None = _export_db_opt,
+    depth: int = _export_depth_opt,
+    kind: str | None = _export_kind_opt,
+    from_node: str | None = _export_from_opt,
+    limit: int = _export_limit_opt,
+    output: str | None = typer.Option(None, "--output", "-o", help="输出文件路径 (默认: stdout)"),
+):
+    """导出为 JSON 格式。
+
+    例：
+      tws-graph export json --kind calls > calls.json
+      tws-graph export json -o graph.json
+    """
+    _run_export("json", db, depth, kind, from_node, limit, output)
+
+
+def _run_export(fmt: str, db, depth, kind, from_node, limit, output):
+    """Common export logic."""
+    db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
+    if not db_conn:
+        typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
+        raise typer.Exit(1)
+
+    queries = QueryBuilder(db_conn.conn)
+    import json as _json
+
+    if fmt == "dot":
+        from tws_graph.export import export_dot
+        result = export_dot(queries, from_node=from_node, depth=depth, kind=kind, limit=limit)
+    elif fmt == "mermaid":
+        from tws_graph.export import export_mermaid
+        result = export_mermaid(queries, from_node=from_node, depth=depth, kind=kind, limit=limit)
+    elif fmt == "json":
+        from tws_graph.export import export_json
+        data = export_json(queries, from_node=from_node, depth=depth, kind=kind, limit=limit)
+        result = _json.dumps(data, ensure_ascii=False, indent=2)
+
+    if output:
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(result)
+        typer.echo(f"已写入: {output}")
+    else:
+        typer.echo(result)
+
+
+# Register export subcommands
+app.add_typer(export_app)
+
+
 def main():
     app()
 
