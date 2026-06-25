@@ -14,11 +14,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mmap
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Optional
+
+# P48b: Threshold for mmap-based reading (bytes).  Files above this size
+# are read via memory-mapped I/O instead of a single read() call, reducing
+# peak memory pressure and improving I/O throughput on large repos.
+_MMAP_THRESHOLD = 100 * 1024  # 100 KB
 
 from ..db.queries import QueryBuilder
 from ..store.sqlite_store import FTS_TRIGGERS_DROP, FTS_TRIGGERS_CREATE
@@ -79,8 +85,14 @@ def _process_file_batch(args: tuple) -> list[dict]:
 
             lang = detect_language(rel_path)
 
-            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
+            # P48b: Use mmap for large files to reduce memory pressure
+            if fsize > _MMAP_THRESHOLD:
+                with open(full_path, "r+b") as f:
+                    with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                        content = mm.read().decode("utf-8", errors="replace")
+            else:
+                with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
             fhash = hash_content(content)
 
             extraction = extract_full(rel_path, content, lang)
@@ -240,6 +252,18 @@ class ParallelExtractionOrchestrator:
         # Step 4: Process batches in parallel
         all_file_results = []
         worker_count = min(self.max_workers, len(batches))
+
+        # P48d: Warm up workers — submit one small batch per worker to
+        # pre-load Language/Parser caches before the main indexing run.
+        _warmup_count = min(worker_count, len(batches))
+        if _warmup_count > 1 and len(batches) > _warmup_count:
+            warmup_args = batch_args[:_warmup_count]
+            remaining_args = batch_args[_warmup_count:]
+            with ProcessPoolExecutor(max_workers=_warmup_count) as warmup_pool:
+                list(warmup_pool.map(_process_file_batch, warmup_args))
+            batch_args = remaining_args
+            # Recalculate worker_count after consuming warmup batches
+            worker_count = min(self.max_workers, len(batch_args))
 
         with ProcessPoolExecutor(max_workers=worker_count) as executor:
             futures = {

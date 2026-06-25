@@ -90,9 +90,9 @@ class TestPragmaConfiguration:
         assert row[0] == 1  # 1 = NORMAL
 
     def test_cache_size(self, conn_mgr):
-        """cache_size should be -64000 (64 MB negative = kibibytes)."""
+        """cache_size should be -256000 (256 MB negative = kibibytes). P42: 64→256."""
         row = conn_mgr.conn.execute("PRAGMA cache_size").fetchone()
-        assert row[0] == -64000
+        assert row[0] == -256000
 
     def test_temp_store_memory(self, conn_mgr):
         """temp_store should be MEMORY (value 2)."""
