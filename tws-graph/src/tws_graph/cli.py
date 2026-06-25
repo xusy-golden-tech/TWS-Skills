@@ -2613,6 +2613,87 @@ def query(
             typer.echo(f"{kind:<12} {name:<40} {fpath}:{line}")
 
 
+# ============================================================================
+# Impact prediction command (P40 v5.5.0)
+# ============================================================================
+
+@app.command()
+def predict_impact(
+    symbol: str = typer.Argument(..., help="要分析的符号（名称或 qualified_name）"),
+    depth: int = typer.Option(3, "--depth", "-d", help="最大传播深度"),
+    json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
+    db: str | None = typer.Option(
+        None, "--db",
+        help="数据库路径 (默认: .tws/codegraph/index.db)",
+    ),
+):
+    """预测修改某符号的影响范围与风险。
+
+    综合影响分析 + 测试覆盖 + 风险评分，帮助评估重构风险。
+
+    例：
+      tws-graph predict-impact MyClass.my_method
+      tws-graph predict-impact auth_login --depth 5 --json
+    """
+    from .analysis.impact_prediction import predict_impact as do_predict
+
+    db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
+    if db_conn is None:
+        typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
+        raise typer.Exit(1)
+
+    queries = QueryBuilder(db_conn.conn)
+
+    # Search for the symbol if not a node ID
+    symbol_id = symbol
+    if len(symbol_id) != 32:  # Not a hash → search by name
+        results = queries._exec(
+            "SELECT id FROM nodes WHERE name = ? OR qualified_name LIKE ? LIMIT 1",
+            (symbol, f"%{symbol}%")
+        ).fetchall()
+        if not results:
+            typer.echo(f"未找到符号: {symbol}", err=True)
+            raise typer.Exit(1)
+        symbol_id = results[0]["id"]
+
+    result = do_predict(queries, symbol_id, depth=depth)
+
+    if result["total_affected"] == 0:
+        typer.echo(f"未找到受 {symbol} 影响的节点。")
+        return
+
+    if json_output:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    else:
+        sym = result["symbol"] or {}
+        typer.echo(f"\n{'='*60}")
+        typer.echo(f"  影响预测: {sym.get('name', symbol)}")
+        typer.echo(f"  文件: {sym.get('file_path', '?')}:{sym.get('start_line', '?')}")
+        typer.echo(f"  风险评分: {result['risk_score']}/100")
+        typer.echo(f"{'='*60}")
+        typer.echo(f"\n  直接影响 ({result['direct_count']} 个):")
+        for d in result["direct_dependents"][:10]:
+            typer.echo(f"    - {d['name']} ({d['file_path']}:{d.get('start_line','')})")
+        if result["direct_count"] > 10:
+            typer.echo(f"    ... 还有 {result['direct_count'] - 10} 个")
+        typer.echo(f"\n  间接影响 ({result['indirect_count']} 个):")
+        for d in result["indirect_dependents"][:5]:
+            typer.echo(f"    - {d['name']} ({d['file_path']}:{d.get('start_line','')})")
+        if result["indirect_count"] > 5:
+            typer.echo(f"    ... 还有 {result['indirect_count'] - 5} 个")
+        typer.echo(f"\n  受影响文件 ({len(result['affected_files'])} 个):")
+        for f in result["affected_files"][:5]:
+            typer.echo(f"    - {f}")
+        if len(result['affected_files']) > 5:
+            typer.echo(f"    ... 还有 {len(result['affected_files']) - 5} 个")
+        typer.echo(f"\n  建议回归测试 ({len(result['affected_tests'])} 个):")
+        for t in result["affected_tests"][:5]:
+            typer.echo(f"    - {t['name']} ({t['file_path']})")
+        if len(result['affected_tests']) > 5:
+            typer.echo(f"    ... 还有 {len(result['affected_tests']) - 5} 个")
+        typer.echo()
+
+
 def main():
     app()
 
