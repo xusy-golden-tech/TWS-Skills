@@ -834,3 +834,129 @@ pytest tests/test_semantic_diff.py tests/test_diff.py tests/analysis/test_git_di
 - [x] Store tests: 339 passed
 - [x] tws-graph lint: 0 errors
 - [x] All previous quality gates maintained
+
+---
+
+## v5.7.0 门禁
+
+> **验证日期**: 2026-06-25
+> **目标**: Java 生产级支持 + MCP 智能分析 + 跨语言解析 + 性能 3x
+> **TDD 状态**: 进行中
+
+### 门禁 45: Java Extractor 深度升级 (P45)
+
+**P45a: 包与导入系统**
+- [ ] TDD tests pass
+- [ ] package 声明正确解析
+- [ ] imports 边产出（每个 import → 边）
+- [ ] qualified_name 格式 `package.Class::member`
+- [ ] static import 追踪
+
+**P45b: 注解处理**
+- [ ] TDD tests pass
+- [ ] decorates 边产出（@Override, @Test, @Entity 等）
+- [ ] 注解参数提取（@RequestMapping("/path")）
+- [ ] 类/方法/字段三个层级覆盖
+
+**P45c: 泛型处理**
+- [ ] TDD tests pass
+- [ ] type_ref 边产出（List<User> 中的 User）
+- [ ] 嵌套泛型（Map<String, List<Integer>>）
+- [ ] 通配符（? extends Foo）
+
+**P45d: 方法调用深度升级**
+- [ ] TDD tests pass
+- [ ] 链式调用（a.b().c() → 2 calls edges）
+- [ ] instantiates 边（new Foo()）
+- [ ] 静态调用（ClassName.method()）
+- [ ] super 调用
+
+**P45e: 现代 Java 特性**
+- [ ] TDD tests pass
+- [ ] Lambda 节点
+- [ ] Record 节点
+- [ ] Enum 节点
+- [ ] Interface default/static 方法
+
+**P45f: 变量级读写追踪**
+- [ ] TDD tests pass
+- [ ] reads 边产出
+- [ ] writes 边产出
+- [ ] data_flows 边（跨方法参数）
+
+**综合**：
+- [ ] Java 项目节点密度 ≥ 3/file
+- [ ] Java 项目边密度 ≥ 5/file
+- [ ] Java 项目边类型 ≥ 15
+
+### 门禁 46: MCP 3.0 智能分析 (P46)
+
+**P46a: 智能重构建议**
+- [ ] TDD tests pass
+- [ ] 方法提取建议正确
+- [ ] 接口提取建议正确
+- [ ] 纯脱网验证
+
+**P46b: 安全漏洞检测**
+- [ ] TDD tests pass
+- [ ] SQL 注入模式检测
+- [ ] 路径遍历检测
+- [ ] 硬编码密钥检测
+- [ ] 纯脱网验证
+
+**P46c: 代码质量门禁**
+- [ ] TDD tests pass
+- [ ] 复杂度门禁
+- [ ] 测试覆盖门禁
+- [ ] Pass/Fail/Review 判定
+
+**P46d: 智能搜索**
+- [ ] TDD tests pass
+- [ ] 同义词搜索
+- [ ] AST 结构搜索
+- [ ] 纯脱网验证
+
+### 门禁 47: 跨语言边解析 (P47)
+
+**P47a: JVM 跨语言**
+- [ ] TDD tests pass
+- [ ] Java→Kotlin 调用解析
+- [ ] Kotlin→Java 调用解析
+
+**P47b: Web 跨语言**
+- [ ] TDD tests pass
+- [ ] TS→JS 调用解析
+
+**综合**：
+- [ ] 同语言解析不退化
+- [ ] 全量回归通过
+
+### 门禁 48: Performance 4.0 (P48)
+
+- [ ] g-ass-source 索引速度 ≤ 100s（3x 提升）
+- [ ] TWS-Skills 索引速度 ≤ 15s（2x 提升）
+- [ ] 0-change 增量 < 100ms
+- [ ] 正确性: 节点/边数不变
+- [ ] 全量回归通过
+
+### 门禁 49: 多语言验证管线 (P49)
+
+**P49a: Java 验证项目**
+- [ ] spring-petclinic 索引成功
+- [ ] E2E 测试集成
+
+**P49b: 自动化质量门禁**
+- [ ] 节点密度 ≥ 3/file
+- [ ] 边密度 ≥ 5/file
+- [ ] 边类型 ≥ 15
+
+**P49c: 对比报告**
+- [ ] Java vs Python extractor 差距分析
+
+### 门禁 50: 全量回归
+
+- [ ] pytest: 4000+ passed, 0 failed
+- [ ] tws-graph lint: 0 errors
+- [ ] spring-petclinic 跨项目验证通过
+- [ ] g-ass-source 跨项目验证通过
+- [ ] 所有历史门禁保持 PASS

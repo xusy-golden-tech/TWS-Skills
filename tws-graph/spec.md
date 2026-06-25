@@ -1927,3 +1927,449 @@ P44 (MCP 2.0) ── 最后（依赖稳定的图数据和分析 API）
 - P43 File Coverage: bash extractor (.sh/.bash/.zsh/.ksh) + lua extractor (.lua) + .pyi + .cjs
 - P44 MCP 2.0: 4 新工具（review_changes, safe_refactor, api_compat_check, find_pattern），20 工具全脱网
 - 新增 67 tests（16 bash + 14 lua + 19 dev_assist + 18 lifecycle/integration）
+
+---
+
+## 二十七、v5.7.0 目标 —— 全面赶超 CBM 的决定性版本
+
+> 2026-06-25 | Java 生产级支持 + MCP 智能分析 + 跨语言解析 + 性能 4.0
+
+**核心目标：在 CBM 无法企及的维度建立不可逆的护城河——让 tws-graph 成为 Java/多语言项目的首选代码分析工具。**
+
+```
+P45: Java Extractor 深度升级        → 从基础提取 → 生产级（对标 Python extractor）
+P46: MCP 3.0 智能分析               → 从查询工具 → 智能开发助手
+P47: 跨语言边解析                   → 打破语言壁垒（Java→Kotlin, Python→C, TS→JS）
+P48: Performance 4.0                → 289s → ≤ 100s（3x 提升，差距缩小到 7x）
+P49: 多语言验证管线                 → 真实 Java 项目自动化验证
+```
+
+### 27.1 P45: Java Extractor 深度升级
+
+**问题**：当前 Java extractor (java_extractor.py, 290 行) 只能做基本提取——class、method、field、extends、implements、calls。缺失了大量生产级功能，与 Python extractor (352 行) 差距巨大。
+
+**对标物**：Python extractor 是当前的黄金标准，Java extractor 必须达到同等深度。
+
+**验证方式**：下载真实 Java 开源项目（如 spring-petclinic ~60 files），对比 Java vs Python extractor 的：
+- 节点密度（nodes/file）
+- 边密度（edges/file）
+- 边类型覆盖（kinds present）
+
+#### P45a: 包与导入系统
+
+**现状**：Java extractor 完全忽略 `package` 声明和 `import` 语句，所有 qualified_name 用 `file_path::name` 格式（Python 风格），而非 Java 标准的 `package.Class::method` 格式。
+
+**实现**：
+1. 解析 `package_declaration` → 提取包名（如 `com.example.service`）
+2. 解析 `import_declaration` → 建立导入映射（short name → fully qualified name）
+3. 解析 `import_static` → 静态导入追踪
+4. qualified_name 格式改为 `{package}.{class}::{member}`（与 Java 生态一致）
+5. 产出 `imports` 边（source=文件, target=导入的类/包）
+
+**测试门禁**：
+| 门禁 | 标准 |
+|------|------|
+| package 声明解析 | package 名正确提取 |
+| import 边产出 | 每个 import 语句产出一条边 |
+| qualified_name 格式 | 从 `file_path::name` 升级为 `package.Class::member` |
+| static import | `import static` 正确追踪 |
+| 不退化 | 现有 6 种节点类型 (class/interface/method/constructor/property) 保持 |
+
+#### P45b: 注解处理
+
+**现状**：Java extractor 不处理任何 annotation（`@Override`, `@Entity`, `@Autowired`, `@Test` 等），注解关系完全丢失。
+
+**实现**：
+1. 解析 `annotation` 节点 → 提取注解名和参数
+2. 产出 `decorates` 边（annotation → 被标注的类/方法/字段）
+3. 注解参数提取（如 `@RequestMapping("/path")` → 字符串参数）
+4. 识别常见框架注解（Spring, JUnit, JPA）
+
+**测试门禁**：
+| 门禁 | 标准 |
+|------|------|
+| decorates 边产出 | @Override, @Test, @Entity 等正确产出边 |
+| 注解参数提取 | `@RequestMapping("/path")` 参数正确提取 |
+| 类/方法/字段注解 | 三个层级的注解均覆盖 |
+| 不退化 | 现有测试通过 |
+
+#### P45c: 泛型处理
+
+**现状**：泛型类型参数完全忽略（`List<String>`, `Map<K,V>`, `Optional<User>`）。
+
+**实现**：
+1. 解析 `type_arguments` 节点 → 提取泛型参数中的类型引用
+2. 产出 `type_ref` 边（引用泛型类型的代码 → 被引用的类型）
+3. 通配符处理（`? extends Foo`, `? super Bar`）
+
+**测试门禁**：
+| 门禁 | 标准 |
+|------|------|
+| type_ref 边产出 | `List<User>` 中的 `User` 被检测为 type_ref |
+| 嵌套泛型 | `Map<String, List<Integer>>` 正确处理 |
+| 通配符 | `? extends BaseEntity` 正确处理 |
+| 不退化 | 现有测试通过 |
+
+#### P45d: 方法调用深度升级
+
+**现状**：调用提取只做基本的 `method_invocation` → `identifier` 提取。缺失：
+- 链式调用（`obj.getX().getY().doZ()`）
+- 静态调用（`ClassName.staticMethod()`）
+- `this.` / `super.` 调用
+- 方法引用（`ClassName::method`）
+- 构造函数调用（`new ClassName(args)` → instantiates 边）
+
+**实现**：
+1. 链式调用：追踪完整链 `a.b().c().d()`，为每步创建 calls 边
+2. 静态调用：识别类名调用模式
+3. instantiates 边：`new ClassName()` → source=调用方法, target=类节点
+4. super 调用：`super.method()` → overrides 边检测
+
+**测试门禁**：
+| 门禁 | 标准 |
+|------|------|
+| 链式调用 | `a.b().c()` 产出 2 calls 边 |
+| instantiates 边 | `new Foo()` 产出 instantiates 边 |
+| 静态调用 | `ClassName.method()` 正确解析 |
+| super 调用 | `super.method()` 关联到父类 |
+| 不退化 | 现有测试通过 |
+
+#### P45e: 现代 Java 特性
+
+**现状**：不支持 Java 8+ 的 lambda、Java 14+ 的 record、enum、interface 方法。
+
+**实现**：
+1. **Lambda**: `(a, b) -> expr` → 创建匿名函数节点 + 捕获变量追踪
+2. **Record**: `record Point(int x, int y)` → class 节点 + 组件字段
+3. **Enum**: `enum Color { RED, GREEN }` → class 节点 + 常量字段
+4. **Interface 方法**: default 方法、static 方法
+5. **Sealed class** (Java 17): `sealed class A permits B, C`
+
+**测试门禁**：
+| 门禁 | 标准 |
+|------|------|
+| Lambda 节点 | lambda 表达式创建匿名函数节点 |
+| Record 节点 | record 类型正确识别为 class |
+| Enum 节点 | enum 类型正确识别为 class + 常量 |
+| Interface default 方法 | interface 中的 default 方法正确提取 |
+| 不退化 | 现有测试通过 |
+
+#### P45f: 变量级读写追踪
+
+**现状**：Java extractor 没有变量级读取/写入追踪（Python extractor 有 reads/writes 边）。
+
+**实现**：
+1. 局部变量声明 → writes 边（variable_declarator → 变量名）
+2. 字段赋值 → writes 边（`this.field = value` / `obj.field = value`）
+3. 变量使用 → reads 边（标识符引用）
+4. 参数追踪 → data_flows 边（caller arg → callee param）
+
+**测试门禁**：
+| 门禁 | 标准 |
+|------|------|
+| reads 边产出 | 局部变量读取被追踪 |
+| writes 边产出 | 变量声明 + 字段赋值被追踪 |
+| data_flows 边 | 跨方法参数传递被追踪 |
+| 不退化 | 现有测试通过 |
+
+---
+
+### 27.2 P46: MCP 3.0 智能分析
+
+**问题**：当前 20 MCP 工具偏重"查询"，缺少"分析"和"建议"。用户需要的是智能助手，而非图数据库接口。
+
+**核心洞察**：MCP 是我们的护城河——CBM 的 MCP 需要联网，我们纯脱网且可无限扩展。
+
+#### P46a: 智能重构建议
+
+**升级 safe_refactor**：从"检查依赖"升级为"提供完整重构方案"。
+
+**实现**：
+1. 方法提取建议：识别长方法中的可提取块（基于 AST 子树分析）
+2. 接口提取建议：识别多个类共享的方法签名 → 建议提取接口
+3. 移动方法建议：识别方法在当前类的耦合度 → 建议移动到更合适的类
+4. 参数重构建议：识别参数过多的方法 → 建议参数对象化
+
+**测试门禁**：
+| 门禁 | 标准 |
+|------|------|
+| 方法提取建议 | 长方法 (>50行) 建议提取子方法 |
+| 接口提取建议 | 共享签名 → 建议提取接口 |
+| 移动方法建议 | 高耦合方法建议移动 |
+| 纯脱网 | 零外部依赖 |
+
+#### P46b: 安全漏洞检测
+
+**新增 security_scan 工具**：超越基本污点分析，做模式化漏洞检测。
+
+**实现**：
+1. SQL 注入检测：字符串拼接 + execute → 标记风险
+2. XSS 检测：未转义输出到 HTML/JS
+3. 路径遍历：用户输入传入 `File` / `Path`
+4. 反序列化风险：`ObjectInputStream.readObject()` 调用
+5. 硬编码密钥检测：`password = "..."` / `secret = "..."` 模式
+
+**测试门禁**：
+| 门禁 | 标准 |
+|------|------|
+| SQL 注入检测 | 字符串拼接 + execute 被标记 |
+| 路径遍历检测 | 用户输入→File 路径被标记 |
+| 硬编码密钥 | password/secret 字面量被标记 |
+| 误报率 | < 30%（标记但不确认，由人工判断） |
+| 纯脱网 | 零外部依赖 |
+
+#### P46c: 代码质量门禁
+
+**升级 review_changes**：从"列出影响"升级为"质量门禁检查"。
+
+**实现**：
+1. 复杂度门禁：修改的函数是否超过了圈复杂度阈值
+2. 测试覆盖门禁：修改的文件是否有足够的测试
+3. 依赖方向门禁：修改是否引入了循环依赖
+4. API 兼容门禁：修改是否破坏了 public API
+5. 综合评分：Pass/Fail/Review 三级判定
+
+**测试门禁**：
+| 门禁 | 标准 |
+|------|------|
+| 复杂度门禁 | 超阈值函数被标记 |
+| 测试覆盖门禁 | 无测试覆盖的修改被警告 |
+| 综合判定 | Pass/Fail/Review 输出正确 |
+| 纯脱网 | 零外部依赖 |
+
+#### P46d: 智能搜索增强
+
+**升级 search_symbols + find_pattern**：从文本匹配升级为语义理解。
+
+**实现**：
+1. 同义词搜索：`auth` → 也搜 `authenticate`, `authorization`, `login`
+2. 结构搜索：`"try { ... } catch (SQLException e)"` 匹配 AST 结构
+3. 影响搜索：`"IMPACTED BY calculate_total"` 语法集成到 search
+4. 正则 body 搜索：搜索函数体内的代码模式
+
+**测试门禁**：
+| 门禁 | 标准 |
+|------|------|
+| 同义词搜索 | auth → authenticate/login 结果 |
+| 结构搜索 | try/catch 模式 AST 匹配 |
+| 影响搜索 | IMPACTED BY 语法在 search 中可用 |
+| 纯脱网 | 零外部依赖 |
+
+---
+
+### 27.3 P47: 跨语言边解析
+
+**问题**：当前 resolve_edges 在语言隔离内解析边。Java 调用 Kotlin、Python 调用 C 扩展、TypeScript 调用 JavaScript——这些跨语言调用关系完全丢失。
+
+**实现**：
+
+#### P47a: 跨语言符号注册
+1. 所有语言的符号注册到统一的 qualified_name 空间
+2. 符号的 qualified_name 格式标准化（`{lang}:{package/module}::{name}` 或项目内统一格式）
+3. 建立跨语言符号索引
+
+#### P47b: JVM 生态跨语言解析
+1. Java → Kotlin: Java 调用 Kotlin 类时，通过相同包路径查找
+2. Kotlin → Java: Kotlin 调用 Java 类时，通过相同包路径查找
+3. 建立 `{package_path}` → `{symbol_list}` 的二级索引
+
+#### P47c: Web 生态跨语言解析
+1. TypeScript → JavaScript: `.ts` 文件调用 `.js` 文件中定义的符号
+2. JSX → TypeScript: React 组件跨文件类型
+
+**测试门禁 (P47)**：
+
+| 门禁 | 标准 |
+|------|------|
+| Java→Kotlin 调用解析 | 同包 Java 调用 Kotlin 正确解析 |
+| Kotlin→Java 调用解析 | 同包 Kotlin 调用 Java 正确解析 |
+| TS→JS 调用解析 | .ts→.js 调用正确解析 |
+| 不退化 | 同语言解析不受影响 |
+| 全量回归 | 全部测试通过 |
+
+---
+
+### 27.4 P48: Performance 4.0
+
+**问题**：g-ass-source 289s vs CBM 14.1s（20x）。v5.6.0 已优化 SQLite 层，现在需要优化提取器和解析层。
+
+**目标**：289s → ≤ 100s（3x 提升）
+
+**优化方向**：
+
+#### P48a: Tree-sitter 解析复用（预估 -30%）
+- 当前每个文件创建新的 Parser + Language 对象
+- 改为：per-worker 进程级 Language 缓存 + Parser 复用
+- 同语言文件共享 Language 对象（tree-sitter C 层共享）
+
+#### P48b: 文本读取优化（预估 -10%）
+- 大文件 (>100KB) 用 `mmap` 替代 `open().read()`
+- 合并 stat + read 调用
+
+#### P48c: 提取器内联优化（预估 -10%）
+- Python extractor: `@lru_cache` 已在 _hash_id 上，扩展到 _node_text
+- Java extractor: 与 Python 同级优化
+- 所有 extractor: 正则预编译、字符串操作批量化
+
+#### P48d: 并行调度优化（预估 -10%）
+- Worker pool 预热（避免冷启动）
+- Chunk size 自适应（小文件用大 chunk，大文件用小 chunk）
+- 结果收集用无锁队列
+
+**测试门禁 (P48)**：
+
+| 门禁 | 标准 |
+|------|------|
+| g-ass-source 索引速度 ≤ 100s | 3x 提升 |
+| TWS-Skills 索引速度 ≤ 15s | 2x 提升 |
+| 0-change 增量 < 100ms | 不退化 |
+| 正确性 | 节点数/边数/边类型数不变 |
+| 全量回归 | 全部测试通过 |
+
+---
+
+### 27.5 P49: 多语言验证管线
+
+**问题**：当前只有 g-ass-source (TypeScript) 上的跨项目验证。缺少 Java 项目的真实验证。
+
+**实现**：
+
+#### P49a: Java 验证项目
+1. 下载 `spring-petclinic`（Spring Boot 标准示例，~60 Java 文件）
+2. 下载 `guava` 子集（Google Java 库，大量泛型和注解）
+3. 对每个验证项目运行全量索引
+
+#### P49b: 自动化质量门禁
+1. Java 项目索引后自动运行质量门禁检查
+2. 节点密度：每个 Java 文件平均 ≥ 3 个节点（对标 Python extractor）
+3. 边密度：每个 Java 文件平均 ≥ 5 条边
+4. 边类型覆盖：Java 项目上 ≥ 15 种边类型
+
+#### P49c: 对比报告
+1. 同一项目上 Java extractor vs Python extractor 的节点/边密度对比
+2. 自动生成差距分析报告
+
+**测试门禁 (P49)**：
+
+| 门禁 | 标准 |
+|------|------|
+| spring-petclinic 索引成功 | 无崩溃，有节点和边产出 |
+| 节点密度 ≥ 3/file | 对标 Python extractor |
+| 边密度 ≥ 5/file | 对标 Python extractor |
+| 边类型 ≥ 15 | Java 项目上边类型覆盖 |
+| E2E 框架集成 | tests/e2e/ 新增 Java 项目验证用例 |
+| 自动降级 | Java 项目缺失时 skip |
+
+---
+
+### 27.6 v5.7.0 集成测试场景
+
+#### 场景 1: Java 生产级质量验证
+
+```
+场景: 真实 Java 项目的全量索引和分析
+  Given: spring-petclinic 已下载到本地
+  When: tws-graph index --force
+  Then: 无崩溃
+    And: 节点数 > 200
+    And: 边数 > 500
+    And: SELECT COUNT(DISTINCT kind) FROM edges ≥ 15
+    And: imports 边 > 0
+    And: decorates 边 > 0 (注解)
+    And: instantiates 边 > 0
+    And: type_ref 边 > 0 (泛型)
+```
+
+#### 场景 2: MCP 智能分析闭环
+
+```
+场景: MCP 工具提供端到端智能分析
+  Given: spring-petclinic 已索引
+  When: MCP tools/call security_scan
+  Then: 返回潜在安全问题（如 SQL 注入模式）
+  When: MCP tools/call safe_refactor with "extract_method" suggestion
+  Then: 返回方法提取建议和影响分析
+  When: MCP tools/call review_changes with modified files
+  Then: 返回质量门禁判定 (Pass/Fail/Review)
+```
+
+#### 场景 3: 跨语言解析
+
+```
+场景: Java+Kotlin 混合项目的跨语言调用解析
+  Given: 项目包含 Java 和 Kotlin 文件
+  When: Java 类调用 Kotlin 类的同名包
+  Then: calls 边正确解析（非 unresolved）
+  When: Kotlin 类调用 Java 类
+  Then: calls 边正确解析
+```
+
+#### 场景 4: 性能验证
+
+```
+场景: g-ass-source 索引速度 ≤ 100s
+  Given: g-ass-source 已是最新
+  When: time tws-graph index --force
+  Then: 耗时 ≤ 100s
+```
+
+#### 场景 5: 全量回归
+
+```
+场景: 所有测试通过
+  Given: P45+P46+P47+P48+P49 全部实现
+  When: pytest --tb=short
+  Then: 0 failed
+```
+
+---
+
+### 27.7 v5.7.0 实现顺序
+
+```
+P45 (Java 升级) ── 先实施（改动广度最大，影响核心提取器）
+       │
+       ▼
+P49 (验证管线) ── 与 P45 并行（下载项目，建立基线）
+       │
+       ▼
+P47 (跨语言解析) ── 依赖 P45 建立的 Java 包系统
+       │
+       ▼
+P46 (MCP 3.0) ── 依赖 P45+P47 的深度数据
+       │
+       ▼
+P48 (性能 4.0) ── 最后（在所有功能稳定后测量和优化基线）
+```
+
+P45 和 P49 可以并行推进（下载验证项目不依赖 Java extractor 改动）。
+
+### 27.8 v5.7.0 vs CBM 目标对比
+
+| 维度 | tws-graph v5.6.0 | v5.7.0 目标 | CBM | 目标状态 |
+|------|-----------------|-----------|-----|---------|
+| 边类型 | 21 (22 w/ --deep) | 21+ | ~20 | 保持反超 |
+| Java 支持 | 基础（6 种节点） | **生产级**（15+ 节点类型） | 深度 | **追平** |
+| MCP 工具 | 20（查询型） | 20+（**智能分析型**） | ~5（联网） | **不可逆领先** |
+| 跨语言解析 | ❌ | ✓（JVM + Web） | ❌ | **独有能力** |
+| 安全分析 | 基本污点 | **智能漏洞检测** | 无 | **独有能力** |
+| 索引速度 | 289s | ≤ 100s | 14.1s | 差距 20x→7x |
+| 文件覆盖 | 2,831 | 3,100+ | 3,241 | 接近追平 |
+| 多语言验证 | g-ass-source (TS) | + spring-petclinic (Java) | — | **更严格验证** |
+
+### 27.9 v5.7.0 完成定义 (DoD)
+
+- [ ] P45: Java extractor 达到 Python extractor 同等深度
+- [ ] P45a: 包与导入系统（imports 边产出）
+- [ ] P45b: 注解处理（decorates 边产出）
+- [ ] P45c: 泛型处理（type_ref 边产出）
+- [ ] P45d: 方法调用深度升级（instantiates + 链式调用）
+- [ ] P45e: 现代 Java 特性（lambda, record, enum, interface default）
+- [ ] P45f: 变量级读写追踪（reads/writes/data_flows 边产出）
+- [ ] P46: MCP 3.0 4 项升级完成（重构/安全/质量/搜索）
+- [ ] P47: 跨语言边解析（JVM + Web 生态）
+- [ ] P48: g-ass-source ≤ 100s（3x 提升）
+- [ ] P49: spring-petclinic 验证通过（≥ 15 边类型）
+- [ ] 全量回归: 4000+ passed, 0 failed
+- [ ] quality-gates.md: G45-G49 全部通过
+- [ ] tws-graph lint: 0 errors, 0 warnings
