@@ -892,10 +892,10 @@ pytest tests/test_semantic_diff.py tests/test_diff.py tests/analysis/test_git_di
 ### 门禁 46: MCP 3.0 智能分析 (P46)
 
 **P46a: 智能重构建议**
-- [ ] TDD tests pass
-- [ ] 方法提取建议正确
-- [ ] 接口提取建议正确
-- [ ] 纯脱网验证
+- [x] TDD tests pass
+- [x] 方法提取建议正确
+- [x] 接口提取建议正确
+- [x] 纯脱网验证
 
 **P46b: 安全漏洞检测**
 - [x] TDD tests pass
@@ -905,16 +905,16 @@ pytest tests/test_semantic_diff.py tests/test_diff.py tests/analysis/test_git_di
 - [x] 纯脱网验证
 
 **P46c: 代码质量门禁**
-- [ ] TDD tests pass
-- [ ] 复杂度门禁
-- [ ] 测试覆盖门禁
-- [ ] Pass/Fail/Review 判定
+- [x] TDD tests pass
+- [x] 复杂度门禁
+- [x] 测试覆盖门禁
+- [x] Pass/Fail/Review 判定
 
 **P46d: 智能搜索**
-- [ ] TDD tests pass
-- [ ] 同义词搜索
-- [ ] AST 结构搜索
-- [ ] 纯脱网验证
+- [x] TDD tests pass
+- [x] 同义词搜索
+- [x] AST 结构搜索
+- [x] 纯脱网验证
 
 ### 门禁 47: 跨语言边解析 (P47)
 

@@ -560,7 +560,9 @@ def _api_compat_check(store: Store, args: Optional[dict]) -> dict:
 
 
 def _find_pattern(store: Store, args: Optional[dict]) -> dict:
-    """Search for structural code patterns."""
+    """Search for structural code patterns with smart enhancements (P46d)."""
+    import re
+
     pattern = args.get("pattern", "") if args else ""
     language = args.get("language") if args else None
     limit = args.get("limit", 50) if args else 50
@@ -573,52 +575,121 @@ def _find_pattern(store: Store, args: Optional[dict]) -> dict:
             }],
         }
 
+    # Synonym map for smart expansion (P46d)
+    SYNONYM_MAP = {
+        "auth": ["authenticate", "authorize", "authorization", "login", "logout",
+                 "credential", "session", "token", "permission"],
+        "db": ["database", "sql", "query", "execute", "connection", "cursor"],
+        "http": ["request", "response", "api", "rest", "endpoint", "url", "fetch"],
+        "file": ["open", "read", "write", "io", "path", "directory", "file"],
+    }
+
+    # Structural pattern map
+    pattern_map = {
+        "try_except": "try_statement",
+        "try_catch": "try_statement",
+        "for_loop": "for_statement",
+        "while_loop": "while_statement",
+        "async_function": "async",
+        "decorator": "decorator",
+        "class_with_decorator": "decorator",
+        "nested_loop": "for_statement",
+        "context_manager": "with_statement",
+        "list_comprehension": "list_comprehension",
+        "lambda": "lambda",
+        "generator": "generator",
+        "switch": "switch",
+        "match": "match",
+    }
+
+    pattern_lower = pattern.lower().replace(" ", "_").replace("-", "_")
+
     try:
-        # Map common pattern descriptions to AST node types
-        pattern_map = {
-            "try_except": "try_statement",
-            "try_catch": "try_statement",
-            "for_loop": "for_statement",
-            "while_loop": "while_statement",
-            "async_function": "async",
-            "decorator": "decorator",
-            "class_with_decorator": "decorator",
-            "nested_loop": "for_statement",
-            "context_manager": "with_statement",
-            "list_comprehension": "list_comprehension",
-            "lambda": "lambda",
-            "generator": "generator",
-            "switch": "switch",
-            "match": "match",
-        }
+        expanded_terms: list[str] = []
+        is_body_search = False
+        body_pattern = None
+        is_structural = False
+        structural_key = None
 
-        # Extract pattern keywords
-        pattern_lower = pattern.lower().replace(" ", "_").replace("-", "_")
+        # Check for body: prefix (P46d)
+        if pattern_lower.startswith("body:"):
+            is_body_search = True
+            body_pattern = pattern[5:]  # Remove "body:" prefix
+        # Check for structural pattern keys
+        else:
+            for key in pattern_map:
+                if key in pattern_lower:
+                    is_structural = True
+                    structural_key = key
+                    break
 
-        search_terms: list[str] = []
-        for key, node_type in pattern_map.items():
-            if key in pattern_lower:
-                search_terms.append(node_type)
-
-        # If no structural match, use pattern as text search
-        if not search_terms:
+        # Synonym expansion (P46d)
+        if not is_body_search and not is_structural:
             search_terms = [pattern]
+            for syn_key, synonyms in SYNONYM_MAP.items():
+                if syn_key in pattern_lower:
+                    search_terms.extend(synonyms)
+                    expanded_terms = synonyms
+                    break
+            if not expanded_terms:
+                search_terms = [pattern]
+        elif is_structural:
+            search_terms = [pattern_map[structural_key]]
+        else:
+            search_terms = []
 
         results_map: dict[str, list[dict]] = {}  # file_path -> [matches]
 
+        # FTS name-based search (for synonym and basic patterns)
         for term in search_terms:
-            # Search for nodes matching the structural pattern
             matches = store.fts_search(term, limit=limit, language_filter=language)
             for m in matches:
-                if _get(m, "file_path") not in results_map:
-                    results_map[_get(m, "file_path")] = []
-                if len(results_map[_get(m, "file_path")]) < 5:  # max 5 per file
-                    results_map[_get(m, "file_path")].append({
-                        "name": _get(m, "node_name"),
+                fp = _get(m, "file_path", "")
+                if fp not in results_map:
+                    results_map[fp] = []
+                if len(results_map[fp]) < 5:
+                    results_map[fp].append({
+                        "name": _get(m, "node_name") or _get(m, "name"),
                         "kind": _get(m, "kind"),
                         "line": _get(m, "start_line"),
                         "qualified_name": _get(m, "qualified_name"),
                     })
+
+        # Body search: iterate all nodes and check body content
+        if is_body_search or is_structural:
+            body_regex = None
+            if is_body_search and body_pattern:
+                body_regex = re.compile(re.escape(body_pattern), re.IGNORECASE)
+            elif is_structural and structural_key in ("try_except", "try_catch"):
+                body_regex = re.compile(r'try\s*:', re.IGNORECASE)
+            elif is_structural and structural_key in ("for_loop",):
+                body_regex = re.compile(r'for\s+\w+\s+in\s+', re.IGNORECASE)
+            elif is_structural and structural_key in ("while_loop",):
+                body_regex = re.compile(r'while\s+', re.IGNORECASE)
+            elif is_structural and structural_key in ("context_manager",):
+                body_regex = re.compile(r'with\s+', re.IGNORECASE)
+            elif is_structural and structural_key in ("lambda",):
+                body_regex = re.compile(r'lambda\s+', re.IGNORECASE)
+            elif is_structural and structural_key in ("decorator", "class_with_decorator"):
+                body_regex = re.compile(r'@\w+', re.IGNORECASE)
+
+            if body_regex:
+                for node in store.iter_all_nodes():
+                    node_lang = _get(node, "language", "")
+                    if language and node_lang != language:
+                        continue
+                    body = _get(node, "body") or ""
+                    if body_regex.search(body):
+                        fp = _get(node, "file_path", "")
+                        if fp not in results_map:
+                            results_map[fp] = []
+                        if len(results_map[fp]) < 5:
+                            results_map[fp].append({
+                                "name": _get(node, "name"),
+                                "kind": _get(node, "kind"),
+                                "line": _get(node, "start_line"),
+                                "qualified_name": _get(node, "qualified_name"),
+                            })
 
         # Build output
         results = []
@@ -629,10 +700,8 @@ def _find_pattern(store: Store, args: Optional[dict]) -> dict:
                 "matches": results_map[fp][:5],
             })
 
-        # Limit total results
         results = results[:limit]
 
-        # Summarize pattern types found
         kinds_found: dict[str, int] = {}
         for r in results:
             for m in r["matches"]:
@@ -651,6 +720,21 @@ def _find_pattern(store: Store, args: Optional[dict]) -> dict:
                 "'search' tool instead."
             ),
         }
+
+        # Add expanded terms info if synonym search was used (P46d)
+        if expanded_terms:
+            output["expanded_terms"] = expanded_terms
+            output["note"] = (
+                f"Synonym expansion applied: '{pattern}' → also searched for "
+                f"{', '.join(expanded_terms[:5])}"
+                + ("..." if len(expanded_terms) > 5 else "")
+            )
+
+        if is_body_search:
+            output["note"] = f"Body search for pattern: '{body_pattern}'"
+        elif is_structural:
+            output["note"] = f"Structural pattern: '{structural_key}' matched via body AST analysis"
+
     except Exception as e:
         output = {"error": str(e), "results": []}
 
