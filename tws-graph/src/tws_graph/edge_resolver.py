@@ -83,6 +83,10 @@ class ResolveResult:
 def resolve_edges(queries) -> ResolveResult:
     """Main entry point: resolve dangling call edges using target_text.
 
+    P29 (v5.3.0): Import-aware resolution — follows import edges to expand
+    aliases, resolve ``from X import Y`` patterns, and use import context
+    for disambiguation.
+
     Args:
         queries: QueryBuilder instance connected to the index DB.
 
@@ -97,82 +101,53 @@ def resolve_edges(queries) -> ResolveResult:
     if not dangling:
         return result
 
-    # ── 2. Build suffix index from all callable nodes ────
-    # Index maps: suffix → [node_id, ...] (both exact and case-insensitive)
+    # ── 2. Build import map ─────────────────────────────────────
+    # P29a/c: import_map[source_file] → {name: {module, full_name}}
+    #   "pd" → {module: "pandas", full_name: "pandas"}
+    #   "Baz" → {module: "foo.bar", full_name: "foo.bar.Baz"}
+    import_map = _build_import_map(queries)
+
+    # ── 3. Build suffix index from all callable nodes ────
     suffix_index: dict[str, list[str]] = {}
-    suffix_index_lower: dict[str, list[str]] = {}  # lowercase → [node_id]
-    node_file: dict[str, str] = {}  # node_id → file_path (for same-file disambiguation)
+    suffix_index_lower: dict[str, list[str]] = {}
+    node_file: dict[str, str] = {}
+    node_qname: dict[str, str] = {}  # node_id → qualified_name (for import matching)
     all_nodes = queries.get_all_callable_nodes()
     for node in all_nodes:
         qname = node["qualified_name"]
-        node_file[node["id"]] = node["file_path"]
+        nid = node["id"]
+        node_file[nid] = node["file_path"]
+        node_qname[nid] = qname
         parts = qname.rsplit("::", 3)
-        # Build up to 3 levels of suffix
         for level in range(1, min(len(parts), 3) + 1):
             suffix = "::".join(parts[-level:])
-            suffix_index.setdefault(suffix, []).append(node["id"])
-            suffix_index_lower.setdefault(suffix.lower(), []).append(node["id"])
+            suffix_index.setdefault(suffix, []).append(nid)
+            suffix_index_lower.setdefault(suffix.lower(), []).append(nid)
 
-    # ── 3. Resolve each dangling edge ───────────────────────────
+    # ── 4. Resolve each dangling edge ───────────────────────────
     for edge in dangling:
         target_text = edge["target_text"]
         if not target_text:
             continue
 
-        # Parse target_text: "file.kt::Container::ClassName::method" or similar
-        parts = target_text.rsplit("::", 3)
-        # parts look like: ["file.kt", "ClassName", "method"] or ["file.kt::ClassName", "method"]
-
-        matched_id = None
-        match_level = None
-        matched_count = 0
-
-        # Extract source file from source_loc ("file.kt:line")
         source_file = (edge["source_loc"] or "").rsplit(":", 1)[0]
 
-        # Try from most specific (3 segments) to least (1 segment)
-        for level in range(min(len(parts), 3), 0, -1):
-            suffix = "::".join(parts[-level:])
-            candidates = suffix_index.get(suffix, [])
-            if len(candidates) == 1:
-                matched_id = candidates[0]
-                match_level = level
-                matched_count = 1
-                break
-            elif len(candidates) > 1:
-                # For 1-segment: try same-file disambiguation
-                if level == 1 and source_file:
-                    same_file = [cid for cid in candidates
-                                 if node_file.get(cid) == source_file]
-                    if len(same_file) == 1:
-                        matched_id = same_file[0]
-                        match_level = level
-                        matched_count = len(candidates)
-                        break
-                # Record multi-match but keep looking for a more specific match
-                if matched_id is None:
-                    matched_count = len(candidates)
+        # P29a/c: try resolving with import alias expansion
+        expanded_texts = _expand_target_via_imports(
+            target_text, source_file, import_map
+        )
 
-        # If no exact match, try case-insensitive fallback
-        # (handles camelCase-vs-PascalCase: documentOpener vs DocumentOpener)
-        if not matched_id and matched_count == 0:
-            for level in range(min(len(parts), 2), 0, -1):
-                suffix = "::".join(parts[-level:])
-                ci_candidates = suffix_index_lower.get(suffix.lower(), [])
-                if len(ci_candidates) == 1:
-                    matched_id = ci_candidates[0]
-                    matched_count = 1
-                    break
-                elif len(ci_candidates) > 1 and matched_id is None:
-                    # Try same-file within CI matches
-                    if source_file:
-                        same_file_ci = [cid for cid in ci_candidates
-                                        if node_file.get(cid) == source_file]
-                        if len(same_file_ci) == 1:
-                            matched_id = same_file_ci[0]
-                            matched_count = len(ci_candidates)
-                            break
-                    matched_count = len(ci_candidates)
+        matched_id = None
+        matched_count = 0
+
+        # Try each expanded form (original first, then alias-expanded)
+        for try_text in expanded_texts:
+            matched_id, matched_count = _try_match(
+                try_text, suffix_index, suffix_index_lower,
+                node_file, source_file
+            )
+            if matched_id:
+                break
 
         edge_rowid = edge["edge_rowid"]
         if matched_id:
@@ -186,6 +161,158 @@ def resolve_edges(queries) -> ResolveResult:
             result.unresolved += 1
 
     return result
+
+
+def _build_import_map(queries) -> dict[str, dict[str, dict[str, str]]]:
+    """Build per-file import map from import edges.
+
+    Returns:
+        ``{source_file: {local_name: {module, full_name}}}``
+
+    ``local_name`` is what the caller uses — either the alias or the last
+    segment of the imported name.  ``module`` is the package prefix and
+    ``full_name`` is the complete dotted path.
+    """
+    import_rows = queries._exec("""
+        SELECT e.target_text, ns.file_path AS source_file
+        FROM edges e
+        JOIN nodes ns ON e.source = ns.id
+        WHERE e.kind = 'imports'
+          AND e.target_text IS NOT NULL
+    """).fetchall()
+
+    imap: dict[str, dict[str, dict[str, str]]] = {}
+    for row in import_rows:
+        sf = row["source_file"]
+        if not sf:
+            continue
+        target_text = row["target_text"]
+
+        # Parse "module.Name as alias" or "module.Name" or "*"
+        alias = None
+        rest = target_text
+
+        if " as " in target_text:
+            rest, alias = target_text.rsplit(" as ", 1)
+
+        if alias:
+            local_name = alias
+            full_name = rest
+        else:
+            # No explicit alias — the local name is the last segment
+            local_name = rest.rsplit(".", 1)[-1] if "." in rest else rest
+            full_name = rest
+
+        module = rest.rsplit(".", 1)[0] if "." in rest else rest
+
+        imap.setdefault(sf, {})[local_name] = {
+            "module": module,
+            "full_name": full_name,
+        }
+
+    return imap
+
+
+def _expand_target_via_imports(
+    target_text: str,
+    source_file: str,
+    import_map: dict[str, dict[str, dict[str, str]]],
+) -> list[str]:
+    """Expand call target_text through import aliases.
+
+    Returns a list of candidate target_text strings, with the original
+    first (no expansion) and alias-expanded forms appended.
+    """
+    results = [target_text]  # always try original first
+
+    if not source_file or source_file not in import_map:
+        return results
+
+    file_imports = import_map[source_file]
+    if not file_imports:
+        return results
+
+    # target_text is "A::B::method" or "func" or "A.B"
+    # Split on first "::" to get the receiver prefix
+    parts = target_text.split("::", 1)
+    first_segment = parts[0]
+
+    # Check if first_segment matches an imported name or alias
+    imp_info = file_imports.get(first_segment)
+    if imp_info:
+        # Expand: "pd::DataFrame" → "pandas::DataFrame"
+        if imp_info["full_name"] != first_segment:
+            expanded = imp_info["full_name"] + ("::" + parts[1] if len(parts) > 1 else "")
+            results.append(expanded)
+        # Also try using just the last segment of the import as prefix
+        # "from foo.bar import Baz" → target_text "Baz::method"
+        # Try "foo.bar.Baz::method" (fully qualified)
+        if "." in imp_info["full_name"]:
+            expanded_full = imp_info["full_name"] + ("::" + parts[1] if len(parts) > 1 else "")
+            results.append(expanded_full)
+
+    # P29b: if source_file has wildcard imports, treat first_segment
+    # as potentially from the wildcard-imported module
+    for local_name, info in file_imports.items():
+        if info["full_name"].endswith(".*") or local_name == "*":
+            # Wildcard — first_segment might be from this module
+            if first_segment not in file_imports:
+                # The call name could be an export of the wildcard module
+                expanded = info["module"] + "." + first_segment
+                if len(parts) > 1:
+                    expanded += "::" + parts[1]
+                results.append(expanded)
+
+    return results
+
+
+def _try_match(
+    target_text: str,
+    suffix_index: dict[str, list[str]],
+    suffix_index_lower: dict[str, list[str]],
+    node_file: dict[str, str],
+    source_file: str,
+) -> tuple[str | None, int]:
+    """Try to match a single target_text against the suffix index.
+
+    Returns (matched_id, matched_count).  matched_id is None if no
+    unique match was found; matched_count is the number of candidates
+    when not unique.
+    """
+    parts = target_text.rsplit("::", 3)
+    matched_id = None
+    matched_count = 0
+
+    # Case-sensitive: most specific to least
+    for level in range(min(len(parts), 3), 0, -1):
+        suffix = "::".join(parts[-level:])
+        candidates = suffix_index.get(suffix, [])
+        if len(candidates) == 1:
+            return (candidates[0], 1)
+        elif len(candidates) > 1:
+            if level == 1 and source_file:
+                same_file = [cid for cid in candidates
+                             if node_file.get(cid) == source_file]
+                if len(same_file) == 1:
+                    return (same_file[0], len(candidates))
+            matched_count = len(candidates)
+
+    # Case-insensitive fallback
+    if not matched_id and matched_count == 0:
+        for level in range(min(len(parts), 2), 0, -1):
+            suffix = "::".join(parts[-level:])
+            ci_candidates = suffix_index_lower.get(suffix.lower(), [])
+            if len(ci_candidates) == 1:
+                return (ci_candidates[0], 1)
+            elif len(ci_candidates) > 1 and matched_id is None:
+                if source_file:
+                    same_file_ci = [cid for cid in ci_candidates
+                                    if node_file.get(cid) == source_file]
+                    if len(same_file_ci) == 1:
+                        return (same_file_ci[0], len(ci_candidates))
+                matched_count = len(ci_candidates)
+
+    return (matched_id, matched_count)
 
 
 # ---------------------------------------------------------------------------

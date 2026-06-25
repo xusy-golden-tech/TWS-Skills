@@ -453,3 +453,116 @@ WHERE e.kind='data_flows' AND e.provenance='cross-file' AND ns.file_path = nt.fi
 | 索引速度 | 289s (1.84x, 535s→289s) | 14.1s | 差距缩小 |
 | 节点数 | 88,150 | 66,221 | **领先** |
 | 边总数 | 692,042 | 280k | **领先** |
+
+---
+
+## v5.3.0 门禁
+
+> **验证日期**: 2026-06-25
+> **目标**: 调用解析精度升级 + 架构分析 + 污点分析 + 图导出 + 增量v2
+> **TDD 状态**: 待实施
+
+### 门禁 29: 调用解析精度升级 (P29) — PENDING
+
+**P29a: 导入链追踪**
+- [ ] TDD tests pass
+- [ ] g-ass-source: resolved 边数增加
+- [ ] 通过 import 边解析的调用 > 0
+
+**测试方法**：
+```sql
+-- 解析前后对比
+SELECT provenance, COUNT(*) FROM edges WHERE kind='calls' GROUP BY provenance;
+-- resolved 应增加, unresolved/ambiguous 应减少
+```
+
+**P29b: 通配符导入展开**
+- [ ] TDD tests pass
+- [ ] `from X import *` 后的调用可解析
+
+**P29c: 别名解析**
+- [ ] TDD tests pass
+- [ ] `import X as Y` 后的 `Y.method()` 可解析
+
+**P29d: 模糊消除**
+- [ ] TDD tests pass
+- [ ] ambiguous 边数减少
+
+**综合**：
+- [ ] g-ass-source resolved ≥ 5% 增加
+- [ ] 全量回归: 全部测试通过
+
+### 门禁 30: 架构分析引擎 (P30) — PENDING
+
+**P30a: 循环依赖检测**
+- [ ] TDD tests pass
+- [ ] 在已知有循环的项目上检测到环
+- [ ] `tws-graph cycles` CLI 可运行
+
+**P30b: 层次违规检测**
+- [ ] TDD tests pass
+- [ ] 分层项目上检测到违规
+- [ ] `tws-graph layers` CLI 可运行
+
+**P30c: 模块度量**
+- [ ] TDD tests pass
+- [ ] 内聚/耦合/不稳定性输出有效
+- [ ] `tws-graph metrics` CLI 可运行
+
+**综合**：
+- [ ] 全量回归: 全部测试通过
+
+### 门禁 31: 污点分析 (P31) — PENDING
+
+**P31a: Source 标记**
+- [ ] TDD tests pass
+- [ ] 环境变量/文件读取/用户输入被正确标记
+
+**P31b: Sink 标记**
+- [ ] TDD tests pass
+- [ ] 命令执行/SQL/代码注入被正确标记
+
+**P31c: 路径追踪**
+- [ ] TDD tests pass
+- [ ] source→sink BFS 路径正确
+- [ ] `tws-graph taint` CLI 可运行
+
+**综合**：
+- [ ] 全量回归: 全部测试通过
+
+### 门禁 32: 图导出 (P32) — PENDING
+
+**P32a: DOT 导出**
+- [ ] TDD tests pass
+- [ ] 输出有效 DOT 语法
+- [ ] --depth/--kind/--from 过滤正确
+
+**P32b: Mermaid 导出**
+- [ ] TDD tests pass
+- [ ] 输出有效 Mermaid 语法
+
+**P32c: JSON 导出**
+- [ ] TDD tests pass
+- [ ] 输出有效 JSON
+
+**综合**：
+- [ ] `tws-graph export` 子命令组可用
+- [ ] 全量回归: 全部测试通过
+
+### 门禁 33: 增量索引 v2 (P33) — PENDING
+
+**P33a: body_hash 列**
+- [ ] TDD tests pass
+- [ ] nodes 表含 body_hash 列
+
+**P33b: 函数级增量**
+- [ ] TDD tests pass
+- [ ] 单函数修改时只重提取该函数
+
+**P33c: 行号漂移**
+- [ ] TDD tests pass
+- [ ] 未变函数行号正确更新
+
+**综合**：
+- [ ] 增量前后节点/边数一致
+- [ ] 全量回归: 全部测试通过

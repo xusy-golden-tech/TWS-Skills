@@ -1064,3 +1064,304 @@ P27 依赖稳定的 calls 和 data_flows 边结构，放在最后。
 | 索引速度 | **289s** (1.84x, 535s→289s) | 14.1s | 差距缩小 |
 | 节点数 | 88,150 | 66,221 | **领先** |
 | 边总数 | 692,042 | 280k | **领先** |
+
+---
+
+## 十九、v5.3.0 目标 —— 三根支柱建立不可逆优势
+
+> 2026-06-25 | 调用解析精度 + 架构分析 + 安全污点分析
+
+**核心目标：在 CBM 无法企及的维度建立护城河——图算法、污点追踪、架构洞察。**
+
+```
+P29: 调用解析精度升级      → 未解析率大幅降低，从"能查"到"查得准"
+P30: 架构分析引擎           → 层次检测 + 循环依赖 + 模块内聚/耦合
+P31: 安全污点分析           → source→sink 全路径追踪
+P32: 图导出与可视化         → DOT/Mermaid/JSON 导出
+P33: 增量索引 v2            → AST-diff 智能增量
+```
+
+### 19.1 P29: 调用解析精度升级
+
+**问题**：当前 resolve_edges 基于后缀匹配，仅利用 target_text 的最后 1-3 个段。缺少对导入链的利用，导致大量本可解析的调用被标记为 ambiguous 或 unresolved。
+
+**现状分析**（g-ass-source 当前数据）：
+- 已解析 (resolved): 大量
+- 模糊 (ambiguous): 3,712
+- 未解析 (unresolved): 10,240（含 external）
+
+**四个改进方向**：
+
+#### P29a: 导入链追踪
+
+**问题**：当 target_text 包含导入别名前缀时，当前解析器不知道如何展开。
+
+```
+示例：
+  file_a.py: from foo.bar import Baz  # qualified_name with alias
+  file_a.py: Baz.method()            # target_text = "Baz::method"
+  → Baz 不是已知符号，无法解析
+  → 应该通过 import 边找到 "foo.bar::Baz"，再找 Baz 的 method
+```
+
+**实现**：
+1. 在解析前加载所有 `imports` 边，建立 `(source_file, imported_name) → resolved_module` 映射
+2. 对每个 dangling call，检查 source_file 的导入映射
+3. 如果 target_text 的第一段匹配某个导入名，展开为完整模块路径再搜索
+4. 支持多层别名链：`import pandas as pd` → `pd.DataFrame` → `pandas.DataFrame`
+
+#### P29b: 通配符导入展开
+
+**问题**：`from module import *` 不产出具名导入边，解析器不知道哪些符号来自该模块。
+
+```
+示例：
+  file_a.py: from utils import *
+  file_a.py: helper()                # target_text = "helper"
+  → helper 在 index 中有多个候选，无法确定
+  → 应该检查 utils 模块导出了什么，缩小候选范围
+```
+
+**实现**：
+1. 加载所有 `from X import *` 边（target_text = "*"）
+2. 对目标模块，查询其导出的所有符号（公共函数/类）
+3. 将这些导出符号加入导入映射
+4. 用导入映射缩小 ambiguous 候选范围
+
+#### P29c: 别名感知解析
+
+**问题**：`import pandas as pd` 形式的导入，后续 `pd.DataFrame()` 调用无法解析。
+
+```
+示例：
+  file_a.py: import pandas as pd
+  file_a.py: pd.DataFrame(args)      # target_text = "pd::DataFrame"
+  → pd 不是已知符号，无法解析
+  → 应该展开 pd → pandas，然后搜索 "pandas::DataFrame"
+```
+
+**实现**：
+1. 解析 import 边的 target_text，检测 `as` 别名模式
+2. 建立 alias → full_module_name 映射
+3. 解析时展开别名前缀
+
+#### P29d: 模糊消除改进
+
+**问题**：当多个候选匹配时，仅用同文件去歧义。没有利用：
+- 导入上下文（source_file 导入了哪个模块）
+- 包邻近性（同目录优先）
+- 使用频率（同包使用更可能）
+
+**实现**：
+1. 导入上下文加权：候选在 source_file 的导入链中 → 优先
+2. 包邻近加权：候选与 source_file 同目录 → 次优先
+3. 降级为 ambiguous 前用加权打分决定唯一候选
+
+**测试门禁 (P29)**：
+
+| 门禁 | 标准 |
+|------|------|
+| 导入链解析 | 通过 import 边解析的调用 > 0 |
+| 别名解析 | `import X as Y` 后的 `Y.method()` 可解析 |
+| 通配符导入 | `from X import *` 后的调用可解析 |
+| 模糊消除 | ambiguous 边数减少 |
+| g-ass-source resolved 增加 | resolved 边数增加 ≥ 5% |
+| 不引入回归 | 全量测试通过 |
+
+---
+
+### 19.2 P30: 架构分析引擎
+
+**问题**：tws-graph 有完整的图数据，但没有利用图算法做架构分析。CBM 无法做深层图分析——这是我们的护城河。
+
+**三个分析能力**：
+
+#### P30a: 循环依赖检测
+
+**算法**：基于 calls/imports 边的 Tarjan SCC 或 Johnson 算法，找出有向图中的所有环。
+
+**产出**：
+- `circular_dep` 边：环中每条边标记（可选）
+- `tws-graph cycles` 命令：列出所有循环依赖
+- 环大小、涉及文件数统计
+
+#### P30b: 层次违规检测
+
+**概念**：定义架构层次（如 `ui → business → data`），检测违反层次方向的调用。
+
+**实现**：
+1. 按目录模式定义层次（如 `**/ui/**` → layer 1, `**/service/**` → layer 2）
+2. 扫描 calls 边，检测低层调用高层（反向调用）
+3. 产出 layer violation 报告
+
+**CLI**：`tws-graph layers` 命令
+
+#### P30c: 模块内聚/耦合度量
+
+**算法**：
+- **内聚 (cohesion)**：模块内 calls + references 密度
+- **耦合 (coupling)**：跨模块 calls + imports 密度
+- **不稳定性 (instability)**：传出耦合 / (传入耦合 + 传出耦合)
+
+**CLI**：`tws-graph metrics` 命令
+
+**测试门禁 (P30)**：
+
+| 门禁 | 标准 |
+|------|------|
+| 循环依赖检测 | 在已知有循环的项目上检测到环 |
+| 层次检测 | 在分层项目上检测到违规 |
+| 度量计算 | 内聚/耦合/不稳定性输出有效 |
+| CLI 入口 | `tws-graph cycles/layers/metrics` 可运行 |
+| 不引入回归 | 全量测试通过 |
+
+---
+
+### 19.3 P31: 安全污点分析
+
+**问题**：data_flows 边已经铺好了数据流管道，但没有做安全分析。这是一个 CBM 完全做不了的高价值能力。
+
+**实现**：
+
+#### P31a: Source/Sink 标记
+
+**Source（敏感数据来源）**：
+- `os.environ.get()`, `os.getenv()` → 环境变量
+- `open()`, `Path.read_text()` → 文件读取
+- `input()` → 用户输入
+- `request.get_json()` → HTTP 请求体
+- `process.env.*` (TS) → 环境变量
+
+**Sink（危险操作）**：
+- `os.system()`, `subprocess.run()` → 命令注入
+- `open(..., 'w')`, `.write()` → 文件写入
+- `conn.execute()` (SQL) → SQL 注入
+- `eval()`, `exec()` → 代码注入
+- `requests.post()`, `fetch()` → 数据外泄
+
+#### P31b: BFS 路径搜索
+
+1. 从 source 节点出发，沿 data_flows 边做 BFS
+2. 到达 sink 节点 → 记录路径
+3. 深度限制：5 跳
+4. 输出：source → ... → sink 路径（节点 + 文件 + 行号）
+
+**CLI**：`tws-graph taint` 命令
+
+**测试门禁 (P31)**：
+
+| 门禁 | 标准 |
+|------|------|
+| Source 标记正确 | 环境变量/文件读取/用户输入被标记 |
+| Sink 标记正确 | 命令执行/SQL/代码注入被标记 |
+| 路径发现 | source→sink 路径被正确追踪 |
+| 深度限制 | BFS ≤ 5 跳 |
+| CLI 入口 | `tws-graph taint` 可运行 |
+| 不引入回归 | 全量测试通过 |
+
+---
+
+### 19.4 P32: 图导出与可视化
+
+**问题**：图数据锁在 SQLite 中，无法直接用于可视化或文档。
+
+**实现**：
+
+#### P32a: DOT 导出
+- `tws-graph export dot` — 输出 Graphviz DOT 格式
+- 支持 `--depth N` 限制导出深度
+- 支持 `--kind` 过滤边类型
+- 支持 `--from NODE` 导出以某节点为中心的子图
+
+#### P32b: Mermaid 导出
+- `tws-graph export mermaid` — 输出 Mermaid 图
+- 适合嵌入 Markdown 文档
+
+#### P32c: JSON 导出
+- `tws-graph export json` — 输出节点+边 JSON
+- 适合程序化处理
+
+**测试门禁 (P32)**：
+
+| 门禁 | 标准 |
+|------|------|
+| DOT 导出 | 输出有效 DOT 语法 |
+| Mermaid 导出 | 输出有效 Mermaid 语法 |
+| JSON 导出 | 输出有效 JSON |
+| 子图过滤 | --from/--depth/--kind 起作用 |
+| CLI 入口 | `tws-graph export` 子命令可用 |
+| 不引入回归 | 全量测试通过 |
+
+---
+
+### 19.5 P33: 增量索引 v2 — AST-diff 智能增量
+
+**问题**：当前增量索引基于文件 mtime+size，文件一改就全量重新解析。大文件修改一行也要完整 parse。
+
+**实现**：
+
+#### P33a: 函数级哈希
+
+1. 索引时为每个函数/方法节点计算 AST 子树哈希
+2. 存储在 nodes 表的 `body_hash` 列（新增）
+
+#### P33b: 函数级增量
+
+1. `tws-graph sync` 读取修改的文件
+2. 对每个修改的文件，parse AST
+3. 对每个函数/类，计算新 AST 子树哈希
+4. 与 DB 中存储的 `body_hash` 比较
+5. 哈希一致的 → 跳过（行号可能变了但 AST 没变）
+6. 哈希变化的 → 只重提取该函数
+
+#### P33c: 行号漂移修复
+
+- 对于 AST 未变的函数，更新其 start_line/end_line
+- 行号通过 tree-sitter 的 `node.start_point.row` 获取
+
+**测试门禁 (P33)**：
+
+| 门禁 | 标准 |
+|------|------|
+| body_hash 列存在 | nodes 表新增 body_hash 列 |
+| 函数级增量 | 修改 1 个函数时，只重提取该函数 |
+| 行号漂移 | 未变函数的行号正确更新 |
+| 性能 | 增量索引速度显著提升（大文件 1 行改动 << 全文件 re-parse） |
+| 正确性 | 增量前后节点/边数一致 |
+| 不引入回归 | 全量测试通过 |
+
+---
+
+## 二十、v5.3.0 实现顺序
+
+```
+P29 (调用解析) ── 先实施（提升基础数据质量，影响所有下游）
+       │
+       ▼
+P30 (架构分析) ── 次之（利用解析精度提升后的数据）
+       │
+       ▼
+P31 (污点分析) ── 基于 data_flows 边（已在 P25/P27 深化）
+       │
+       ▼
+P33 (增量v2) ── 性能优化
+       │
+       ▼
+P32 (图导出) ── 最后（依赖稳定的图数据）
+```
+
+P32 可在任何阶段并行开发（纯导出逻辑）。
+
+---
+
+## 二十一、完成定义 (DoD)
+
+- [ ] P29: 5/6 测试门禁通过
+- [ ] P30: 4/4 测试门禁通过
+- [ ] P31: 5/5 测试门禁通过
+- [ ] P32: 5/5 测试门禁通过
+- [ ] P33: 5/5 测试门禁通过
+- [ ] g-ass-source 调用解析精度提升验证
+- [ ] 全量回归: 3700+ passed, 0 failed
+- [ ] tws-graph lint: 0 errors, 0 warnings
+- [ ] quality-gates.md: G29-G33 全部通过

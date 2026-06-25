@@ -400,12 +400,27 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
         # --- Import statements ---
         elif node_kind == "import_statement":
             for child in _children(node):
+                imported_name = None
+                alias = None
                 if child.kind() == "dotted_name":
-                    module = _node_text(child, source)
-                    if node_stack:
-                        target_id = _hash_id(f"{file_path}::{module}", file_path)
-                        add_edge(node_stack[-1], target_id, "imports", node.start_position().row + 1,
-                                 target_text=module)
+                    imported_name = _node_text(child, source)
+                elif child.kind() == "aliased_import":
+                    name_child = child.child_by_field_name("name")
+                    alias_child = child.child_by_field_name("alias")
+                    if name_child:
+                        imported_name = _node_text(name_child, source)
+                    if alias_child:
+                        alias = _node_text(alias_child, source)
+
+                if not imported_name:
+                    continue
+
+                # Store alias in target_text: "pandas as pd" or just "pandas"
+                target_text = f"{imported_name} as {alias}" if alias else imported_name
+                if node_stack:
+                    target_id = _hash_id(f"{file_path}::{imported_name}", file_path)
+                    add_edge(node_stack[-1], target_id, "imports", node.start_position().row + 1,
+                             target_text=target_text)
 
         elif node_kind == "import_from_statement":
             module_name = None
@@ -415,6 +430,7 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
 
             for child in _children(node):
                 imported_name = None
+                alias = None
                 if child.kind() == "dotted_name":
                     # Skip if this is the module_name node (the "from" part)
                     if module_name and _node_text(child, source) == module_name:
@@ -422,19 +438,25 @@ def visit_python(file_path: str, content: str, tree) -> ExtractionResult:
                     imported_name = _node_text(child, source)
                 elif child.kind() == "aliased_import":
                     name_child = child.child_by_field_name("name")
+                    alias_child = child.child_by_field_name("alias")
                     if name_child:
                         imported_name = _node_text(name_child, source)
+                    if alias_child:
+                        alias = _node_text(alias_child, source)
                 elif child.kind() == "wildcard_import":
                     imported_name = "*"
 
                 if not imported_name:
                     continue
 
-                full_name = f"{module_name}.{imported_name}" if module_name else imported_name
+                module_prefix = f"{module_name}." if module_name else ""
+                full_name = f"{module_prefix}{imported_name}"
+                # Store alias: "foo.bar.Baz as B" or just "foo.bar.Baz"
+                target_text = f"{full_name} as {alias}" if alias else full_name
                 if node_stack:
                     target_id = _hash_id(f"{file_path}::{full_name}", file_path)
                     add_edge(node_stack[-1], target_id, "imports", node.start_position().row + 1,
-                             target_text=full_name)
+                             target_text=target_text)
 
         # --- Recurse into children ---
         _walk_children(node)
