@@ -2694,6 +2694,62 @@ def predict_impact(
         typer.echo()
 
 
+# ============================================================================
+# Code health command (P41 v5.5.0)
+# ============================================================================
+
+@app.command()
+def health(
+    top: int = typer.Option(0, "--top", help="只显示前 N 个最健康的文件"),
+    worst: int = typer.Option(0, "--worst", help="只显示后 N 个最不健康的文件"),
+    json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
+    db: str | None = typer.Option(
+        None, "--db",
+        help="数据库路径 (默认: .tws/codegraph/index.db)",
+    ),
+):
+    """代码健康度评分 —— 综合测试覆盖、死代码、耦合度评估每个文件。
+
+    评分维度:
+      测试覆盖 (40%) + 活代码率 (25%) + 耦合度 (20%) + 文件规模 (15%)
+
+    例：
+      tws-graph health
+      tws-graph health --worst 10
+      tws-graph health --top 5 --json
+    """
+    from .analysis.code_health import compute_health_scores
+
+    db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
+    if db_conn is None:
+        typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
+        raise typer.Exit(1)
+
+    queries = QueryBuilder(db_conn.conn)
+    scores = compute_health_scores(queries)
+
+    if not scores:
+        typer.echo("(无生产文件数据)")
+        return
+
+    if worst > 0:
+        scores = scores[-worst:]
+    elif top > 0:
+        scores = scores[:top]
+
+    if json_output:
+        typer.echo(json.dumps(scores, ensure_ascii=False, indent=2, default=str))
+    else:
+        typer.echo(f"\n{'文件':<50} {'评分':>5} {'函数':>5} {'已测':>5} {'死码':>5} {'覆盖%':>7} {'外部依赖':>8}")
+        typer.echo("-" * 95)
+        for s in scores:
+            typer.echo(
+                f"{s['file_path']:<50} {s['score']:>5} {s['func_count']:>5} "
+                f"{s['tested_count']:>5} {s['dead_count']:>5} {s['coverage_pct']:>6.1f}% "
+                f"{s['external_deps']:>8}"
+            )
+
+
 def main():
     app()
 
