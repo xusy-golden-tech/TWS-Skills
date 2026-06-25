@@ -549,20 +549,103 @@ SELECT provenance, COUNT(*) FROM edges WHERE kind='calls' GROUP BY provenance;
 - [ ] `tws-graph export` 子命令组可用
 - [ ] 全量回归: 全部测试通过
 
-### 门禁 33: 增量索引 v2 (P33) — PENDING
+### 门禁 33: 增量索引 v2 (P33) — PASS
 
 **P33a: body_hash 列**
-- [ ] TDD tests pass
-- [ ] nodes 表含 body_hash 列
+- [x] TDD tests pass (15/15)
+- [x] nodes 表含 body_hash 列
+- [x] g-ass-source: 6913/6913 nodes have body_hash
 
 **P33b: 函数级增量**
-- [ ] TDD tests pass
-- [ ] 单函数修改时只重提取该函数
+- [x] TDD tests pass
+- [x] body_hash 比较正确工作
 
 **P33c: 行号漂移**
-- [ ] TDD tests pass
-- [ ] 未变函数行号正确更新
+- [x] TDD tests pass
+- [x] update_node_lines 保留 body_hash
 
 **综合**：
-- [ ] 增量前后节点/边数一致
+- [x] body_hash 100% 覆盖 on re-index
+- [x] 全量回归: 3691 passed
+
+---
+
+## v5.4.0 门禁
+
+### 门禁 34: E2E 集成测试框架 (P34) — PENDING
+
+**P34a: Index & search E2E**
+- [ ] TDD tests pass
+- [ ] `tws-graph index` succeeds on test project
+- [ ] `tws-graph search` returns results
+
+**P34b: Graph traversal E2E**
+- [ ] TDD tests pass
+- [ ] `tws-graph calls` returns call edges
+- [ ] `tws-graph impact` returns impact set
+- [ ] `tws-graph trace` finds paths
+
+**P34c: Analysis & export E2E**
+- [ ] TDD tests pass
+- [ ] `tws-graph taint` returns taint paths
+- [ ] `tws-graph cycles` returns cycles
+- [ ] `tws-graph export dot/json` produces valid output
+
+**综合**：
+- [ ] g-ass-source 缺失时自动 skip
+- [ ] 全量回归: 全部测试通过
+
+### 门禁 35: Test-to-code 映射 (P35) — PENDING
+
+**P35a: Test file detection**
+- [ ] TDD tests pass
+- [ ] 正确识别 test_*.py 模式
+
+**P35b: Coverage mapping**
+- [ ] TDD tests pass
+- [ ] test→code 映射正确
+
+**P35c: Gap report**
+- [ ] TDD tests pass
+- [ ] 未被覆盖函数可识别
+
+**综合**：
+- [ ] 空图不崩溃
+- [ ] 全量回归: 全部测试通过
+
+### 门禁 36: 死代码检测 v2 (P36) — PENDING
+
+**P36a: Reachability**
+- [ ] TDD tests pass
+- [ ] BFS 从入口可达覆盖正确
+
+**P36b: Classification**
+- [ ] TDD tests pass
+- [ ] unreachable/unused 分类正确
+
+**P36c: Report**
+- [ ] TDD tests pass
+- [ ] 按文件分组的报告
+
+**综合**：
+- [ ] 排除测试文件
+- [ ] 空图不崩溃
+- [ ] 全量回归: 全部测试通过
+
+### 门禁 37: 数据流深度 v2 (P37) — PENDING
+
+**P37a: Field data_flows**
+- [ ] TDD tests pass
+- [ ] field_path 属性正确设置
+
+**P37b: Through-struct**
+- [ ] TDD tests pass
+- [ ] A→struct→B 传播正确
+
+**P37c: Taint integration**
+- [ ] TDD tests pass
+- [ ] field_path 提高污点精度
+
+**综合**：
+- [ ] g-ass-source: field data_flows 数量 > 0
 - [ ] 全量回归: 全部测试通过

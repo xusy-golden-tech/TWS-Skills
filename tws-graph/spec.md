@@ -1360,8 +1360,175 @@ P32 可在任何阶段并行开发（纯导出逻辑）。
 - [ ] P30: 4/4 测试门禁通过
 - [ ] P31: 5/5 测试门禁通过
 - [ ] P32: 5/5 测试门禁通过
-- [ ] P33: 5/5 测试门禁通过
+- [x] P33: 5/5 测试门禁通过
 - [ ] g-ass-source 调用解析精度提升验证
 - [ ] 全量回归: 3700+ passed, 0 failed
 - [ ] tws-graph lint: 0 errors, 0 warnings
 - [ ] quality-gates.md: G29-G33 全部通过
+
+---
+
+## 二十一、v5.4.0 目标 —— 质量深水区 + 集成验证
+
+> 2026-06-25 | E2E 集成测试 + 测试覆盖映射 + 死代码 v2 + 数据流 v2
+
+**核心目标：把 v5.3.0 的分析能力从"单文件正确"提升到"跨项目闭环验证"。**
+
+```
+P34: E2E 集成测试框架        → 自动化 g-ass-source 验证管线
+P35: Test-to-code 映射        → 测试覆盖分析（谁测了谁）
+P36: 死代码检测 v2            → 跨文件调用图死代码
+P37: 数据流深度 v2            → 参数级传播 + 字段追踪
+```
+
+### 21.1 P34: E2E 集成测试框架
+
+**问题**：当前只有单元测试，每次 g-ass-source 验证需手动跑命令。
+
+**实现**：
+1. 创建 `tests/e2e/` 目录，`conftest.py` 管理共享 fixture
+2. 自动检测 g-ass-source 路径（环境变量 `TWS_E2E_PROJECT`）
+3. E2E 场景：index → search → calls → impact → trace → export → taint → cycles
+4. 每个场景验证：命令成功退出 + 输出非空 + 关键字段存在
+5. g-ass-source 不可用时自动 skip（`pytest.skip`）
+
+#### P34a: Index & search E2E
+- 验证 `tws-graph index` 成功
+- 验证 `tws-graph search` 返回结果
+
+#### P34b: Graph traversal E2E
+- 验证 `tws-graph calls` 返回调用关系
+- 验证 `tws-graph impact` 返回影响范围
+- 验证 `tws-graph trace` 返回路径
+
+#### P34c: Analysis & export E2E
+- 验证 `tws-graph taint` 返回污点路径
+- 验证 `tws-graph cycles` 返回循环依赖
+- 验证 `tws-graph export dot/json` 输出有效
+
+**测试门禁 (P34)**：
+| 门禁 | 标准 |
+|------|------|
+| E2E 框架就绪 | tests/e2e/ 目录 + conftest.py |
+| g-ass-source index E2E | 索引成功，节点 > 50000 |
+| g-ass-source search E2E | search 返回 ≥ 1 结果 |
+| g-ass-source calls E2E | calls 返回 ≥ 1 结果 |
+| g-ass-source taint E2E | taint 命令不崩溃 |
+| 自动降级 | g-ass-source 缺失时 skip |
+
+---
+
+### 21.2 P35: Test-to-code 映射
+
+**问题**：不知道哪些函数有测试覆盖。
+
+**实现**：
+1. 遍历所有 test 文件（路径匹配 `test_*.py` / `*Test.java` 等）
+2. 分析 test 函数中的 calls 边 → 被调用者即被测试的符号
+3. 构建映射 `{production_function: [test_functions]}`
+4. 反向索引：`{test_function: [covered_functions]}`
+5. 识别未测试的函数：production 函数但无 test 覆盖
+
+#### P35a: Test file detection
+- 按文件路径模式识别测试文件
+
+#### P35b: Coverage mapping
+- 通过 calls 边构建 test→code 覆盖关系
+
+#### P35c: Gap report
+- 列出未被任何测试覆盖的关键函数
+
+**测试门禁 (P35)**：
+| 门禁 | 标准 |
+|------|------|
+| 测试文件检测 | 正确识别 test_*.py 文件 |
+| 覆盖映射 | 测试函数→生产函数 的边存在 |
+| 未覆盖检测 | 无 calls 从 test 来的函数被标记 |
+| 空图不崩溃 | 空 DB 返回空结果 |
+
+---
+
+### 21.3 P36: 死代码检测 v2
+
+**问题**：当前死代码检测只分析单文件范围内未被调用的符号。
+
+**实现**：
+1. 构建全图调用链（跨文件 `calls` 边）
+2. 从入口点（main、route handlers、CLI commands）BFS
+3. 到达的节点 = 活代码，未到达的 = 候选死代码
+4. 排除：测试文件、`__init__.py` 导出、框架注册的函数
+5. 分类：`unreachable`（无调用路径）vs `unused`（有路径但从未被外部调用）
+
+#### P36a: Reachability analysis
+- 从入口点 BFS 全图
+
+#### P36b: Dead code classification
+- 区分 unreachable / unused / exported-but-unused
+
+#### P36c: Report generation
+- 按文件分组的死代码清单
+
+**测试门禁 (P36)**：
+| 门禁 | 标准 |
+|------|------|
+| 入口点识别 | 正确找到 main/CLI/route 入口 |
+| BFS 可达性 | 从入口可达的节点被标记为 live |
+| 死代码识别 | 无入边 + 非入口的节点被标记 |
+| 排除测试文件 | test_ 开头的文件不参与死代码检测 |
+| 空图不崩溃 | 空 DB 返回空结果 |
+
+---
+
+### 21.4 P37: 数据流深度 v2
+
+**问题**：当前 data_flows 追踪 return→param，但不追踪字段级传播。
+
+**实现**：
+1. 识别结构体/类字段赋值（`obj.field = value`）
+2. 追踪字段读取（`x = obj.field`）
+3. 在 data_flows 边中添加 `field_path` 属性
+4. 支持嵌套字段（`obj.a.b.c`）
+
+#### P37a: Field-level data_flows
+- 记录赋值/读取的字段路径
+
+#### P37b: Through-struct propagation
+- `A → struct.field → B` 生成 `A → B` 的 data_flows
+
+#### P37c: Enhanced taint integration
+- 污点分析利用 field_path 提高精度
+
+**测试门禁 (P37)**：
+| 门禁 | 标准 |
+|------|------|
+| 字段赋值检测 | `obj.f = x` 生成 field_path 属性 |
+| 字段读取检测 | `y = obj.f` 生成 data_flows 边 |
+| 穿结构传播 | A→obj.f→B 产生 A→B data_flows |
+| 嵌套字段 | `a.b.c` 正确记录 |
+
+---
+
+## 二十二、v5.4.0 实现顺序
+
+```
+P34 (E2E 框架) ── 先建立验证管线
+       │
+       ▼
+P35 (Test-to-code) ── 利用 calls 边
+       │
+       ▼
+P36 (死代码 v2) ── 利用全图调用链
+       │
+       ▼
+P37 (数据流 v2) ── 深化 data_flows
+```
+
+### Checklist
+
+- [ ] P34: 4/4 测试门禁通过
+- [ ] P35: 4/4 测试门禁通过
+- [ ] P36: 5/5 测试门禁通过
+- [ ] P37: 4/4 测试门禁通过
+- [ ] g-ass-source E2E 全场景通过
+- [ ] 全量回归: 3900+ passed, 0 failed
+- [ ] quality-gates.md: G34-G37 全部通过
