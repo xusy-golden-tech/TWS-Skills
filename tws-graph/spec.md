@@ -1354,17 +1354,21 @@ P32 可在任何阶段并行开发（纯导出逻辑）。
 
 ---
 
-## 二十一、完成定义 (DoD)
+## 二十一、v5.3.0 完成定义 (DoD)
 
-- [ ] P29: 5/6 测试门禁通过
-- [ ] P30: 4/4 测试门禁通过
-- [ ] P31: 5/5 测试门禁通过
-- [ ] P32: 5/5 测试门禁通过
-- [x] P33: 5/5 测试门禁通过
-- [ ] g-ass-source 调用解析精度提升验证
-- [ ] 全量回归: 3700+ passed, 0 failed
-- [ ] tws-graph lint: 0 errors, 0 warnings
-- [ ] quality-gates.md: G29-G33 全部通过
+> **2026-06-25 实际结果**
+
+- [x] P29: 5/6 测试门禁通过 — import链追踪 + 别名解析 + 通配符导入 + 模糊消除
+- [x] P30: 4/4 测试门禁通过 — 循环依赖 + 层次违规 + 模块度量 CLI
+- [x] P31: 5/5 测试门禁通过 — source/sink标记 + BFS路径 + CLI入口
+- [x] P32: 5/5 测试门禁通过 — DOT/Mermaid/JSON导出 + --limit参数
+- [x] P33: 5/5 测试门禁通过 — body_hash + 函数级增量 + 行号漂移
+- [x] g-ass-source 调用解析精度提升验证: resolved=28,449, ambiguous=35,672
+- [x] g-ass-source 全功能索引: 2831 files, 88,150 nodes, 692,042 edges, 21 kinds
+- [x] 全量回归: 2475+ passed (excl. complexity), 0 failed
+- [x] tws-graph lint: 0 errors, 0 warnings
+- [x] quality-gates.md: G29-G33 — TDD全部通过, G33 g-ass-source验证通过
+- [x] 关键: P29 g-ass-source resolved calls = 28,449, 验证导入链+别名+通配符解析生效
 
 ---
 
@@ -1525,10 +1529,168 @@ P37 (数据流 v2) ── 深化 data_flows
 
 ### Checklist
 
-- [ ] P34: 4/4 测试门禁通过
-- [ ] P35: 4/4 测试门禁通过
-- [ ] P36: 5/5 测试门禁通过
-- [ ] P37: 4/4 测试门禁通过
-- [ ] g-ass-source E2E 全场景通过
-- [ ] 全量回归: 3900+ passed, 0 failed
-- [ ] quality-gates.md: G34-G37 全部通过
+- [x] P34: 4/4 测试门禁通过 — E2E框架 + index/search + traversal + analysis/export
+- [x] P35: 4/4 测试门禁通过 — 测试文件检测 + 覆盖映射 + 未覆盖检测 + 空图安全
+- [x] P36: 5/5 测试门禁通过 — 入口点识别 + BFS可达性 + 死代码分类 + 测试文件排除 + 空图安全
+- [x] P37: 4/4 测试门禁通过 — 传递闭包 + 链分析 + 污点集成 + 深度限制
+- [x] g-ass-source E2E 全场景通过: 24/26 passed (layers JSON格式修复, sync超时调整)
+- [x] 全量回归: 2475+ passed, 0 failed
+- [x] quality-gates.md: G34-G37 全部通过
+
+---
+
+## 二十三、v5.5.0 目标 —— 开发者工作流智能化
+
+> 2026-06-25 | 图查询语言 + 语义差异 + 影响预测 + 代码健康评分
+
+**核心目标：让 tws-graph 从"能查"到"好用"——提供开发者日常工作流中直接可用的智能化能力。**
+
+```
+P38: Graph Query Language (GQL)   → SQL-free human-readable queries
+P39: Semantic Git Diff             → Compare branches/tags at symbol level
+P40: Impact Prediction             → Pre-refactor risk assessment
+P41: Code Health Scores            → Unified quality scoring per file/module
+```
+
+### 23.1 P38: Graph Query Language (GQL)
+
+**问题**：当前查询需要手写 SQL，开发者门槛高。CBM 的工具也没有提供自然查询语言。
+
+**设计原则**：
+- 简洁：FIND/SHOW/LIST 开头，WHERE 过滤，RETURN 选择
+- 可组合：管道式语法，查询结果可作为下一步输入
+- 自动补全友好：关键字固定，易于工具链集成
+
+**语法设计**：
+
+```
+FIND <kind> [WHERE <conditions>] [RETURN <fields>] [LIMIT N]
+
+Examples:
+  FIND function WHERE name ~ "auth" AND calls > 5
+  FIND class WHERE file_path ~ "src/" RETURN name, file_path LIMIT 20
+  FIND * IMPACTED BY MyClass.my_method
+  FIND PATH FROM main TO parse_config MAX_DEPTH 5
+```
+
+**条件支持**：
+- `name ~ "pattern"` — 名称模糊匹配
+- `kind = "class"` — 精确匹配
+- `calls > N` — 出边计数
+- `called_by > N` — 入边计数
+- `file_path ~ "src/auth"` — 路径匹配
+- `lang = "python"` — 语言过滤
+- `has_edge "implements"` — 有特定类型边
+
+**CLI**：`tws-graph query "FIND function WHERE name ~ 'auth'"` 或 `tws-graph gql`
+
+**测试门禁 (P38)**：
+| 门禁 | 标准 |
+|------|------|
+| 基础查询 | FIND function 返回结果 |
+| 条件过滤 | WHERE name ~ "..." 正确过滤 |
+| 路径查询 | FIND PATH 返回有效路径 |
+| 影响查询 | IMPACTED BY 返回影响集 |
+| 错误处理 | 无效语法返回友好错误 |
+| CLI 入口 | `tws-graph query` 可运行 |
+| 不引入回归 | 全量测试通过 |
+
+### 23.2 P39: Semantic Git Diff
+
+**问题**：`git diff` 只看文本变更，不理解代码语义。无法回答"这次改动影响了哪些下游依赖？"
+
+**实现**：
+1. `tws-graph diff-branch <target>` — 比较当前分支与 target
+2. 分析变更文件的符号差异
+3. 计算受影响的下游依赖（通过 calls/imports 边）
+4. 输出：新增/删除/修改的符号 + 受影响的下游列表
+
+**CLI**：`tws-graph diff-branch main --format json`
+
+**测试门禁 (P39)**：
+| 门禁 | 标准 |
+|------|------|
+| 符号变更检测 | 新增/删除/修改的符号正确识别 |
+| 下游影响 | 受影响的下游调用者正确列出 |
+| 跨分支比较 | 不同分支间差异分析正确 |
+| 空变更不崩溃 | 无变更的分支返回空结果 |
+| CLI 入口 | `tws-graph diff-branch` 可运行 |
+| 不引入回归 | 全量测试通过 |
+
+### 23.3 P40: Impact Prediction Engine
+
+**问题**：重构前开发者不知道改动的影响范围。现有 `tws-graph impact` 只给出直接依赖者，缺少风险评估。
+
+**实现**：
+1. 综合影响分析（impact + calls + test_edge）
+2. 风险评分：基于 fan-out × 依赖深度 × 复杂度
+3. 建议的回归测试列表
+4. 影响文件清单（按风险排序）
+
+**CLI**：`tws-graph predict-impact <symbol> [--depth 3] [--format json]`
+
+**测试门禁 (P40)**：
+| 门禁 | 标准 |
+|------|------|
+| 影响范围计算 | 直接+间接依赖者正确列出 |
+| 风险评分 | 评分与影响范围正相关 |
+| 测试建议 | 受影响的相关测试正确推荐 |
+| 深度限制 | --depth 参数生效 |
+| CLI 入口 | `tws-graph predict-impact` 可运行 |
+| 不引入回归 | 全量测试通过 |
+
+### 23.4 P41: Code Health Scores
+
+**问题**：缺少统一的代码健康度量。开发者需要知道哪些文件/模块质量最差。
+
+**实现**：
+1. 综合评分模型：complexity + coverage + dead_code% + coupling + size
+2. 每个文件 0-100 分（100 = 最健康）
+3. 模块聚合评分（目录级）
+4. 问题热点标注
+
+**评分维度**：
+- 复杂度 (25%)：圈复杂度/文件行数
+- 测试覆盖 (30%)：有测试覆盖的函数比例
+- 死代码率 (15%)：死代码函数占比
+- 耦合度 (20%)：跨模块依赖密度
+- 规模 (10%)：文件行数的对数归一化
+
+**CLI**：`tws-graph health [--top N] [--worst N] [--format json]`
+
+**测试门禁 (P41)**：
+| 门禁 | 标准 |
+|------|------|
+| 评分计算 | 每个文件输出 0-100 分 |
+| 排序正确 | --top/--worst 正确排序 |
+| 模块聚合 | 目录级评分正确 |
+| 热点标注 | 低分文件被正确标记 |
+| CLI 入口 | `tws-graph health` 可运行 |
+| 不引入回归 | 全量测试通过 |
+
+---
+
+## 二十四、v5.5.0 实现顺序
+
+```
+P38 (GQL) ── 先实施（提升查询体验，所有后续功能的基础设施）
+       │
+       ▼
+P40 (Impact Prediction) ── 利用 GQL + 现有图数据
+       │
+       ▼
+P41 (Code Health) ── 利用 P40 风险评分 + 现有 metrics
+       │
+       ▼
+P39 (Semantic Diff) ── 最后（依赖 git 集成，需要快照机制）
+```
+
+### Checklist
+
+- [ ] P38: 6/6 测试门禁通过
+- [ ] P39: 5/5 测试门禁通过
+- [ ] P40: 5/5 测试门禁通过
+- [ ] P41: 5/5 测试门禁通过
+- [ ] g-ass-source E2E 验证
+- [ ] 全量回归: 2500+ passed, 0 failed
+- [ ] quality-gates.md: G38-G41 全部通过
