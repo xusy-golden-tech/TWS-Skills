@@ -2359,14 +2359,15 @@ P45 和 P49 可以并行推进（下载验证项目不依赖 Java extractor 改�
 
 ### 27.9 v5.7.0 完成定义 (DoD)
 
-- [ ] P45: Java extractor 达到 Python extractor 同等深度
-- [ ] P45a: 包与导入系统（imports 边产出）
-- [ ] P45b: 注解处理（decorates 边产出）
-- [ ] P45c: 泛型处理（type_ref 边产出）
-- [ ] P45d: 方法调用深度升级（instantiates + 链式调用）
-- [ ] P45e: 现代 Java 特性（lambda, record, enum, interface default）
-- [ ] P45f: 变量级读写追踪（reads/writes/data_flows 边产出）
+- [x] P45: Java extractor 达到 Python extractor 同等深度
+- [x] P45a: 包与导入系统（imports 边产出）
+- [x] P45b: 注解处理（decorates 边产出）
+- [x] P45c: 泛型处理（type_ref 边产出）
+- [x] P45d: 方法调用深度升级（instantiates + 链式调用）
+- [x] P45e: 现代 Java 特性（lambda, record, enum, interface default）
+- [x] P45f: 变量级读写追踪（reads/writes/data_flows 边产出）
 - [ ] P46: MCP 3.0 4 项升级完成（重构/安全/质量/搜索）
+- [x]   P46b: security_scan 安全漏洞检测（13 tests pass）
 - [ ] P47: 跨语言边解析（JVM + Web 生态）
 - [ ] P48: g-ass-source ≤ 100s（3x 提升）
 - [ ] P49: spring-petclinic 验证通过（≥ 15 边类型）

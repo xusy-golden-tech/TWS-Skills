@@ -360,6 +360,10 @@ def _safe_refactor(store: Store, args: Optional[dict]) -> dict:
                 }],
             }
 
+        # Suggest mode: analyze symbol for refactoring opportunities (P46a)
+        if change_type == "suggest":
+            return _safe_refactor_suggest(store, target_nodes, symbol_name)
+
         all_affected: dict[str, list[str]] = defaultdict(list)  # file_path -> [reason]
         total_dependents = 0
         symbol_details = []
@@ -808,6 +812,147 @@ def _security_scan(store: Store, args: Optional[dict]) -> dict:
     except Exception as e:
         output = {"error": str(e), "total_findings": 0, "findings": [], "summary": {}}
 
+    return {"content": [{"type": "text", "text": json.dumps(output, ensure_ascii=False)}]}
+
+
+def _safe_refactor_suggest(store, target_nodes, symbol_name: str) -> dict:
+    """Generate smart refactoring suggestions (P46a)."""
+    suggestions: list[dict] = []
+
+    # Get full node details
+    nodes = []
+    for match in target_nodes[:5]:
+        node = store.get_node_by_id(_get(match, "node_id"))
+        if node:
+            nodes.append(node)
+
+    if not nodes:
+        return {
+            "content": [{
+                "type": "text",
+                "text": json.dumps({
+                    "symbol": symbol_name,
+                    "suggestions": [],
+                    "message": "Symbol found but no detailed data available",
+                }, ensure_ascii=False),
+            }],
+        }
+
+    for node in nodes:
+        kind = _get(node, "kind")
+        if kind not in ("method", "function"):
+            continue
+
+        start_line = _get(node, "start_line", 0)
+        end_line = _get(node, "end_line", 0)
+        lines = end_line - start_line
+        nid = _get(node, "id")
+        name = _get(node, "name", "")
+
+        # 1. Method extraction suggestion: long methods
+        if lines > 50:
+            suggestions.append({
+                "type": "extract_method",
+                "confidence": "high",
+                "reason": f"Method '{name}' spans {lines} lines — exceeds 50-line threshold",
+                "symbol": name,
+                "file": _get(node, "file_path"),
+                "lines": lines,
+                "action": "Break into smaller sub-methods, each handling a single responsibility",
+            })
+
+        # 2. Interface extraction: find other classes with same method signatures
+        sig = _get(node, "signature", "")
+        if sig:
+            # Search for other nodes with same name but different qualified_name
+            similar = store.fts_search(name, limit=30)
+            same_sig_others = []
+            for m in similar:
+                mnid = _get(m, "node_id")
+                if mnid == nid:
+                    continue
+                other = store.get_node_by_id(mnid)
+                if not other:
+                    continue
+                other_sig = _get(other, "signature", "")
+                other_qname = _get(other, "qualified_name", "")
+                if other_sig == sig and other_qname != _get(node, "qualified_name", ""):
+                    same_sig_others.append({
+                        "name": _get(other, "name"),
+                        "qualified_name": other_qname,
+                        "file": _get(other, "file_path"),
+                    })
+
+            if same_sig_others:
+                suggestions.append({
+                    "type": "extract_interface",
+                    "confidence": "medium",
+                    "reason": f"Method '{name}' has identical signature in {len(same_sig_others)} other class(es)",
+                    "symbol": name,
+                    "signature": sig,
+                    "implementations": [
+                        {"qualified_name": _get(node, "qualified_name")},
+                        *same_sig_others,
+                    ],
+                    "action": "Extract a shared interface/base class with this method signature",
+                })
+
+        # 3. Move method: check coupling
+        try:
+            outgoing = store.get_outgoing_edges(nid)
+        except Exception:
+            outgoing = []
+        calls_by_file: dict[str, int] = {}
+        for e in outgoing:
+            if _get(e, "kind") != "calls":
+                continue
+            target_node = store.get_node_by_id(_get(e, "target"))
+            if target_node:
+                target_fp = _get(target_node, "file_path", "")
+                if target_fp and target_fp != _get(node, "file_path", ""):
+                    calls_by_file[target_fp] = calls_by_file.get(target_fp, 0) + 1
+
+        if calls_by_file:
+            most_coupled_file = max(calls_by_file, key=calls_by_file.get)
+            most_coupled_count = calls_by_file[most_coupled_file]
+            total_outgoing = sum(calls_by_file.values())
+            if total_outgoing >= 2 and most_coupled_count > total_outgoing * 0.5:
+                suggestions.append({
+                    "type": "move_method",
+                    "confidence": "medium" if most_coupled_count > total_outgoing * 0.7 else "low",
+                    "reason": (
+                        f"Method '{name}' has {most_coupled_count}/{total_outgoing} "
+                        f"calls to '{most_coupled_file}' — high cross-file coupling"
+                    ),
+                    "symbol": name,
+                    "current_file": _get(node, "file_path"),
+                    "suggested_file": most_coupled_file,
+                    "coupling_ratio": round(most_coupled_count / total_outgoing, 2),
+                    "action": f"Consider moving this method to '{most_coupled_file}' to reduce coupling",
+                })
+
+    # Deduplicate interface suggestions (same signature from multiple nodes)
+    seen_sigs = set()
+    deduped = []
+    for s in suggestions:
+        if s["type"] == "extract_interface":
+            sig_key = s.get("signature", "")
+            if sig_key in seen_sigs:
+                continue
+            seen_sigs.add(sig_key)
+        deduped.append(s)
+    suggestions = deduped
+
+    output = {
+        "symbol": symbol_name,
+        "change_type": "suggest",
+        "suggestions": suggestions,
+        "total_suggestions": len(suggestions),
+        "message": (
+            f"Found {len(suggestions)} refactoring suggestion(s)"
+            if suggestions else "No refactoring suggestions for this symbol"
+        ),
+    }
     return {"content": [{"type": "text", "text": json.dumps(output, ensure_ascii=False)}]}
 
 

@@ -846,43 +846,43 @@ pytest tests/test_semantic_diff.py tests/test_diff.py tests/analysis/test_git_di
 ### 门禁 45: Java Extractor 深度升级 (P45)
 
 **P45a: 包与导入系统**
-- [ ] TDD tests pass
-- [ ] package 声明正确解析
-- [ ] imports 边产出（每个 import → 边）
-- [ ] qualified_name 格式 `package.Class::member`
-- [ ] static import 追踪
+- [x] TDD tests pass
+- [x] package 声明正确解析
+- [x] imports 边产出（每个 import → 边）
+- [x] qualified_name 格式 `package.Class::member`
+- [x] static import 追踪
 
 **P45b: 注解处理**
-- [ ] TDD tests pass
-- [ ] decorates 边产出（@Override, @Test, @Entity 等）
-- [ ] 注解参数提取（@RequestMapping("/path")）
-- [ ] 类/方法/字段三个层级覆盖
+- [x] TDD tests pass
+- [x] decorates 边产出（@Override, @Test, @Entity 等）
+- [x] 注解参数提取（@RequestMapping("/path")）
+- [x] 类/方法/字段三个层级覆盖
 
 **P45c: 泛型处理**
-- [ ] TDD tests pass
-- [ ] type_ref 边产出（List<User> 中的 User）
-- [ ] 嵌套泛型（Map<String, List<Integer>>）
-- [ ] 通配符（? extends Foo）
+- [x] TDD tests pass
+- [x] type_ref 边产出（List<User> 中的 User）
+- [x] 嵌套泛型（Map<String, List<Integer>>）
+- [x] 通配符（? extends Foo）
 
 **P45d: 方法调用深度升级**
-- [ ] TDD tests pass
-- [ ] 链式调用（a.b().c() → 2 calls edges）
-- [ ] instantiates 边（new Foo()）
-- [ ] 静态调用（ClassName.method()）
-- [ ] super 调用
+- [x] TDD tests pass
+- [x] 链式调用（a.b().c() → 2 calls edges）
+- [x] instantiates 边（new Foo()）
+- [x] 静态调用（ClassName.method()）
+- [x] super 调用
 
 **P45e: 现代 Java 特性**
-- [ ] TDD tests pass
-- [ ] Lambda 节点
-- [ ] Record 节点
-- [ ] Enum 节点
-- [ ] Interface default/static 方法
+- [x] TDD tests pass
+- [x] Lambda 节点
+- [x] Record 节点
+- [x] Enum 节点
+- [x] Interface default/static 方法
 
 **P45f: 变量级读写追踪**
-- [ ] TDD tests pass
-- [ ] reads 边产出
-- [ ] writes 边产出
-- [ ] data_flows 边（跨方法参数）
+- [x] TDD tests pass
+- [x] reads 边产出
+- [x] writes 边产出
+- [x] data_flows 边（跨方法参数）
 
 **综合**：
 - [ ] Java 项目节点密度 ≥ 3/file
@@ -898,11 +898,11 @@ pytest tests/test_semantic_diff.py tests/test_diff.py tests/analysis/test_git_di
 - [ ] 纯脱网验证
 
 **P46b: 安全漏洞检测**
-- [ ] TDD tests pass
-- [ ] SQL 注入模式检测
-- [ ] 路径遍历检测
-- [ ] 硬编码密钥检测
-- [ ] 纯脱网验证
+- [x] TDD tests pass
+- [x] SQL 注入模式检测
+- [x] 路径遍历检测
+- [x] 硬编码密钥检测
+- [x] 纯脱网验证
 
 **P46c: 代码质量门禁**
 - [ ] TDD tests pass
