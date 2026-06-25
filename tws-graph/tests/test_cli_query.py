@@ -1,4 +1,4 @@
-"""Tests for CLI query command — Cypher query via tws-graph query."""
+"""Tests for CLI query command — GQL query via tws-graph query."""
 
 import json
 import os
@@ -51,9 +51,9 @@ class TestQueryCommand:
     """Tests for ``tws-graph query`` command."""
 
     def test_query_match_all(self, runner, indexed_db):
-        """Basic MATCH (n) RETURN n query."""
+        """Basic FIND * query."""
         result = runner.invoke(app, [
-            "query", "MATCH (n) RETURN n",
+            "query", "FIND *",
             "--db", indexed_db,
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}\nError: {result.stderr}"
@@ -61,26 +61,26 @@ class TestQueryCommand:
         assert len(result.output.strip()) > 0
 
     def test_query_with_limit(self, runner, indexed_db):
-        """MATCH (n) RETURN n LIMIT 3."""
+        """FIND * LIMIT 3."""
         result = runner.invoke(app, [
-            "query", "MATCH (n) RETURN n LIMIT 3",
+            "query", "FIND * LIMIT 3",
             "--db", indexed_db,
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}\nError: {result.stderr}"
         assert len(result.output.strip()) > 0
 
     def test_query_with_label_filter(self, runner, indexed_db):
-        """MATCH (n:Function) RETURN n.name."""
+        """FIND function RETURN name."""
         result = runner.invoke(app, [
-            "query", "MATCH (n:Function) RETURN n.name",
+            "query", "FIND function RETURN name",
             "--db", indexed_db,
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}\nError: {result.stderr}"
 
     def test_query_with_where(self, runner, indexed_db):
-        """MATCH (n) WHERE n.name = 'main' RETURN n."""
+        """FIND * WHERE name = 'main'."""
         result = runner.invoke(app, [
-            "query", "MATCH (n) WHERE n.name = 'main' RETURN n",
+            "query", "FIND * WHERE name = 'main'",
             "--db", indexed_db,
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}\nError: {result.stderr}"
@@ -89,7 +89,7 @@ class TestQueryCommand:
         """Query that matches nothing returns gracefully."""
         result = runner.invoke(app, [
             "query",
-            "MATCH (n:NonExistentLabel) RETURN n",
+            "FIND nonexistentlabel",
             "--db", indexed_db,
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}\nError: {result.stderr}"
@@ -97,17 +97,14 @@ class TestQueryCommand:
     def test_query_json_output(self, runner, indexed_db):
         """--json flag produces valid JSON."""
         result = runner.invoke(app, [
-            "query", "MATCH (n) RETURN n LIMIT 2",
+            "query", "FIND * LIMIT 2",
             "--db", indexed_db,
             "--json",
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}\nError: {result.stderr}"
         data = json.loads(result.output)
-        assert "columns" in data
-        assert "rows" in data
-        assert isinstance(data["columns"], list)
-        assert isinstance(data["rows"], list)
-        assert len(data["rows"]) <= 2
+        assert isinstance(data, list)
+        assert len(data) <= 2
 
 
 # ============================================================================
@@ -119,7 +116,7 @@ class TestQueryCommandErrors:
     """Tests for ``tws-graph query`` error handling."""
 
     def test_query_syntax_error(self, runner, indexed_db):
-        """Invalid Cypher syntax shows friendly error."""
+        """Invalid GQL syntax shows friendly error."""
         result = runner.invoke(app, [
             "query", "INVALID QUERY HERE",
             "--db", indexed_db,
@@ -132,19 +129,19 @@ class TestQueryCommandErrors:
         """Query with non-existent database shows error."""
         db = str(tmp_path / "nonexistent" / "index.db")
         result = runner.invoke(app, [
-            "query", "MATCH (n) RETURN n",
+            "query", "FIND *",
             "--db", db,
         ])
         # Should report database not found and exit with error
         assert result.exit_code != 0, "Should fail when database does not exist"
 
     def test_query_semantic_error(self, runner, indexed_db):
-        """Undefined variable in RETURN shows friendly error."""
+        """Invalid GQL query shows friendly error."""
         result = runner.invoke(app, [
-            "query", "MATCH (n) RETURN m",
+            "query", "FIND * WHERE name ~ ~ 'x'",
             "--db", indexed_db,
         ])
-        assert result.exit_code != 0, "Should fail on undefined variable"
+        assert result.exit_code != 0, "Should fail on invalid syntax"
 
 
 # ============================================================================
@@ -193,20 +190,21 @@ class TestQueryOutputFormat:
     def test_table_output_has_headers(self, runner, indexed_db):
         """Table output includes column headers."""
         result = runner.invoke(app, [
-            "query", "MATCH (n) RETURN n LIMIT 1",
+            "query", "FIND * LIMIT 1",
             "--db", indexed_db,
         ])
         assert result.exit_code == 0, f"CLI failed: {result.output}\nError: {result.stderr}"
 
     def test_json_output_has_expected_keys(self, runner, indexed_db):
-        """JSON output contains columns and rows."""
+        """JSON output returns list of node dicts."""
         result = runner.invoke(app, [
-            "query", "MATCH (n) RETURN n.name, n.kind",
+            "query", "FIND function RETURN name, kind",
             "--db", indexed_db,
             "--json",
         ])
         assert result.exit_code == 0
         data = json.loads(result.output)
-        assert "columns" in data
-        assert "rows" in data
-        assert len(data["columns"]) == 2
+        assert isinstance(data, list)
+        if data:
+            assert "name" in data[0]
+            assert "kind" in data[0]
