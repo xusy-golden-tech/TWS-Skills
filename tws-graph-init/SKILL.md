@@ -35,7 +35,7 @@ Bash: tws-graph --version 2>&1
 → 已安装且版本一致 → 跳到步骤 ③
 ```
 
-> **版本号判断**：运行 `tws-graph --version` 获取已安装版本（如 `0.1.0`），与 `tws-graph/pyproject.toml` 中的 `version` 比较。小于则升级。
+> **版本号判断**：运行 `tws-graph --version` 获取已安装版本（如 `5.7.0`），与 `tws-graph/pyproject.toml` 中的 `version` 比较。小于则升级。
 
 ## ② 安装/升级
 
