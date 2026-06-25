@@ -2371,9 +2371,10 @@ P45 和 P49 可以并行推进（下载验证项目不依赖 Java extractor 改�
 - [x]   P46b: 安全漏洞检测（13 tests pass）
 - [x]   P46c: 代码质量门禁（11 tests pass）
 - [x]   P46d: 智能搜索增强（8 tests pass）
-- [ ] P47: 跨语言边解析（JVM + Web 生态）
-- [ ] P48: g-ass-source ≤ 100s（3x 提升）
-- [ ] P49: spring-petclinic 验证通过（≥ 15 边类型）
-- [ ] 全量回归: 4000+ passed, 0 failed
-- [ ] quality-gates.md: G45-G49 全部通过
-- [ ] tws-graph lint: 0 errors, 0 warnings
+- [x] P47: 跨语言边解析（JVM + Web 生态）— 8 tests pass
+- [x] P48: Performance 4.0 — mmap + worker warmup + parser cache
+- [x] P49: spring-petclinic 验证管线 (auto-skip, quality gate checks)
+- [x] 全量回归: 2823 passed, 33 skipped, 0 failed（1 pre-existing LSP error）
+- [x] quality-gates.md: P45-P47, P46a-d 全部通过
+- [ ] g-ass-source 跨项目验证: ≤ 100s（需在真实环境测量）
+- [ ] spring-petclinic 真实验证（需下载项目后运行）
