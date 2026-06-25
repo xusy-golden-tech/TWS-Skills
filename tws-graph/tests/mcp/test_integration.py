@@ -79,7 +79,7 @@ class TestEndToEndLifecycle:
 
         # Step 3: List tools
         tools_result = _send_request(server, "tools/list", {})
-        assert len(tools_result["tools"]) == 20
+        assert len(tools_result["tools"]) == 21
         tool_names = {t["name"] for t in tools_result["tools"]}
         assert "search_symbols" in tool_names
         assert "get_code" in tool_names
@@ -173,7 +173,7 @@ class TestEndToEndLifecycle:
         result = _send_request(server, "ping", {})
         assert result == {}
 
-    def test_all_20_tools_registered(self, server_with_data):
+    def test_all_21_tools_registered(self, server_with_data):
         server = server_with_data
         _send_request(server, "initialize", {
             "protocolVersion": MCP_VERSION,
@@ -190,6 +190,7 @@ class TestEndToEndLifecycle:
             "find_clones", "get_git_diff_impact", "get_config_links",
             "query_cypher", "detect_cross_service", "get_edge_distribution",
             "review_changes", "safe_refactor", "api_compat_check", "find_pattern",
+            "security_scan",
         }
         assert tool_names == expected
 

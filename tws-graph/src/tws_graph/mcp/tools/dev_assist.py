@@ -1,10 +1,11 @@
-"""MCP 2.0 development assistant tools — P44.
+"""MCP 2.0+ development assistant tools — P44 + P46.
 
 Provides:
 - review_changes: Code review assistance — impact analysis for changed files
 - safe_refactor: Refactoring safety check — full modification checklist
 - api_compat_check: API compatibility check — breaking change detection
 - find_pattern: AST-based structural pattern search
+- security_scan: Security vulnerability detection (P46b) — SQL injection, secrets, etc.
 
 All tools are pure offline — zero HTTP dependencies.
 """
@@ -149,6 +150,37 @@ def register_tools(registry: ToolRegistry, store_factory: StoreFactory) -> None:
             },
         ),
         handler=lambda args: _find_pattern(store_factory(), args),
+    )
+
+    # -- security_scan ----------------------------------------------------------
+    registry.register(
+        ToolDefinition(
+            name="security_scan",
+            description=(
+                "Scan the indexed codebase for security vulnerabilities using "
+                "pattern-based static analysis. Detects: SQL injection (string "
+                "concatenation in queries), hardcoded secrets (passwords, API keys, "
+                "tokens), path traversal (user input in file paths), command injection "
+                "(shell command concatenation), and unsafe deserialization. "
+                "Each finding includes severity, file location, and remediation hints. "
+                "Pure offline — zero external dependencies."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "language": {
+                        "type": "string",
+                        "description": "Filter to a specific language (e.g. 'python', 'java', 'typescript')",
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": ["critical", "high", "medium", "low", "info"],
+                        "description": "Filter findings by minimum severity level",
+                    },
+                },
+            },
+        ),
+        handler=lambda args: _security_scan(store_factory(), args),
     )
 
 
@@ -616,6 +648,164 @@ def _find_pattern(store: Store, args: Optional[dict]) -> dict:
         }
     except Exception as e:
         output = {"error": str(e), "results": []}
+
+    return {"content": [{"type": "text", "text": json.dumps(output, ensure_ascii=False)}]}
+
+
+def _security_scan(store: Store, args: Optional[dict]) -> dict:
+    """Scan codebase for security vulnerabilities using pattern matching."""
+    import re
+
+    language = args.get("language") if args else None
+    severity_filter = args.get("severity") if args else None
+
+    try:
+        findings: list[dict] = []
+        severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+        # Iterate all nodes, filtering to function/method/constructor
+        target_kinds = ("function", "method", "constructor")
+
+        for node in store.iter_all_nodes():
+            kind = _get(node, "kind")
+            if kind not in target_kinds:
+                continue
+
+            node_lang = _get(node, "language", "")
+            if language and node_lang != language:
+                continue
+
+            body = _get(node, "body") or ""
+            if not body:
+                continue
+
+            file_path = _get(node, "file_path", "")
+            line = _get(node, "start_line", 0)
+            name = _get(node, "name", "")
+
+            # -- SQL Injection -------------------------------------------------
+            sql_patterns = [
+                (r'(?:execute|query|executemany)\s*\(\s*(?:[\"\']\s*\+|[\"\'].*?\+\s*\w|\+\s*.*?[\"\']|f\"[^\"]*\{)', "high"),
+                (r'\"\s*SELECT\s+.*\"\s*\+\s*\w+', "high"),
+                (r'[\"\']\s*\+\s*\w+\s*\+\s*[\"\']', "medium"),
+            ]
+            for pattern, sev in sql_patterns:
+                if re.search(pattern, body, re.IGNORECASE):
+                    findings.append({
+                        "category": "sql_injection",
+                        "severity": sev,
+                        "file_path": file_path,
+                        "line": line,
+                        "symbol": name,
+                        "language": node_lang,
+                        "message": "Potential SQL injection: string concatenation in SQL query",
+                        "remediation": "Use parameterized queries (e.g. '?' placeholders) instead of string concatenation",
+                    })
+                    break
+
+            # -- Hardcoded Secrets ---------------------------------------------
+            secret_patterns = [
+                (r'(?:password|passwd|pwd)\s*[:=]\s*[\"\'](?!\s*[\"\'])(.+?)[\"\']', "critical"),
+                (r'(?:secret|api_key|apikey|api_secret)\s*[:=]\s*[\"\'](?!\s*[\"\'])(.+?)[\"\']', "critical"),
+                (r'(?:token|auth_token|access_key)\s*[:=]\s*[\"\'](?!\s*[\"\'])(.+?)[\"\']', "high"),
+                (r'(?:private_key|secret_key)\s*[:=]\s*[\"\'](?!\s*[\"\'])(.+?)[\"\']', "critical"),
+            ]
+            for pattern, sev in secret_patterns:
+                if re.search(pattern, body, re.IGNORECASE):
+                    findings.append({
+                        "category": "hardcoded_secret",
+                        "severity": sev,
+                        "file_path": file_path,
+                        "line": line,
+                        "symbol": name,
+                        "language": node_lang,
+                        "message": "Hardcoded secret detected — credentials in source code",
+                        "remediation": "Move secrets to environment variables or a secure vault (e.g. os.environ.get('SECRET'))",
+                    })
+                    break
+
+            # -- Path Traversal ------------------------------------------------
+            # Two indicators: string concatenation + file operations in same function
+            has_path_concat = bool(re.search(
+                r'[\"\'](?:[^\"\']*\/[^\"\']*)?[\"\']\s*\+|\+\s*[\"\']',
+                body
+            ))
+            has_file_op = bool(re.search(
+                r'(?:open|file|File|FileInputStream|FileReader|Files\.)\s*\(',
+                body
+            ))
+            if has_path_concat and has_file_op:
+                findings.append({
+                    "category": "path_traversal",
+                    "severity": "high",
+                    "file_path": file_path,
+                    "line": line,
+                    "symbol": name,
+                    "language": node_lang,
+                    "message": "Potential path traversal: string concatenation combined with file operations",
+                    "remediation": "Validate and sanitize file paths. Use a whitelist of allowed directories.",
+                })
+
+            # -- Command Injection ---------------------------------------------
+            cmd_patterns = [
+                (r'os\.system\s*\(\s*(?:[\"\'].*?\+\s*|\+\s*.*?[\"\']|f\"[^\"]*\{|\w+\s*\+)', "critical"),
+                (r'(?:os\.popen|subprocess\.(?:call|run|Popen))\s*\(\s*[\"\'].*?\+\s*', "high"),
+                (r'subprocess\.(?:call|run|Popen)\s*\(\s*\w+\s*\+', "high"),
+                (r'Runtime\.getRuntime\(\)\.exec\s*\(\s*\w+\s*\+', "high"),
+            ]
+            for pattern, sev in cmd_patterns:
+                if re.search(pattern, body, re.IGNORECASE):
+                    findings.append({
+                        "category": "command_injection",
+                        "severity": sev,
+                        "file_path": file_path,
+                        "line": line,
+                        "symbol": name,
+                        "language": node_lang,
+                        "message": "Potential command injection: user input in shell command",
+                        "remediation": "Use subprocess.run() with a list of arguments (not a shell string) or shlex.quote() to escape input",
+                    })
+                    break
+
+            # -- Deserialization -----------------------------------------------
+            deser_patterns = [
+                (r'pickle\.(?:load|loads)', "high"),
+                (r'yaml\.load\s*\(', "medium"),
+                (r'ObjectInputStream.*\.readObject', "high"),
+            ]
+            for pattern, sev in deser_patterns:
+                if re.search(pattern, body, re.IGNORECASE):
+                    findings.append({
+                        "category": "deserialization",
+                        "severity": sev,
+                        "file_path": file_path,
+                        "line": line,
+                        "symbol": name,
+                        "language": node_lang,
+                        "message": "Unsafe deserialization detected",
+                        "remediation": "Use safe deserialization alternatives. For pickle, use JSON instead. For YAML, use yaml.safe_load().",
+                    })
+                    break
+
+        # Apply severity filter
+        if severity_filter:
+            min_level = severity_order.get(severity_filter, 0)
+            findings = [f for f in findings if severity_order.get(f["severity"], 5) <= min_level]
+
+        # Build summary
+        summary: dict[str, int] = {}
+        for f in findings:
+            cat = f["category"]
+            summary[cat] = summary.get(cat, 0) + 1
+
+        output = {
+            "total_findings": len(findings),
+            "findings": findings,
+            "summary": summary,
+            "scanned_language": language or "all",
+        }
+    except Exception as e:
+        output = {"error": str(e), "total_findings": 0, "findings": [], "summary": {}}
 
     return {"content": [{"type": "text", "text": json.dumps(output, ensure_ascii=False)}]}
 
