@@ -8,6 +8,7 @@ from .cross_file_resolve import CrossFileResolvePass
 from .dataflow_pass import DataFlowPass
 from .test_edge_pass import TestEdgeAnalysisPass
 from .config_link_pass import ConfigLinkAnalysisPass
+from .clone_detect_pass import CloneDetectionPass
 
 __all__ = [
     "StatFilterPass",
@@ -18,4 +19,5 @@ __all__ = [
     "DataFlowPass",
     "TestEdgeAnalysisPass",
     "ConfigLinkAnalysisPass",
+    "CloneDetectionPass",
 ]

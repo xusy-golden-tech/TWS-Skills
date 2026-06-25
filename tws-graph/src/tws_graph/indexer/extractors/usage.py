@@ -262,10 +262,12 @@ class VariableUsageExtractor:
                     read_set[name] = node.start_position().row + 1
                 return
 
-            # -- attribute access (e.g. obj.attr): always a read --
+            # -- attribute access (e.g. obj.attr / self.x) --
             if kind == "attribute":
-                if not is_write_lhs:
-                    text = _node_text(node, source)
+                text = _node_text(node, source)
+                if is_write_lhs:
+                    write_set[text] = node.start_position().row + 1
+                else:
                     read_set[text] = node.start_position().row + 1
                 return
 
@@ -477,10 +479,12 @@ class VariableUsageExtractor:
                     read_set[name] = node.start_position().row + 1
                 return
 
-            # -- member_expression (e.g. obj.prop, this.x): always a read --
+            # -- member_expression (e.g. obj.prop, this.x) --
             if kind == "member_expression":
-                if not is_write_lhs:
-                    text = _node_text(node, source)
+                text = _node_text(node, source)
+                if is_write_lhs:
+                    write_set[text] = node.start_position().row + 1
+                else:
                     read_set[text] = node.start_position().row + 1
                 return
 
@@ -701,10 +705,12 @@ class VariableUsageExtractor:
                     read_set[name] = node.start_position().row + 1
                 return
 
-            # -- field_access (e.g. obj.field): always a read --
+            # -- field_access (e.g. obj.field, this.field) --
             if kind == "field_access":
-                if not is_write_lhs:
-                    text = _node_text(node, source)
+                text = _node_text(node, source)
+                if is_write_lhs:
+                    write_set[text] = node.start_position().row + 1
+                else:
                     read_set[text] = node.start_position().row + 1
                 return
 

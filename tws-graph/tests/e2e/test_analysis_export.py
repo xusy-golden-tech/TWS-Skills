@@ -69,7 +69,7 @@ class TestLayersE2E:
 
     def test_layers_does_not_crash(self, e2e_project):
         """layers command with a simple layer spec should not crash."""
-        layers_json = '[["src/", "lib/", "tests/"]]'
+        layers_json = '{"ui":{"pattern":"src/**","level":1},"lib":{"pattern":"lib/**","level":2}}'
         rc, stdout, stderr = run_tws(
             "layers", "--layers", layers_json, project_dir=e2e_project, timeout=120
         )

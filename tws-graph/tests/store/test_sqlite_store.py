@@ -108,6 +108,8 @@ def _init_full_schema(conn: sqlite3.Connection):
             decorators TEXT,
             framework TEXT,
             properties TEXT DEFAULT '{}',
+            body TEXT,
+            body_hash TEXT,
             updated_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS edges (

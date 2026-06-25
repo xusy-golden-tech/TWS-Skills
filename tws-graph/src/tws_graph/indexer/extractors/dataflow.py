@@ -463,6 +463,11 @@ class DataFlowExtractor:
                 "provenance": "tree-sitter",
             })
 
+        # --- return / yield value tracking ---
+        _add_return_yield_edges(
+            node, caller_id, callee_id, file_path, line, edges, "python",
+        )
+
     # -- TypeScript call walker -------------------------------------------
 
     def _walk_ts_calls(
@@ -607,6 +612,11 @@ class DataFlowExtractor:
                 "provenance": "tree-sitter",
             })
 
+        # --- return / yield value tracking ---
+        _add_return_yield_edges(
+            node, caller_id, callee_id, file_path, line, edges, "typescript",
+        )
+
     # -- Java call walker --------------------------------------------------
 
     def _walk_java_calls(
@@ -726,6 +736,11 @@ class DataFlowExtractor:
                 "source_loc": f"{file_path}:{line}",
                 "provenance": "tree-sitter",
             })
+
+        # --- return / yield value tracking ---
+        _add_return_yield_edges(
+            node, caller_id, callee_id, file_path, line, edges, "java",
+        )
 
     # -- Internal: collect function-definition nodes -----------------------
 
@@ -873,6 +888,111 @@ class DataFlowExtractor:
 
         for child in _named_children(node):
             self._collect_java_defs(child, source, file_path, name_stack, func_def_nodes)
+
+
+# ---------------------------------------------------------------------------
+# Return / yield value tracking
+# ---------------------------------------------------------------------------
+
+def _node_eq(a, b) -> bool:
+    """Compare two tree-sitter nodes for structural identity.
+
+    Tree-sitter Node objects are ephemeral — Python ``==`` (object identity)
+    does NOT work for nodes returned from separate API calls.  We compare
+    start_byte + end_byte instead.
+    """
+    return (a.start_byte() == b.start_byte() and a.end_byte() == b.end_byte())
+
+
+def _is_call_value_used(node, language: str) -> bool:
+    """Check if the call's return value is used (assignment, return statement, etc.).
+
+    Python patterns:
+        - ``x = foo()``  → call is RHS of ``assignment``
+        - ``return foo()`` → call is inside ``return_statement``
+        - ``for x in foo()`` → call is inside ``for_in_clause`` (yield)
+
+    TypeScript patterns:
+        - ``const x = foo()`` → call inside ``variable_declarator``
+        - ``return foo()`` → call inside ``return_statement``
+
+    Java patterns:
+        - ``Foo x = foo()`` → call inside ``variable_declarator``
+        - ``return foo()`` → call inside ``return_statement``
+    """
+    parent = node.parent()
+    if parent is None:
+        return False
+
+    pk = parent.kind()
+
+    if language == "python":
+        if pk == "return_statement":
+            return True
+        if pk == "for_in_clause":
+            return True
+        if pk == "assignment":
+            # call is the value (right-hand side)
+            value_node = parent.child_by_field_name("right")
+            if value_node is None:
+                value_node = parent.child_by_field_name("value")
+            if value_node is not None:
+                return _node_eq(value_node, node)
+            # Check: is the call directly inside the assignment?
+            return True  # conservative: if call is in assignment, it's being used
+
+    elif language == "typescript":
+        if pk == "return_statement":
+            return True
+        if pk == "variable_declarator":
+            # const x = foo() → call is the value
+            value_node = parent.child_by_field_name("value")
+            if value_node is not None:
+                return _node_eq(value_node, node)
+            return True
+
+    elif language == "java":
+        if pk == "return_statement":
+            return True
+        if pk == "variable_declarator":
+            value_node = parent.child_by_field_name("value")
+            if value_node is not None:
+                return _node_eq(value_node, node)
+            return True
+
+    return False
+
+
+def _add_return_yield_edges(
+    call_node, caller_id: str, callee_id: str,
+    file_path: str, line: int, edges: list[dict],
+    language: str,
+) -> None:
+    """Add ``data_flows`` edges for return / yield value when the call result is used.
+
+    When a call's return value is captured (assignment, return, for-in), adds
+    a ``data_flows`` edge from *callee* to *caller* indicating direction of
+    return or yield data flow.
+    """
+    if not _is_call_value_used(call_node, language):
+        return
+
+    parent = call_node.parent()
+    pk = parent.kind() if parent else ""
+
+    if pk == "for_in_clause":
+        flow_type = "yield"
+    else:
+        flow_type = "return"
+
+    edges.append({
+        "source": caller_id,
+        "target": callee_id,
+        "kind": EdgeKind.DATA_FLOWS.value,
+        "target_text": flow_type,
+        "source_loc": f"{file_path}:{line}",
+        "provenance": "tree-sitter",
+    })
 
 
 # ---------------------------------------------------------------------------
