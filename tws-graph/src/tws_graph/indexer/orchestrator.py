@@ -119,32 +119,104 @@ class ExtractionOrchestrator:
                 # Re-index this file
                 self.queries.conn.execute("BEGIN")
                 try:
-                    if self.queries.get_file_by_path(rel_path):
-                        self.queries.delete_file(rel_path)
-
                     extraction = extract_full(rel_path, content, lang)
 
-                    # Store valid nodes
+                    # P33: Compute body_hashes from source content
+                    _compute_body_hashes(extraction.nodes, content)
+
+                    # P33: Get old nodes for function-level incremental
+                    existing_file = self.queries.get_file_by_path(rel_path)
+                    if existing_file:
+                        old_nodes = self.queries.get_nodes_by_file(rel_path)
+                        old_by_qname = {
+                            n["qualified_name"]: {
+                                "id": n["id"], "body_hash": n["body_hash"],
+                                "start_line": n["start_line"], "end_line": n["end_line"],
+                            }
+                            for n in old_nodes
+                        }
+                    else:
+                        old_by_qname = {}
+
+                    # Separate: changed vs unchanged vs new vs deleted
+                    changed_nodes = []
+                    unchanged_drifts = []  # (old_id, new_start, new_end)
+                    new_qnames = {n.get("qualified_name") for n in extraction.nodes}
+                    old_qnames = set(old_by_qname.keys())
+
+                    for n in extraction.nodes:
+                        qname = n.get("qualified_name")
+                        if not qname:
+                            continue
+                        old = old_by_qname.get(qname)
+                        if old and old.get("body_hash") == n.get("body_hash"):
+                            # Unchanged body — P33c: fix line number drift only
+                            if (old["start_line"] != n["start_line"] or
+                                    old["end_line"] != n["end_line"]):
+                                unchanged_drifts.append(
+                                    (old["id"], n["start_line"], n["end_line"])
+                                )
+                        else:
+                            changed_nodes.append(n)
+
+                    # Delete old nodes that changed or disappeared
+                    for qname in old_qnames:
+                        if qname in new_qnames:
+                            old_info = old_by_qname[qname]
+                            new_node = next(
+                                (n for n in extraction.nodes
+                                 if n.get("qualified_name") == qname), None
+                            )
+                            if new_node and old_info["body_hash"] == new_node.get("body_hash"):
+                                continue  # unchanged — keep
+                            # Changed → delete old node
+                            self.queries.delete_single_node(old_info["id"])
+                        else:
+                            # Removed from file
+                            self.queries.delete_single_node(old_by_qname[qname]["id"])
+
+                    # Insert changed/new nodes
                     valid_nodes = [
-                        n for n in extraction.nodes
+                        n for n in changed_nodes
                         if n.get("id") and n.get("kind") and n.get("name")
                     ]
                     if valid_nodes:
                         self.queries.insert_nodes(valid_nodes)
 
-                    # Store valid edges (source must be in this file; target may be cross-file)
+                    # Insert edges from changed nodes
                     if extraction.edges:
-                        inserted_ids = {n["id"] for n in valid_nodes}
+                        changed_ids = {n["id"] for n in valid_nodes}
                         valid_edges = [
                             e for e in extraction.edges
-                            if e["source"] in inserted_ids
+                            if e["source"] in changed_ids
                         ]
                         if valid_edges:
                             self.queries.insert_edges(valid_edges)
                         result.edges_created += len(valid_edges)
 
+                    # P33c: Update line numbers for unchanged nodes
+                    for old_id, new_start, new_end in unchanged_drifts:
+                        self.queries.update_node_lines(old_id, new_start, new_end)
+
+                    total_nodes = (len(valid_nodes) + len(unchanged_drifts) +
+                                   sum(1 for q in old_qnames & new_qnames
+                                       if old_by_qname[q]["body_hash"] ==
+                                       next((n.get("body_hash") for n in extraction.nodes
+                                             if n.get("qualified_name") == q), None)))
+                    # Simplified: count = changed + unchanged
+                    total_nodes = len(valid_nodes) + len(unchanged_drifts)
+                    # Also count nodes that were kept (in old_by_qname and in new but unchanged)
+                    kept_count = 0
+                    for qname in old_qnames & new_qnames:
+                        old_info = old_by_qname[qname]
+                        new_node = next((n for n in extraction.nodes
+                                        if n.get("qualified_name") == qname), None)
+                        if new_node and old_info["body_hash"] == new_node.get("body_hash"):
+                            kept_count += 1
+                    total_nodes = len(valid_nodes) + kept_count
+
                     # Upsert file record with stat info
-                    self.queries.upsert_file(rel_path, fhash, lang, len(valid_nodes),
+                    self.queries.upsert_file(rel_path, fhash, lang, total_nodes,
                                              size=fsize, modified_at=fmtime)
 
                     self.queries.conn.execute("COMMIT")
@@ -153,7 +225,7 @@ class ExtractionOrchestrator:
                     raise
 
                 result.files_indexed += 1
-                result.nodes_created += len(valid_nodes)
+                result.nodes_created += total_nodes
 
                 if extraction.errors:
                     result.errors.extend(extraction.errors)
@@ -307,3 +379,26 @@ def _module_in_project(module_name: str, source_file: str, project_files: set[st
                 return True
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# P33: Incremental indexing helpers
+# ---------------------------------------------------------------------------
+
+def _compute_body_hashes(nodes: list[dict], content: str) -> None:
+    """P33a: Compute body_hash for each node from source content.
+
+    Extracts the source text between start_line and end_line for each node
+    and stores a truncated SHA256 as ``body_hash``. Nodes without valid
+    line ranges are skipped (hash remains None).
+    """
+    if not content:
+        return
+    lines = content.split("\n")
+    for n in nodes:
+        start = n.get("start_line")
+        end = n.get("end_line")
+        if start and end and start <= end:
+            # Extract body text from source lines (1-indexed)
+            body_text = "\n".join(lines[start - 1:end])
+            n["body_hash"] = hashlib.sha256(body_text.encode("utf-8")).hexdigest()[:16]

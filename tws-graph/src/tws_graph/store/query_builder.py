@@ -177,8 +177,8 @@ class QueryBuilder:
                 (id, kind, name, qualified_name, file_path, language,
                  start_line, end_line, signature, docstring,
                  visibility, is_abstract, is_exported, decorators,
-                 framework, properties, body, updated_at)
-            VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?)
+                 framework, properties, body, body_hash, updated_at)
+            VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?,?)
         """, (
             node["id"], node["kind"], node["name"], node["qualified_name"],
             node["file_path"], node["language"],
@@ -187,7 +187,7 @@ class QueryBuilder:
             node.get("visibility"), node.get("is_abstract", 0),
             node.get("is_exported", 0), _to_json(node.get("decorators")),
             node.get("framework"), node.get("properties", "{}"),
-            node.get("body"), _now_ms(),
+            node.get("body"), node.get("body_hash"), _now_ms(),
         ))
 
     def insert_nodes(self, nodes: list[dict]):
@@ -220,6 +220,17 @@ class QueryBuilder:
         sql = self._stmt("qb_get_nodes_by_file",
                          "SELECT * FROM nodes WHERE file_path = ?")
         return self._exec(sql, (file_path,)).fetchall()
+
+    def update_node_lines(self, node_id: str, start_line: int, end_line: int):
+        """P33c: Update line numbers for a node whose body hasn't changed."""
+        self._exec(
+            "UPDATE nodes SET start_line = ?, end_line = ?, updated_at = ? WHERE id = ?",
+            (start_line, end_line, _now_ms(), node_id),
+        )
+
+    def delete_single_node(self, node_id: str):
+        """Delete a single node (edges cascade via FK)."""
+        self._exec("DELETE FROM nodes WHERE id = ?", (node_id,))
 
     def search_nodes(self, query: str, limit: int = 20) -> list[sqlite3.Row]:
         """Three-tier search: FTS5 BM25 -> LIKE fallback -> fuzzy (edit distance)."""
@@ -392,12 +403,13 @@ class QueryBuilder:
     def insert_edge(self, edge: dict):
         self._exec("""
             INSERT OR IGNORE INTO edges
-                (source, target, target_text, kind, source_loc, provenance)
-            VALUES (?,?,?,?,?,?)
+                (source, target, target_text, kind, source_loc, provenance, properties)
+            VALUES (?,?,?,?,?,?,?)
         """, (
             edge["source"], edge["target"], edge.get("target_text"),
             edge["kind"],
             edge.get("source_loc"), edge.get("provenance", "tree-sitter"),
+            edge.get("properties"),
         ))
 
     def insert_edges(self, edges: list[dict]):

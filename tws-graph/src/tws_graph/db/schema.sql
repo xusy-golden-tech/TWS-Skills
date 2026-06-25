@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     framework       TEXT,                   -- fastapi/express/spring (route nodes only)
     properties      TEXT DEFAULT '{}',      -- JSON object for arbitrary properties
     body            TEXT,                   -- function/method body source text
+    body_hash       TEXT,                   -- SHA256 of function body (for incremental re-index)
     updated_at      INTEGER NOT NULL
 );
 

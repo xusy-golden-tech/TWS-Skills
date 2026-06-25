@@ -74,8 +74,8 @@ _INSERT_NODES_SQL = (
     " (id, kind, name, qualified_name, file_path, language,"
     "  start_line, end_line, signature, docstring,"
     "  visibility, is_abstract, is_exported, decorators,"
-    "  framework, properties, body, updated_at)"
-    " VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?)"
+    "  framework, properties, body, body_hash, updated_at)"
+    " VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?,?)"
 )
 
 _INSERT_EDGES_SQL = (
@@ -1145,6 +1145,7 @@ class SqliteStore(Store):
                 n.get("framework"),
                 n.get("properties", "{}"),
                 n.get("body"),
+                n.get("body_hash"),
                 now,
             ))
         return params

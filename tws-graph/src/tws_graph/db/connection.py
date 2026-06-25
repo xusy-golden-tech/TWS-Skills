@@ -44,7 +44,9 @@ class DatabaseConnection:
         """Open an existing database. Raises FileNotFoundError if missing."""
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"Database not found: {db_path}")
-        return cls(db_path)
+        conn = cls(db_path)
+        cls._run_migrations(conn)
+        return conn
 
     @staticmethod
     def _needs_migration(conn: "DatabaseConnection") -> bool:
@@ -65,10 +67,24 @@ class DatabaseConnection:
             db.execute(
                 "ALTER TABLE unresolved_refs ADD COLUMN is_external INTEGER NOT NULL DEFAULT 0"
             )
-        db.execute("""
-            INSERT OR IGNORE INTO schema_versions (version, applied_at, description)
-            VALUES (2, CAST(strftime('%s', 'now') AS INTEGER) * 1000, 'Add is_external to unresolved_refs')
-        """)
+            db.execute("""
+                INSERT OR IGNORE INTO schema_versions (version, applied_at, description)
+                VALUES (2, CAST(strftime('%s', 'now') AS INTEGER) * 1000,
+                        'Add is_external to unresolved_refs')
+            """)
+
+        # Migration v3: Add body_hash to nodes for P33 incremental indexing
+        try:
+            db.execute("SELECT body_hash FROM nodes LIMIT 1")
+        except sqlite3.OperationalError:
+            db.execute(
+                "ALTER TABLE nodes ADD COLUMN body_hash TEXT"
+            )
+            db.execute("""
+                INSERT OR IGNORE INTO schema_versions (version, applied_at, description)
+                VALUES (3, CAST(strftime('%s', 'now') AS INTEGER) * 1000,
+                        'Add body_hash to nodes (P33 incremental v2)')
+            """)
 
     def optimize(self):
         """Run maintenance after bulk writes (ported from CodeGraph)."""

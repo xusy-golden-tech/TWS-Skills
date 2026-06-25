@@ -84,6 +84,10 @@ def _process_file_batch(args: tuple) -> list[dict]:
 
             extraction = extract_full(rel_path, content, lang)
 
+            # P33: Compute body_hashes from source content (in worker)
+            from .orchestrator import _compute_body_hashes
+            _compute_body_hashes(extraction.nodes, content)
+
             # Filter valid nodes (must have id, kind, name)
             valid_nodes = [
                 n for n in extraction.nodes
@@ -274,21 +278,84 @@ class ParallelExtractionOrchestrator:
                     fsize = file_result["size"]
                     fmtime = file_result["mtime"]
 
-                    if queries.get_file_by_path(rel_path):
-                        queries.delete_file(rel_path)
+                    # P33: Function-level incremental
+                    existing_file = queries.get_file_by_path(rel_path)
+                    if existing_file:
+                        old_nodes = queries.get_nodes_by_file(rel_path)
+                        old_by_qname = {
+                            n["qualified_name"]: {
+                                "id": n["id"], "body_hash": n["body_hash"],
+                                "start_line": n["start_line"], "end_line": n["end_line"],
+                            }
+                            for n in old_nodes
+                        }
+                    else:
+                        old_by_qname = {}
 
-                    if valid_nodes:
-                        queries.insert_nodes(valid_nodes)
+                    new_qnames = {n.get("qualified_name") for n in valid_nodes}
+                    old_qnames = set(old_by_qname.keys())
+
+                    # Separate changed vs unchanged
+                    changed_nodes = []
+                    unchanged_drifts = []
+                    for n in valid_nodes:
+                        qname = n.get("qualified_name")
+                        if not qname:
+                            continue
+                        old = old_by_qname.get(qname)
+                        if old and old.get("body_hash") == n.get("body_hash"):
+                            if (old["start_line"] != n["start_line"] or
+                                    old["end_line"] != n["end_line"]):
+                                unchanged_drifts.append(
+                                    (old["id"], n["start_line"], n["end_line"])
+                                )
+                        else:
+                            changed_nodes.append(n)
+
+                    # Delete old nodes that changed or disappeared
+                    for qname in old_qnames:
+                        if qname in new_qnames:
+                            old_info = old_by_qname[qname]
+                            new_node = next(
+                                (n for n in valid_nodes
+                                 if n.get("qualified_name") == qname), None
+                            )
+                            if new_node and old_info["body_hash"] == new_node.get("body_hash"):
+                                continue
+                            queries.delete_single_node(old_info["id"])
+                        else:
+                            queries.delete_single_node(old_by_qname[qname]["id"])
+
+                    if changed_nodes:
+                        queries.insert_nodes(changed_nodes)
 
                     if valid_edges:
-                        queries.insert_edges(valid_edges)
-                        result.edges_created += len(valid_edges)
+                        changed_ids = {n["id"] for n in changed_nodes}
+                        new_edges = [e for e in valid_edges
+                                     if e.get("source") in changed_ids]
+                        if new_edges:
+                            queries.insert_edges(new_edges)
+                        result.edges_created += len(new_edges)
 
-                    queries.upsert_file(rel_path, fhash, lang, len(valid_nodes),
+                    # P33c: Update line numbers for unchanged nodes
+                    for old_id, new_start, new_end in unchanged_drifts:
+                        queries.update_node_lines(old_id, new_start, new_end)
+
+                    # Count total nodes (changed + kept unchanged)
+                    kept_count = 0
+                    for qname in old_qnames & new_qnames:
+                        old_info = old_by_qname[qname]
+                        new_node = next((n for n in valid_nodes
+                                        if n.get("qualified_name") == qname), None)
+                        if new_node and old_info["body_hash"] == new_node.get("body_hash"):
+                            kept_count += 1
+                    total_nodes = len(changed_nodes) + kept_count
+
+                    queries.upsert_file(rel_path, fhash, lang, total_nodes,
                                        size=fsize, modified_at=fmtime)
 
                     result.files_indexed += 1
-                    result.nodes_created += len(valid_nodes)
+                    result.nodes_created += total_nodes
 
                     if file_result["errors"]:
                         result.errors.extend(file_result["errors"])
