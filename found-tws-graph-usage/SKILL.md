@@ -1,6 +1,6 @@
 ---
 name: tws-graph-usage
-description: tws-graph 代码图使用指南。所有需要查图的子 agent 必须加载此 skill。包含安装检查、命令语法、错误处理和最佳实践
+description: tws-graph 代码图使用指南（v5.7.0）。所有需要查图的子 agent 必须加载此 skill。包含安装检查、命令语法、错误处理和最佳实践
 ---
 
 # tws-graph 代码图使用指南
@@ -47,16 +47,14 @@ agent 不应该猜命令。加载此 skill 就是为了确保命令准确。
 
 ## 索引覆盖范围
 
-tws-graph 通过 15 个 tree-sitter 提取器索引项目源文件，**所有提取器均产出节点（可搜索的符号）+ 边（关系）**：
+tws-graph 通过 28+ 个提取器覆盖 30+ 种语言和配置格式。所有提取器均产出节点（可搜索的符号）+ 边（关系）。
 
-| 类别 | 语言 | 文件扩展名 | 关系类型 |
-|------|------|-----------|----------|
-| 编程语言 | Python, TypeScript, JavaScript, Java, Go, Rust, Kotlin, PHP, Ruby, C, C++, C#, Scala, Elixir, Haskell, Clojure | 对应扩展名 | contains, calls, imports |
-| 标记/样式 | HTML, CSS, Markdown | .html, .css, .md | contains, imports, calls |
-| 配置 | YAML, TOML, JSON, HCL, Kustomize | .yaml/.yml, .toml, .json, .hcl/.tf, .kustomize | contains, imports |
-| 容器/数据库 | Dockerfile, SQL | Dockerfile, .sql | contains, imports, calls, env_accesses |
-
-**这意味着 `tws-graph search` 可以搜索任何被索引文件中的符号**——不只是函数和类，还包括 SQL 表、Docker 构建阶段、HCL 资源、YAML 键、Kubernetes 资源等。
+| 类别 | 覆盖 |
+|------|------|
+| 编程语言 | Python, TypeScript, JavaScript, Java, Go, Rust, Kotlin, PHP, Ruby, C, C++, C#, Scala, Elixir, Haskell, Clojure, Lua, Bash/Shell |
+| 标记/样式 | HTML, CSS, Markdown |
+| 配置/IaC | YAML, TOML, JSON, HCL/Terraform, Kustomize, Kubernetes, Dockerfile, Proto |
+| 数据 | SQL |
 
 ## 前置检查（每次查图前必做）
 
@@ -79,31 +77,62 @@ tws-graph 通过 15 个 tree-sitter 提取器索引项目源文件，**所有提
 
 以下为 tws-graph 的**全部可用命令**。agent 只能使用此列表中的命令，禁止编造不存在的命令名。
 
+### 索引与同步
+
 | 命令 | 用途 | 示例 |
 |------|------|------|
 | `tws-graph index` | 全量/增量索引源文件 | `tws-graph index` |
 | `tws-graph sync` | 增量同步（stat 预筛选，比 index 更快） | `tws-graph sync` |
-| `tws-graph impact <node>` | 查变更影响范围（谁依赖这个符号） | `tws-graph impact MyClass.my_method --depth 2` |
+| `tws-graph hooks install` | 安装 git hooks（自动增量索引） | `tws-graph hooks install` |
+| `tws-graph watch` | 文件变更监听，自动增量同步 | `tws-graph watch --path . --interval 2.0` |
+
+### 符号查询
+
+| 命令 | 用途 | 示例 |
+|------|------|------|
+| `tws-graph search <query>` | FTS5 全文搜索符号 | `tws-graph search kind:class my` |
 | `tws-graph calls <node>` | 查调用目标（这个符号调了谁） | `tws-graph calls my_func` |
 | `tws-graph calls <node> --inbound` | 查调用者（谁调了这个符号） | `tws-graph calls my_func --inbound` |
+| `tws-graph impact <node>` | 查变更影响范围（谁依赖这个符号） | `tws-graph impact MyClass.my_method --depth 2` |
 | `tws-graph trace <src> <tgt>` | 查两个符号之间的调用路径 | `tws-graph trace main parse_config` |
-| `tws-graph search <query>` | FTS5 全文搜索符号 | `tws-graph search kind:class my` |
+| `tws-graph unresolved` | 列出未解析引用，自动标记 `[external]`/`[internal]` | `tws-graph unresolved` |
+
+### 快照与差异
+
+| 命令 | 用途 | 示例 |
+|------|------|------|
 | `tws-graph snapshot <name>` | 创建命名快照 | `tws-graph snapshot before` |
 | `tws-graph diff` | 对比快照（不加参数列出所有快照） | `tws-graph diff before after` |
 | `tws-graph diff <a> <b> --brief` | 简要对比（仅输出 changed/unchanged） | `tws-graph diff before after --brief` |
+| `tws-graph diff <a> <b> --json` | JSON 格式差异输出 | `tws-graph diff before after --json` |
+
+### 图查询与分析
+
+| 命令 | 用途 | 示例 |
+|------|------|------|
+| `tws-graph query <gql>` | GQL 图查询语言（v5.5.0 起替代 Cypher） | `tws-graph query "FIND function WHERE name MATCHES 'auth'"` |
+| `tws-graph cycles` | 检测调用图中的循环依赖 | `tws-graph cycles` |
+| `tws-graph layers` | 检测架构层次违规 | `tws-graph layers` |
+| `tws-graph metrics` | 计算模块内聚/耦合/不稳定性度量 | `tws-graph metrics` |
+| `tws-graph taint` | 安全污点分析（source→sink 路径追踪） | `tws-graph taint` |
+| `tws-graph predict-impact` | 预测修改某符号的影响范围和风险 | `tws-graph predict-impact my_func` |
+| `tws-graph health` | 代码健康评分（测试覆盖+死代码+耦合） | `tws-graph health --worst 10` |
+| `tws-graph analyze` | 图分析（算法：clone/community/centrality） | `tws-graph analyze --algorithm clone --threshold 0.8` |
+
+### 导出与工具
+
+| 命令 | 用途 | 示例 |
+|------|------|------|
+| `tws-graph export dot` | 导出 Graphviz DOT 格式 | `tws-graph export dot --from my_func --depth 2` |
+| `tws-graph export mermaid` | 导出 Mermaid 图（适合 Markdown） | `tws-graph export mermaid --from my_class` |
+| `tws-graph export json` | 导出 JSON 格式（节点+边） | `tws-graph export json --kind calls` |
+| `tws-graph serve` | 启动 MCP 服务器（21 工具 + 3 资源） | `tws-graph serve --root . --db .tws/codegraph/index.db` |
 | `tws-graph lint` | 校验 skill 文件结构 | `tws-graph lint` |
-| `tws-graph hooks install` | 安装 git hooks（自动增量索引） | `tws-graph hooks install` |
-| `tws-graph unresolved` | 列出未解析引用，自动标记 `[external]`/`[internal]` | `tws-graph unresolved` |
-| `tws-graph serve` | 启动 MCP 服务器（15 工具 + 3 资源） | `tws-graph serve --root . --db .tws/codegraph/index.db` |
-| `tws-graph analyze` | 图分析（算法：clone/community/centrality/cycle/all） | `tws-graph analyze --algorithm clone` |
-| `tws-graph analyze --run <name>` | 运行 P9 分析器 | `tws-graph analyze --run dead-code` |
-| `tws-graph watch` | 文件变更监听，自动增量同步索引 | `tws-graph watch --path . --interval 2.0` |
-| `tws-graph query <cypher>` | Cypher 图查询 | `tws-graph query "MATCH (n:class) RETURN n"` |
 | `tws-graph lsp setup` | 检测已安装的 LSP server 可用性 | `tws-graph lsp setup` |
 
 ## EdgeKind 参考
 
-`tws-graph` 支持 21 种边类型，用于查询和分析时过滤关系：
+`tws-graph` 支持 24 种边类型（EdgeKind 枚举定义），以下为实际有产出的边类型：
 
 | 类别 | 边类型 | 说明 |
 |------|--------|------|
@@ -112,11 +141,15 @@ tws-graph 通过 15 个 tree-sitter 提取器索引项目源文件，**所有提
 | | `REFERENCES` | 符号引用 |
 | | `EXTENDS` | 类继承 |
 | | `IMPLEMENTS` | 接口实现 |
+| | `OVERRIDES` | 方法覆写（v5.2.0） |
+| | `INSTANTIATES` | 类实例化（v5.2.0） |
+| | `DECORATES` | 装饰器/注解应用（v5.2.0） |
+| | `TYPE_REF` | 类型注解引用（v5.2.0） |
 | | `CONTAINS` | 包含关系（如文件包含类） |
-| 数据流 | `DATA_FLOWS` | 数据流向 |
+| 数据流 | `DATA_FLOWS` | 数据流向（含 cross-function / cross-file） |
 | | `READS` | 变量读取 |
 | | `WRITES` | 变量写入 |
-| | `THROWS` | 异常抛出 |
+| | `THROWS` | 异常抛出（含跨函数传播） |
 | 环境/事件 | `ENV_ACCESSES` | 环境变量访问 |
 | | `EMITS` | 事件发出 |
 | | `LISTENS_ON` | 事件监听 |
@@ -124,11 +157,9 @@ tws-graph 通过 15 个 tree-sitter 提取器索引项目源文件，**所有提
 | | `GRPC_SERVICE` | gRPC 服务定义 |
 | | `GRPC_CLIENT` | gRPC 客户端 |
 | | `GRPC_SERVER` | gRPC 服务端 |
-| 分析 | `SIMILAR_TO` | 代码克隆相似 |
+| 分析 | `SIMILAR_TO` | 代码克隆相似（--deep 模式） |
 | | `TEST_EDGE` | 测试关联 |
 | | `CONFIG_LINK` | 配置-代码关联 |
-
-在 `tws-graph analyze --edge-kinds` 中可以使用逗号分隔的边类型过滤分析范围。
 
 ## search 命令 qualifier 参考
 
@@ -137,7 +168,7 @@ tws-graph 通过 15 个 tree-sitter 提取器索引项目源文件，**所有提
 | qualifier | 说明 | 取值 |
 |-----------|------|------|
 | `kind:` | 符号类型 | 见下方完整注册表 |
-| `lang:` | 语言 | `python`, `typescript`, `javascript`, `java`, `go`, `rust`, `kotlin`, `php`, `ruby`, `c`, `cpp`, `csharp`, `scala`, `elixir`, `haskell`, `clojure`, `html`, `css`, `markdown`, `toml`, `sql`, `dockerfile`, `yaml`, `hcl`, `json`, `kustomize` |
+| `lang:` | 语言 | `python`, `typescript`, `javascript`, `java`, `go`, `rust`, `kotlin`, `php`, `ruby`, `c`, `cpp`, `csharp`, `scala`, `elixir`, `haskell`, `clojure`, `bash`, `lua`, `html`, `css`, `markdown`, `toml`, `sql`, `dockerfile`, `yaml`, `hcl`, `json`, `kustomize`, `proto` |
 | `path:` | 文件路径片段 | 任意字符串，如 `src/auth` |
 
 ### kind 完整注册表（40+ 种）
@@ -147,7 +178,7 @@ tws-graph 通过 15 个 tree-sitter 提取器索引项目源文件，**所有提
 **语言特有：**
 - Python: `class`, `function`, `method`, `module`, `variable`, `constant`
 - TypeScript/JavaScript: `class`, `function`, `method`, `interface`, `enum`, `enum_member`, `variable`, `type_alias`
-- Java: `class`, `method`, `interface`, `enum`, `variable`, `package`, `property`
+- Java: `class`, `method`, `interface`, `enum`, `variable`, `package`, `property`, `lambda`, `record`
 - Go: `function`, `method`, `type_alias`, `variable`, `property`
 - Rust: `function`, `class`, `interface`, `enum`, `variable`, `property`
 - Kotlin: `class`, `function`, `method`, `interface`, `enum`, `variable`, `package`, `property`
@@ -160,6 +191,8 @@ tws-graph 通过 15 个 tree-sitter 提取器索引项目源文件，**所有提
 - Elixir: `elixir_file`, `module`, `function`
 - Haskell: `haskell_file`, `module`, `function`, `type_def`, `class`, `instance`, `signature`
 - Clojure: `clojure_file`, `namespace`, `var_def`
+- Bash: `bash_file`, `function`, `variable`
+- Lua: `lua_file`, `function`, `variable`, `table`
 
 **结构式语言：**
 - HTML: `html_element`
@@ -173,6 +206,7 @@ tws-graph 通过 15 个 tree-sitter 提取器索引项目源文件，**所有提
 - HCL: `hcl_resource`, `hcl_data`, `hcl_module`, `hcl_provider`, `hcl_variable`, `hcl_output`, `hcl_terraform`, `hcl_locals`, `hcl_backend`, `hcl_required_providers`, `hcl_provisioner`
 - JSON: `json_key`
 - Kustomize: `kustomize_section`
+- Proto: `proto_file`, `service`, `rpc_method`
 
 ### --semantic 选项
 
@@ -182,12 +216,6 @@ tws-graph 通过 15 个 tree-sitter 提取器索引项目源文件，**所有提
 # 语义搜索（自然语言查询，按相关性排序）
 tws-graph search --semantic "authentication handler"
 tws-graph search auth --semantic --limit 10
-
-# 自定义信号权重（JSON 格式）
-tws-graph search tax --semantic --weights '{"BM25":2.0}'
-
-# 结合 embedding 增强
-tws-graph search login --semantic --embeddings
 ```
 
 11 个信号包括：BM25、qualified name 匹配、docstring 匹配、AST 相似度、API 签名相似度、克隆相似度、模块邻近度、图扩散、caller/callee 邻近度、图中心性、数据流连接。
@@ -199,14 +227,12 @@ tws-graph search login --semantic --embeddings
 tws-graph search kind:function auth
 tws-graph search lang:python kind:class user
 tws-graph search path:utils kind:method parse
-tws-graph search lang:haskell kind:function greet
 
 # 结构式语言搜索
 tws-graph search lang:sql kind:sql_table users
 tws-graph search lang:dockerfile kind:dockerfile_stage builder
 tws-graph search lang:hcl kind:hcl_resource aws_instance
 tws-graph search lang:yaml kind:yaml_key replicas
-tws-graph search lang:markdown kind:md_heading
 
 # 不指定 kind 搜索所有符号类型
 tws-graph search myapp
@@ -254,46 +280,50 @@ tws-graph search --semantic "authentication handler"
 # 11-signal 融合排序，返回最相关的符号
 ```
 
-### 死代码检测
+### GQL 图查询（v5.5.0+）
 
 ```
-tws-graph analyze --run dead-code
-# 检测零入度（无调用者）的函数/方法，排除已知入口点
+tws-graph query "FIND function WHERE name MATCHES 'auth'"
+tws-graph query "FIND class WHERE file_path MATCHES 'src/' RETURN name, file_path LIMIT 20"
+tws-graph query "IMPACT MyClass.my_method"
 ```
 
-### 入口点检测
+### 架构分析
 
 ```
-tws-graph analyze --run entry-point
-# 识别项目入口：main 函数、test 函数、CLI 入口、路由 handler 等
+tws-graph cycles                    # 检测循环依赖
+tws-graph layers                    # 检测层次违规
+tws-graph metrics                   # 模块内聚/耦合度量
+tws-graph health --worst 10         # 代码健康评分，最差 10 个文件
 ```
 
-### 克隆检测
+### 安全分析
 
 ```
-tws-graph analyze --algorithm clone --threshold 0.8
-# 基于 MinHash + LSH 检测近似重复函数
+tws-graph taint                     # 污点分析（source→sink 全路径）
 ```
 
-### Cypher 图查询
+### 影响预测
 
 ```
-tws-graph query "MATCH (n:class) RETURN n LIMIT 10"
-tws-graph query "MATCH (a)-[e:calls]->(b) RETURN a.name, b.name, e.kind"
+tws-graph predict-impact my_func    # 预测修改影响（半径+风险+测试建议）
 ```
 
-### Git diff 影响分析
+### 图导出
 
 ```
-tws-graph analyze --run git-diff
-# 对比当前状态与 HEAD~1，列出变更符号及其影响半径和风险等级
+tws-graph export dot --from main --depth 2     # DOT 格式（Graphviz）
+tws-graph export mermaid --from MyClass        # Mermaid 格式（Markdown）
+tws-graph export json --kind calls             # JSON 格式
 ```
 
-### LSP 检测
+### 代码质量
 
 ```
-tws-graph lsp setup
-# 扫描并检测已安装的 LSP server 可用性
+tws-graph analyze --run dead-code              # 死代码检测
+tws-graph analyze --run entry-point            # 入口点识别
+tws-graph analyze --run git-diff               # Git diff 影响分析
+tws-graph analyze --algorithm clone --threshold 0.8   # 克隆检测
 ```
 
 ## unresolved 引用分类与行动策略
@@ -314,27 +344,58 @@ tws-graph unresolved
 
 ## MCP 工具参考
 
-`tws-graph serve` 启动 MCP 服务器，暴露 15 个工具和 3 个资源。所有工具通过统一的 `tws://` 协议访问。
+`tws-graph serve` 启动 MCP 服务器，暴露 **21 个工具**和 **3 个资源**。所有工具纯脱网运行，零 HTTP 依赖。
 
-### MCP 工具列表（15 工具）
+### 搜索类（2 工具）
 
-| 工具名 | 类别 | 说明 |
-|--------|------|------|
-| `search_symbols` | 搜索 | FTS5 全文搜索符号（支持 qualifier） |
-| `semantic_search` | 搜索 | 11-signal 融合语义搜索，按相关性排序 |
-| `get_code` | 代码 | 根据符号 ID 获取源码和元数据 |
-| `get_dependencies` | 代码 | 获取调用者（inbound）或被调用者（outbound） |
-| `get_impact` | 代码 | 计算影响半径和风险等级 |
-| `trace_path` | 代码 | 查找两个符号之间的调用路径 |
-| `query_cypher` | 查询 | 执行 Cypher 图查询 |
-| `detect_cross_service` | 查询 | 检测跨服务通信（HTTP 路由、消息通道、gRPC） |
-| `get_complexity` | 分析 | 分析代码复杂度（循环/认知/Halstead） |
-| `find_dead_code` | 分析 | 检测潜在未使用代码 |
-| `get_test_coverage` | 分析 | 三项启发式策略分析测试覆盖 |
-| `get_entry_points` | 分析 | 识别项目入口点（按类型分类） |
-| `find_clones` | 高级 | MinHash + LSH 检测代码克隆 |
-| `get_git_diff_impact` | 高级 | Git diff 影响分析 |
-| `get_config_links` | 高级 | 发现代码常量与配置文件的关联 |
+| 工具名 | 说明 |
+|--------|------|
+| `search_symbols` | FTS5 全文搜索符号（支持 qualifier） |
+| `semantic_search` | 11-signal 融合语义搜索，按相关性排序 |
+
+### 代码类（4 工具）
+
+| 工具名 | 说明 |
+|--------|------|
+| `get_code` | 根据符号 ID 获取源码和元数据 |
+| `get_dependencies` | 获取调用者（inbound）或被调用者（outbound） |
+| `get_impact` | 计算影响半径和风险等级 |
+| `trace_path` | 查找两个符号之间的调用路径 |
+
+### 分析类（4 工具）
+
+| 工具名 | 说明 |
+|--------|------|
+| `get_complexity` | 分析代码复杂度（循环/认知/Halstead） |
+| `find_dead_code` | 检测潜在未使用代码 |
+| `get_test_coverage` | 三项启发式策略分析测试覆盖 |
+| `get_entry_points` | 识别项目入口点（按类型分类） |
+
+### 高级类（3 工具）
+
+| 工具名 | 说明 |
+|--------|------|
+| `find_clones` | MinHash + LSH 检测代码克隆 |
+| `get_git_diff_impact` | Git diff 影响分析 |
+| `get_config_links` | 发现代码常量与配置文件的关联 |
+
+### 查询类（3 工具）
+
+| 工具名 | 说明 |
+|--------|------|
+| `query_cypher` | 执行图查询（支持 Cypher/GQL） |
+| `get_edge_distribution` | 获取边类型分布统计 |
+| `detect_cross_service` | 检测跨服务通信（HTTP、消息、gRPC） |
+
+### 开发辅助类（5 工具）— P44+P46
+
+| 工具名 | 说明 |
+|--------|------|
+| `review_changes` | 代码审查辅助：下游影响分析 + 测试建议 + 质量门禁 |
+| `safe_refactor` | 重构安全检查：依赖分析 + 完整修改清单 + 重构建议 |
+| `api_compat_check` | API 兼容性检查：breaking change 检测 + semver 建议 |
+| `find_pattern` | AST 结构模式搜索：同义词 + body 搜索 + 结构匹配 |
+| `security_scan` | 安全漏洞检测：SQL 注入、硬编码密钥、路径遍历等 5 类 |
 
 ### MCP 资源（3 资源）
 
@@ -352,6 +413,9 @@ tws-graph serve
 
 # 指定项目根目录和数据库路径
 tws-graph serve --root /path/to/project --db .tws/codegraph/index.db
+
+# 生成 Claude Code MCP 配置
+tws-graph serve mcp-config
 ```
 
 ## 错误处理
@@ -389,6 +453,8 @@ tws-graph serve --root /path/to/project --db .tws/codegraph/index.db
    - `tws-graph path` — 正确命令是 `tws-graph trace`
    - `tws-graph callees` — 正确命令是 `tws-graph calls`
    - `tws-graph references` — 不存在，用 `tws-graph search` 或 `tws-graph impact`
+   - `tws-graph cypher` — Cypher 已改为 GQL，正确命令是 `tws-graph query`
+   - `tws-graph dead-code` — 正确命令是 `tws-graph analyze --run dead-code`
 
 2. **未 commit 的修改不跑 index 直接查图**。子 agent 刚改完代码还没 commit → hooks 没触发 → 索引是旧的。此时应先 `tws-graph index`。
 
@@ -411,4 +477,4 @@ tws-graph serve --root /path/to/project --db .tws/codegraph/index.db
 | 「语义搜索和普通搜索没区别」 | 语义搜索使用 11-signal 融合排序（BM25 + AST 相似 + 图扩散等），能发现关键词匹配不到的语义相关符号 |
 | 「直接 grep 也是一样的搜索效果」 | 图搜索有结构化关系（kind、lang、path 过滤），语义搜索有多信号排序。grep 只有文本匹配 |
 | 「用 MCP 工具跟用 CLI 一样」 | MCP 工具供 IDE 和外部 agent 集成，适合远程/进程内查询；CLI 适合终端交互和脚本。场景不同 |
-| 「索引覆盖的语言不够全」 | tws-graph 通过 15 个 tree-sitter 提取器覆盖 20+ 语言和配置文件格式。未覆盖的才回退 grep |
+| 「索引覆盖的语言不够全」 | tws-graph 通过 28+ 个提取器覆盖 30+ 语言和配置格式。未覆盖的才回退 grep |
