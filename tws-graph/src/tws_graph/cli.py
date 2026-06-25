@@ -27,6 +27,7 @@ from .indexer.scanner import scan_directory
 from .indexer.language_detect import detect_language
 from .pipeline.engine import PipelineEngine
 from .pipeline.passes import (
+    CloneDetectionPass,
     ConfigLinkAnalysisPass,
     CrossFileResolvePass,
     DataFlowPass,
@@ -166,7 +167,7 @@ def _get_store(db_path: str) -> SqliteStore:
     return SqliteStore(db_path)
 
 
-def _build_pipeline_engine(store: SqliteStore) -> PipelineEngine:
+def _build_pipeline_engine(store: SqliteStore, deep: bool = False) -> PipelineEngine:
     """Build the standard indexing pipeline.
 
     Passes (in dependency order):
@@ -178,6 +179,7 @@ def _build_pipeline_engine(store: SqliteStore) -> PipelineEngine:
         6. CrossFileResolvePass — resolve cross-file dangling edges
         7. TestEdgeAnalysisPass — test<->source associations (test_edge)
         8. ConfigLinkAnalysisPass — constant<->config key links (config_link)
+        9. CloneDetectionPass   — MinHash+LSH clone detection (similar_to) [--deep only]
     """
     engine = PipelineEngine(store=store)
     engine.register_pass(StatFilterPass())
@@ -188,6 +190,8 @@ def _build_pipeline_engine(store: SqliteStore) -> PipelineEngine:
     engine.register_pass(CrossFileResolvePass())
     engine.register_pass(TestEdgeAnalysisPass())
     engine.register_pass(ConfigLinkAnalysisPass())
+    if deep:
+        engine.register_pass(CloneDetectionPass())
     return engine
 
 
@@ -426,6 +430,7 @@ def index(
     project_path: str = typer.Argument(".", help="项目根目录"),
     force: bool = typer.Option(False, "--force", help="强制全量重建索引（跳过 content-hash 检查）"),
     serial: bool = typer.Option(False, "--serial", help="强制串行提取（调试/对比用，默认并行）"),
+    deep: bool = typer.Option(False, "--deep", help="启用深度分析（代码克隆检测 similar_to 边，耗时较长）"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径（默认: 项目目录/.tws/codegraph/index.db）"),
 ):
     """索引项目的所有源文件，构建代码关系图。"""
@@ -445,7 +450,7 @@ def index(
         queries = QueryBuilder(db.conn)
         try:
             orch = ExtractionOrchestrator(root_dir, queries)
-            result = orch.index_all(force=force, parallel=True)
+            result = orch.index_all(force=force, parallel=True, deep=deep)
         finally:
             db.close()
         # Handle empty project (no source files found)
@@ -513,7 +518,7 @@ def index(
 
     # 3. Build and execute pipeline
     typer.echo(f"正在索引: {root_dir}")
-    engine = _build_pipeline_engine(store)
+    engine = _build_pipeline_engine(store, deep=deep)
     ctx = engine.execute(files=list(files), root_dir=root_dir, force=force)
 
     # 4. Manage file records (for StatFilterPass on subsequent runs)
@@ -2204,6 +2209,182 @@ def _mcp_config(
     }
 
     typer.echo(_json.dumps(config, indent=2, ensure_ascii=False))
+
+
+# ============================================================================
+# Architecture analysis commands (P30 v5.3.0)
+# ============================================================================
+
+@app.command()
+def cycles(
+    max_cycles: int = typer.Option(
+        50, "--max", "-m",
+        help="最大环数 (0=无限制)",
+    ),
+    db: str | None = typer.Option(
+        None, "--db", "-d",
+        help="数据库路径 (默认: .tws/codegraph/index.db)",
+    ),
+):
+    """检测调用图中的循环依赖。
+
+    基于 DFS 三色标记法检测 calls 边形成的有向环。
+    例：
+      tws-graph cycles
+      tws-graph cycles --max 10
+    """
+    db = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
+    if not db:
+        typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
+        raise typer.Exit(1)
+
+    from tws_graph.analysis.architecture import detect_cycles
+    queries = QueryBuilder(db.conn)
+    result = detect_cycles(queries, max_cycles=max_cycles)
+
+    if not result:
+        typer.echo("(未检测到循环依赖)")
+        return
+
+    typer.echo(f"检测到 {len(result)} 个循环依赖:\n")
+    for i, cycle in enumerate(result, 1):
+        names = cycle.get("names", cycle.get("cycle", []))
+        files = cycle.get("files", [])
+        length = cycle.get("length", len(names) - 1)
+        typer.echo(f"  #{i} 长度={length}, 文件数={len(files)}")
+        typer.echo(f"      路径: {' → '.join(names)}")
+        if files:
+            typer.echo(f"      涉及文件: {', '.join(files[:5])}")
+        typer.echo()
+
+
+@app.command()
+def layers(
+    layer_def: str | None = typer.Option(
+        None, "--layers", "-l",
+        help="层次定义 JSON: '{\"ui\": {\"pattern\": \"src/ui/**\", \"level\": 1}, ...}'",
+    ),
+    db: str | None = typer.Option(
+        None, "--db", "-d",
+        help="数据库路径 (默认: .tws/codegraph/index.db)",
+    ),
+):
+    """检测架构层次违规。
+
+    根据层定义文件或 --layers 参数，检测违反层次方向的调用。
+    默认方向：高层级（小数字）可调用低层级（大数字），反之是违规。
+
+    例：
+      tws-graph layers --layers '{"ui": {"pattern": "src/ui/**", "level": 1}, "data": {"pattern": "src/data/**", "level": 3}}'
+    """
+    db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
+    if not db_conn:
+        typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
+        raise typer.Exit(1)
+    import json as _json
+
+    if layer_def:
+        layers_dict = _json.loads(layer_def)
+    else:
+        typer.echo("提示: 使用 --layers 提供层次定义 JSON", err=True)
+        typer.echo('示例: tws-graph layers --layers \'{"ui":{"pattern":"src/ui/**","level":1},"svc":{"pattern":"src/service/**","level":2}}\'')
+        raise typer.Exit(1)
+
+    from tws_graph.analysis.architecture import detect_layer_violations
+    queries = QueryBuilder(db_conn.conn)
+    violations = detect_layer_violations(queries, layers_dict)
+
+    if not violations:
+        typer.echo("(未检测到层次违规)")
+        return
+
+    typer.echo(f"检测到 {len(violations)} 个层次违规:\n")
+    for i, v in enumerate(violations, 1):
+        typer.echo(
+            f"  #{i} [{v['source_layer']}(L{v['source_level']})] "
+            f"{v['source_name']} ({v['source_file']})"
+        )
+        typer.echo(
+            f"       → [{v['target_layer']}(L{v['target_level']})] "
+            f"{v['target_name']} ({v['target_file']})"
+        )
+        typer.echo()
+
+
+@app.command()
+def metrics(
+    module: str | None = typer.Option(
+        None, "--module", "-m",
+        help="只显示指定模块的度量 (file_path 片段匹配)",
+    ),
+    sort_by: str = typer.Option(
+        "instability", "--sort", "-s",
+        help="排序字段: instability, cohesion, internal_calls, external_calls, afferent_coupling, efferent_coupling",
+    ),
+    limit: int = typer.Option(
+        30, "--limit", "-n",
+        help="显示前 N 个结果",
+    ),
+    db: str | None = typer.Option(
+        None, "--db", "-d",
+        help="数据库路径 (默认: .tws/codegraph/index.db)",
+    ),
+):
+    """计算模块内聚/耦合/不稳定性度量。
+
+    内聚 = internal_calls / total_calls
+    不稳定性 = efferent_coupling / (afferent_coupling + efferent_coupling)
+
+    例：
+      tws-graph metrics
+      tws-graph metrics --module src/tws_graph --sort cohesion -n 20
+    """
+    db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
+    if not db_conn:
+        typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
+        raise typer.Exit(1)
+
+    from tws_graph.analysis.architecture import compute_module_metrics
+    queries = QueryBuilder(db_conn.conn)
+    all_metrics = compute_module_metrics(queries)
+
+    if not all_metrics:
+        typer.echo("(无数据)")
+        return
+
+    # Filter by module name
+    if module:
+        all_metrics = [m for m in all_metrics if module in m["module"]]
+
+    # Sort
+    valid_sort_keys = {
+        "instability", "cohesion", "internal_calls", "external_calls",
+        "afferent_coupling", "efferent_coupling",
+    }
+    if sort_by in valid_sort_keys:
+        all_metrics.sort(key=lambda m: m.get(sort_by, 0), reverse=True)
+
+    # Display
+    typer.echo(f"{'模块':<50} {'内聚':>6} {'不稳定':>8} {'传入':>5} {'传出':>5} {'内部调':>7} {'外部调':>7}")
+    typer.echo("-" * 95)
+
+    for m in all_metrics[:limit]:
+        mod_display = m["module"]
+        if len(mod_display) > 49:
+            mod_display = "..." + mod_display[-46:]
+        typer.echo(
+            f"{mod_display:<50} "
+            f"{m['cohesion']:>6.3f} "
+            f"{m['instability']:>8.3f} "
+            f"{m['afferent_coupling']:>5} "
+            f"{m['efferent_coupling']:>5} "
+            f"{m['internal_calls']:>7} "
+            f"{m['external_calls']:>7}"
+        )
+
+    remaining = len(all_metrics) - limit
+    if remaining > 0:
+        typer.echo(f"\n(显示前 {limit} 个，共 {len(all_metrics)} 个模块，使用 -n 调整)")
 
 
 def main():
