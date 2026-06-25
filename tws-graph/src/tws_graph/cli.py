@@ -2387,6 +2387,77 @@ def metrics(
         typer.echo(f"\n(显示前 {limit} 个，共 {len(all_metrics)} 个模块，使用 -n 调整)")
 
 
+# ============================================================================
+# Taint analysis command (P31 v5.3.0)
+# ============================================================================
+
+@app.command()
+def taint(
+    max_depth: int = typer.Option(
+        5, "--depth", "-d",
+        help="BFS 最大搜索深度",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json",
+        help="JSON 格式输出",
+    ),
+    db: str | None = typer.Option(
+        None, "--db",
+        help="数据库路径 (默认: .tws/codegraph/index.db)",
+    ),
+):
+    """安全污点分析：追踪敏感数据从来源到危险操作的完整路径。
+
+    通过 data_flows 边做 BFS，查找 source→sink 路径。
+    Source: 环境变量、文件读取、用户输入、HTTP 请求体
+    Sink: 命令执行、SQL、代码注入、文件写入、网络外泄
+
+    例：
+      tws-graph taint
+      tws-graph taint --depth 10 --json
+    """
+    db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
+    if not db_conn:
+        typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
+        raise typer.Exit(1)
+
+    from tws_graph.analysis.taint import find_taint_paths, find_sources, find_sinks
+    import json as _json
+
+    queries = QueryBuilder(db_conn.conn)
+
+    sources = find_sources(queries)
+    sinks = find_sinks(queries)
+    paths = find_taint_paths(queries, max_depth=max_depth)
+
+    if json_output:
+        typer.echo(_json.dumps({
+            "source_count": len(sources),
+            "sink_count": len(sinks),
+            "path_count": len(paths),
+            "paths": paths,
+        }, ensure_ascii=False, indent=2, default=str))
+        return
+
+    typer.echo(f"Sources: {len(sources)} | Sinks: {len(sinks)} | Paths found: {len(paths)}\n")
+
+    if not paths:
+        typer.echo("(未发现 source→sink 路径)")
+        return
+
+    for i, p in enumerate(paths[:20], 1):
+        nodes = p["path"]
+        typer.echo(f"  #{i} [{p['source_type']} → {p['sink_type']}] depth={p['depth']}")
+        typer.echo(f"      source: {p['source']}")
+        typer.echo(f"      sink:   {p['sink']}")
+        typer.echo(f"      路径: {' → '.join(n.get('name', '?') for n in nodes)}")
+        typer.echo()
+
+    remaining = len(paths) - min(len(paths), 20)
+    if remaining > 0:
+        typer.echo(f"(显示前 20 条路径，共 {len(paths)} 条)")
+
+
 def main():
     app()
 
