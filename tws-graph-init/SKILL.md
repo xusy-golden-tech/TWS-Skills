@@ -1,4 +1,4 @@
----
+﻿---
 name: tws-graph-init
 description: 代码图初始化——安装 tws-graph CLI、构建项目符号关系图、创建基线快照
 ---
@@ -68,10 +68,9 @@ Bash: pip install -e tws-graph/ --upgrade 2>&1
 Bash: tws-graph index 2>&1
 
 → 输出索引统计（N 个文件, N 个符号, N 条关系）→ 继续步骤 ④
-  tws-graph 通过 15 个 tree-sitter 提取器覆盖项目中的全部文本文件：
-  编程语言（Python/TS/Java/Go/Rust/Kotlin/PHP/Ruby/C/C++/C#/Scala/Elixir/Haskell/Clojure）、
-  标记样式（HTML/CSS/Markdown）、配置（YAML/TOML/JSON/HCL/Kustomize）、
-  容器/数据库（Dockerfile/SQL）。所有提取器均产出节点（可搜索符号）+ 边（关系）。
+  tws-graph 通过 28+ 个 tree-sitter 提取器覆盖 30+ 种语言和文件格式，
+	  含编程语言、标记样式、配置格式、容器/数据库、技能文档等。
+	  详细清单见 found-tws-graph-usage。所有提取器均产出节点（可搜索符号）+ 边（关系）。
 → 如果部分文件解析失败 → 继续，但标注「部分文件索引失败，涉及这些文件的功能可能无法查询」
 → 如果全部失败 → 标注「索引构建失败」，后续技能退回 grep
 ```
