@@ -79,11 +79,12 @@ class TestEndToEndLifecycle:
 
         # Step 3: List tools
         tools_result = _send_request(server, "tools/list", {})
-        assert len(tools_result["tools"]) == 15
+        assert len(tools_result["tools"]) == 20
         tool_names = {t["name"] for t in tools_result["tools"]}
         assert "search_symbols" in tool_names
         assert "get_code" in tool_names
         assert "query_cypher" in tool_names
+        assert "review_changes" in tool_names
 
         # Step 4: List resources
         resources_result = _send_request(server, "resources/list", {})
@@ -172,7 +173,7 @@ class TestEndToEndLifecycle:
         result = _send_request(server, "ping", {})
         assert result == {}
 
-    def test_all_15_tools_registered(self, server_with_data):
+    def test_all_20_tools_registered(self, server_with_data):
         server = server_with_data
         _send_request(server, "initialize", {
             "protocolVersion": MCP_VERSION,
@@ -187,7 +188,8 @@ class TestEndToEndLifecycle:
             "get_code", "get_dependencies", "get_impact", "trace_path",
             "get_complexity", "find_dead_code", "get_test_coverage", "get_entry_points",
             "find_clones", "get_git_diff_impact", "get_config_links",
-            "query_cypher", "detect_cross_service",
+            "query_cypher", "detect_cross_service", "get_edge_distribution",
+            "review_changes", "safe_refactor", "api_compat_check", "find_pattern",
         }
         assert tool_names == expected
 

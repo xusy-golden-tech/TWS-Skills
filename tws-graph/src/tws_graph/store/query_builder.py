@@ -486,11 +486,23 @@ class QueryBuilder:
             UPDATE edges SET target = ?, provenance = ? WHERE rowid = ?
         """, (new_target, provenance, edge_rowid))
 
+    def update_edge_targets_batch(self, updates: list[tuple[int, str, str]]):
+        """P42: Batch update edge targets (rowid, new_target, provenance)."""
+        self._execmany("""
+            UPDATE edges SET target = ?, provenance = ? WHERE rowid = ?
+        """, [(tgt, prov, rid) for rid, tgt, prov in updates])
+
     def mark_edge_provenance(self, edge_rowid: int, provenance: str):
         """Mark an edge's provenance without changing the target."""
         self._exec("""
             UPDATE edges SET provenance = ? WHERE rowid = ?
         """, (provenance, edge_rowid))
+
+    def mark_edge_provenance_batch(self, updates: list[tuple[int, str]]):
+        """P42: Batch mark edge provenance (rowid, provenance)."""
+        self._execmany("""
+            UPDATE edges SET provenance = ? WHERE rowid = ?
+        """, [(prov, rid) for rid, prov in updates])
 
     # ------------------------------------------------------------------
     # Files

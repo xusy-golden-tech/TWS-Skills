@@ -124,7 +124,10 @@ def resolve_edges(queries) -> ResolveResult:
             suffix_index.setdefault(suffix, []).append(nid)
             suffix_index_lower.setdefault(suffix.lower(), []).append(nid)
 
-    # ── 4. Resolve each dangling edge ───────────────────────────
+    # ── 4. Resolve each dangling edge (P42: batched writes) ─────
+    target_updates: list[tuple[int, str, str]] = []  # (rowid, target, provenance)
+    provenance_updates: list[tuple[int, str]] = []   # (rowid, provenance)
+
     for edge in dangling:
         target_text = edge["target_text"]
         if not target_text:
@@ -151,14 +154,20 @@ def resolve_edges(queries) -> ResolveResult:
 
         edge_rowid = edge["edge_rowid"]
         if matched_id:
-            queries.update_edge_target(edge_rowid, matched_id, "resolved")
+            target_updates.append((edge_rowid, matched_id, "resolved"))
             result.resolved += 1
         elif matched_count > 1:
-            queries.mark_edge_provenance(edge_rowid, "ambiguous")
+            provenance_updates.append((edge_rowid, "ambiguous"))
             result.ambiguous += 1
         else:
-            queries.mark_edge_provenance(edge_rowid, "unresolved")
+            provenance_updates.append((edge_rowid, "unresolved"))
             result.unresolved += 1
+
+    # P42: Batch write all edge updates in a single SQL transaction
+    if target_updates:
+        queries.update_edge_targets_batch(target_updates)
+    if provenance_updates:
+        queries.mark_edge_provenance_batch(provenance_updates)
 
     return result
 

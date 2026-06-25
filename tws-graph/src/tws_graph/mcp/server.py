@@ -35,6 +35,7 @@ from .tools import (
     register_analysis_tools,
     register_advanced_tools,
     register_query_tools,
+    register_dev_assist_tools,
 )
 from tws_graph.store.interface import Store
 
@@ -93,13 +94,14 @@ class MCPServer:
     # =========================================================================
 
     def _register_tools(self) -> None:
-        """Register all 16 MCP tools."""
+        """Register all 20 MCP tools (16 core + 4 dev-assist P44)."""
         # Each tool module's register_tools adds tools to the registry
         register_search_tools(self._tool_registry, self._store_factory)
         register_code_tools(self._tool_registry, self._store_factory)
         register_analysis_tools(self._tool_registry, self._store_factory)
         register_advanced_tools(self._tool_registry, self._store_factory)
         register_query_tools(self._tool_registry, self._store_factory)
+        register_dev_assist_tools(self._tool_registry, self._store_factory)
 
     def _register_resources(self) -> None:
         """Register all 3 MCP resources (stats, languages, health)."""

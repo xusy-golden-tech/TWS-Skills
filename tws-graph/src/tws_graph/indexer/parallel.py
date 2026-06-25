@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..db.queries import QueryBuilder
+from ..store.sqlite_store import FTS_TRIGGERS_DROP, FTS_TRIGGERS_CREATE
 from .scanner import scan_directory
 from .language_detect import detect_language
 from .parser import extract_full
@@ -256,7 +257,15 @@ class ParallelExtractionOrchestrator:
                     })
 
         # Step 5: Batch INSERT into SQLite (main process, single-threaded)
-        # Group files into write batches of 100 to reduce transaction overhead
+        # P42: Drop FTS triggers during bulk writes — rebuild once at the end.
+        # Per-row FTS maintenance during bulk insert is the #1 bottleneck.
+        for stmt in FTS_TRIGGERS_DROP:
+            queries.conn.execute(stmt)
+        # P42: Bump cache for large bulk-write phase + use memory journal
+        queries.conn.execute("PRAGMA cache_size = -256000")     # 256 MB
+        queries.conn.execute("PRAGMA journal_mode = MEMORY")
+
+        # Group files into write batches of 500 to reduce transaction overhead
         _WRITE_BATCH_SIZE = 500  # P28: 100→500 reduce transaction overhead
         for batch_start in range(0, len(all_file_results), _WRITE_BATCH_SIZE):
             batch_files = all_file_results[batch_start:batch_start + _WRITE_BATCH_SIZE]
@@ -379,7 +388,13 @@ class ParallelExtractionOrchestrator:
             _propagate_cross_file_dataflow(queries)
             if deep:
                 _detect_clones(queries)
-            # P28: FTS triggers keep index in sync — full rebuild is redundant
+            # P42: Rebuild FTS once after all writes + re-create triggers
+            queries.rebuild_fts()
+            for stmt in FTS_TRIGGERS_CREATE:
+                queries.conn.execute(stmt)
+            # P42: Restore durable settings + checkpoint WAL
+            queries.conn.execute("PRAGMA journal_mode = WAL")
+            queries.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             result.framework_result = detect_frameworks(self.root_dir, queries)
 
         result.duration_ms = int((time.time() - t0) * 1000)

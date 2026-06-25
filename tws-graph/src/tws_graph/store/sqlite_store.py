@@ -65,6 +65,10 @@ _FTS_TRIGGERS_CREATE = (
     END""",
 )
 
+# P42: Export for parallel.py FTS optimization
+FTS_TRIGGERS_DROP = _FTS_TRIGGERS_DROP
+FTS_TRIGGERS_CREATE = _FTS_TRIGGERS_CREATE
+
 # ---------------------------------------------------------------------------
 # SQL templates
 # ---------------------------------------------------------------------------
@@ -170,6 +174,9 @@ class SqliteStore(Store):
         # ── def index cache ─────────────────────────────────────────
         self._def_index_cache: Optional[dict[str, str]] = None
         self._def_index_dirty = False
+
+        # ── P42: defer FTS rebuild to end of indexing ──────────────
+        self._defer_fts = False
 
         # ── lifecycle ───────────────────────────────────────────────
         self._closed = False
@@ -1017,9 +1024,11 @@ class SqliteStore(Store):
                     )
                 finally:
                     self._enable_fts_triggers()
-                self._conn_mgr.conn.execute(
-                    "INSERT INTO nodes_fts(nodes_fts) VALUES ('rebuild')"
-                )
+                # P42: Defer FTS rebuild to end of indexing for massive speedup
+                if not self._defer_fts:
+                    self._conn_mgr.conn.execute(
+                        "INSERT INTO nodes_fts(nodes_fts) VALUES ('rebuild')"
+                    )
                 self._node_buffer.clear()
 
             # ── 2. Write edges (with source validation) ──

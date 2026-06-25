@@ -4,7 +4,7 @@ from ..base import BaseExtractor, ExtractionContext
 
 
 class PythonExtractor(BaseExtractor):
-    extensions = [".py"]
+    extensions = [".py", ".pyi"]
     tree_sitter_languages = ["python"]
     language_name = "python"
 

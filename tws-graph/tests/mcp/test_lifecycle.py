@@ -106,14 +106,15 @@ class TestInitialize:
         })
         assert "result" in result
         tools = result["result"]["tools"]
-        assert len(tools) == 15
+        assert len(tools) == 20
         tool_names = {t["name"] for t in tools}
         expected_names = {
             "search_symbols", "semantic_search",
             "get_code", "get_dependencies", "get_impact", "trace_path",
             "get_complexity", "find_dead_code", "get_test_coverage", "get_entry_points",
             "find_clones", "get_git_diff_impact", "get_config_links",
-            "query_cypher", "detect_cross_service",
+            "query_cypher", "detect_cross_service", "get_edge_distribution",
+            "review_changes", "safe_refactor", "api_compat_check", "find_pattern",
         }
         assert tool_names == expected_names
 
