@@ -72,6 +72,28 @@ _STDLIB_MODULES: frozenset[str] = frozenset({
 })
 
 
+# P47: Cross-language resolution groups
+# Languages in the same group share a namespace (package/module paths)
+CROSS_LANG_GROUPS: dict[str, frozenset[str]] = {
+    "jvm": frozenset({"java", "kotlin", "scala"}),
+    "web": frozenset({"typescript", "javascript", "jsx", "tsx"}),
+}
+# Reverse lookup: language → group name
+_LANG_TO_GROUP: dict[str, str] = {}
+for _group, _langs in CROSS_LANG_GROUPS.items():
+    for _lang in _langs:
+        _LANG_TO_GROUP[_lang] = _group
+
+
+def _are_cross_lang_compatible(lang_a: str, lang_b: str) -> bool:
+    """Check if two languages can cross-reference (share a namespace)."""
+    if lang_a == lang_b:
+        return True
+    group_a = _LANG_TO_GROUP.get(lang_a, "")
+    group_b = _LANG_TO_GROUP.get(lang_b, "")
+    return group_a == group_b and group_a != ""
+
+
 @dataclass
 class ResolveResult:
     resolved: int = 0        # edges whose target was fixed
@@ -112,12 +134,14 @@ def resolve_edges(queries) -> ResolveResult:
     suffix_index_lower: dict[str, list[str]] = {}
     node_file: dict[str, str] = {}
     node_qname: dict[str, str] = {}  # node_id → qualified_name (for import matching)
+    node_lang: dict[str, str] = {}   # P47: node_id → language
     all_nodes = queries.get_all_callable_nodes()
     for node in all_nodes:
         qname = node["qualified_name"]
         nid = node["id"]
         node_file[nid] = node["file_path"]
         node_qname[nid] = qname
+        node_lang[nid] = node.get("language", "")
         parts = qname.rsplit("::", 3)
         for level in range(1, min(len(parts), 3) + 1):
             suffix = "::".join(parts[-level:])
@@ -154,7 +178,18 @@ def resolve_edges(queries) -> ResolveResult:
 
         edge_rowid = edge["edge_rowid"]
         if matched_id:
-            target_updates.append((edge_rowid, matched_id, "resolved"))
+            # P47: Check if this is a cross-language resolution
+            source_nid = edge.get("source", "")
+            source_lang = node_lang.get(source_nid, "")
+            target_lang = node_lang.get(matched_id, "")
+            if source_lang and target_lang and source_lang != target_lang:
+                if _are_cross_lang_compatible(source_lang, target_lang):
+                    provenance = "cross_lang_resolved"
+                else:
+                    provenance = "resolved"
+            else:
+                provenance = "resolved"
+            target_updates.append((edge_rowid, matched_id, provenance))
             result.resolved += 1
         elif matched_count > 1:
             provenance_updates.append((edge_rowid, "ambiguous"))
