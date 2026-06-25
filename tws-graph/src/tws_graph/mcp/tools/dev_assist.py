@@ -319,6 +319,7 @@ def _review_changes(store: Store, args: Optional[dict]) -> dict:
                 "low": low_risk,
             },
             "suggested_tests": sorted(all_affected_tests)[:20],
+            "quality_gate": _compute_quality_gate(store, node_ids, file_paths),
         }
     except Exception as e:
         output = {"error": str(e), "results": []}
@@ -810,7 +811,150 @@ def _security_scan(store: Store, args: Optional[dict]) -> dict:
     return {"content": [{"type": "text", "text": json.dumps(output, ensure_ascii=False)}]}
 
 
-def max_bump(a: str, b: str) -> str:
+def _compute_quality_gate(store, node_ids: set, file_paths: list) -> dict:
+    """Compute quality gate checks for reviewed changes (P46c)."""
+    gates: list[dict] = []
+
+    # Collect node details
+    nodes = []
+    for nid in node_ids:
+        node = store.get_node_by_id(nid)
+        if node:
+            nodes.append(node)
+
+    # === Complexity Gate ===
+    complex_funcs = []
+    for node in nodes:
+        start = _get(node, "start_line", 0)
+        end = _get(node, "end_line", 0)
+        if end - start > 50:
+            complex_funcs.append({
+                "name": _get(node, "name"),
+                "file": _get(node, "file_path"),
+                "lines": end - start,
+            })
+
+    if complex_funcs:
+        gates.append({
+            "name": "complexity",
+            "status": "review",
+            "message": f"{len(complex_funcs)} function(s) exceed 50-line threshold",
+            "details": complex_funcs,
+            "remediation": "Consider extracting sub-functions or breaking into smaller units",
+        })
+    else:
+        gates.append({
+            "name": "complexity",
+            "status": "pass",
+            "message": "No functions exceed complexity threshold",
+        })
+
+    # === Test Coverage Gate ===
+    untested_files = []
+    tested_files = []
+    all_code_files = set()
+    for node in nodes:
+        all_code_files.add(_get(node, "file_path", ""))
+    for fp in file_paths:
+        all_code_files.add(fp)
+
+    for fp in all_code_files:
+        if not fp:
+            continue
+        # Check if a test file exists (simple heuristic)
+        base = fp.replace("\\", "/")
+        test_patterns = [
+            base.replace("src/", "tests/").replace(".py", "_test.py"),
+            base.replace("src/", "tests/").replace(".py", "/test_"),
+            base.replace("src/", "tests/test_"),
+            "tests/" + base.split("/")[-1],
+        ]
+        # Check if any test file exists in the store
+        has_test = False
+        for tp in test_patterns:
+            try:
+                test_nodes = list(store.iter_nodes_by_file(tp))
+                if test_nodes:
+                    has_test = True
+                    tested_files.append(fp)
+                    break
+            except Exception:
+                pass
+        if not has_test and fp:
+            untested_files.append(fp)
+
+    if untested_files:
+        gates.append({
+            "name": "test_coverage",
+            "status": "review",
+            "message": f"{len(untested_files)} file(s) have no matching test files",
+            "details": untested_files,
+            "remediation": "Add test files for the modified code before merging",
+        })
+    else:
+        gates.append({
+            "name": "test_coverage",
+            "status": "pass",
+            "message": "All modified files have corresponding tests",
+        })
+
+    # === Dependency Direction Gate (circular dependency check) ===
+    dep_graph: dict[str, set] = {}
+    for node in nodes:
+        nid = _get(node, "id")
+        fp = _get(node, "file_path", "")
+        if fp not in dep_graph:
+            dep_graph[fp] = set()
+        # Get outgoing calls
+        try:
+            outgoing = store.get_outgoing_edges(nid)
+        except Exception:
+            outgoing = []
+        for e in outgoing:
+            if _get(e, "kind") == "calls":
+                target_node = store.get_node_by_id(_get(e, "target"))
+                if target_node:
+                    target_fp = _get(target_node, "file_path", "")
+                    if target_fp and target_fp != fp:
+                        dep_graph[fp].add(target_fp)
+
+    # Detect cycles
+    cycles = []
+    files_list = list(dep_graph.keys())
+    for i, f1 in enumerate(files_list):
+        for f2 in files_list[i + 1:]:
+            if f2 in dep_graph.get(f1, set()) and f1 in dep_graph.get(f2, set()):
+                cycles.append({"file_a": f1, "file_b": f2})
+
+    if cycles:
+        gates.append({
+            "name": "dependency_direction",
+            "status": "fail",
+            "message": f"{len(cycles)} circular dependency(s) detected",
+            "details": cycles,
+            "remediation": "Break circular dependencies by extracting shared interfaces or introducing a third module",
+        })
+    else:
+        gates.append({
+            "name": "dependency_direction",
+            "status": "pass",
+            "message": "No circular dependencies detected",
+        })
+
+    # === Overall Score ===
+    statuses = [g["status"] for g in gates]
+    if "fail" in statuses:
+        overall = "fail"
+    elif "review" in statuses:
+        overall = "review"
+    else:
+        overall = "pass"
+
+    return {
+        "overall": overall,
+        "gates": gates,
+        "checked_at": None,  # Would be timestamp in production
+    }
     """Return the higher semver bump level."""
     order = {"patch": 0, "minor": 1, "major": 2}
     return b if order.get(b, 0) > order.get(a, 0) else a
