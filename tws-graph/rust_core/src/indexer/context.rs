@@ -282,7 +282,7 @@ fn now_ms() -> i64 {
 ///
 /// This mapping matches the kind strings used in the `nodes` table and
 /// the `kind` qualifier in `tws-graph search`.
-fn node_kind_to_str(kind: NodeKind) -> &'static str {
+pub(crate) fn node_kind_to_str(kind: NodeKind) -> &'static str {
     match kind {
         // --- programming-language generics ---
         NodeKind::File => "file",

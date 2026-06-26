@@ -19,8 +19,8 @@ tree-sitter = "0.25"
 # in the dep graph. These cover 28+ languages; uncomment as extractors are
 # implemented and verify version compatibility with the core `tree-sitter` dep.
 #
-# tree-sitter-python = "*"
-# tree-sitter-typescript = "*"
+tree-sitter-python = "*"
+tree-sitter-typescript = "*"
 # tree-sitter-java = "*"
 # tree-sitter-go = "*"
 # tree-sitter-rust = "*"
