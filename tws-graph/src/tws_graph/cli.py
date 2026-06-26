@@ -1,5 +1,8 @@
 """TWS Code Graph CLI — typer-based command-line interface.
 
+v7.0.0: Rust core is the only supported backend. Python fallback code has
+been removed. All commands require the _core native library.
+
 Commands:
     index       Build / update the code symbol graph
     calls       Find callers (--inbound) / callees (--outbound) of a symbol
@@ -11,7 +14,6 @@ Commands:
     watch       Watch directory for changes and auto-sync the index
 """
 
-import hashlib
 import json
 import os
 import sys
@@ -20,37 +22,7 @@ from typing import Optional
 import typer
 
 from . import __version__
-from .db.connection import DatabaseConnection
-from .db.queries import QueryBuilder
-from .indexer.orchestrator import ExtractionOrchestrator
-from .indexer.scanner import scan_directory
-from .indexer.language_detect import detect_language
-from .pipeline.engine import PipelineEngine
-from .pipeline.passes import (
-    CloneDetectionPass,
-    ConfigLinkAnalysisPass,
-    CrossFileResolvePass,
-    DataFlowPass,
-    EdgeInsertPass,
-    NodeInsertPass,
-    ParseExtractPass,
-    StatFilterPass,
-    TestEdgeAnalysisPass,
-)
-from .search.semantic import semantic_query
 from .store import SqliteStore
-from .graph.traversal import GraphTraverser
-from .graph.algorithms.similarity import CloneDetector
-from .graph.algorithms.community import CommunityDetector
-from .graph.algorithms.centrality import CentralityComputer
-from .graph.algorithms.cycle_detect import CycleDetector
-from .watcher.interface import FileChangeEvent
-from .watcher.polling_watcher import PollingFileWatcher
-from .watcher.debounce import DebounceQueue, DebounceConfig
-from .diff import (
-    save_snapshot, list_snapshots, compare_snapshots,
-    format_diff_report, DiffReport,
-)
 
 app = typer.Typer(
     name="tws-graph",
@@ -85,35 +57,6 @@ def _version_callback(
 # Default paths
 DEFAULT_DB = ".tws/codegraph/index.db"
 DEFAULT_SNAPSHOTS = ".tws/codegraph"
-
-
-def _get_db(db_path: Optional[str] = None) -> DatabaseConnection:
-    """Open or create the index database."""
-    path = db_path or DEFAULT_DB
-    if os.path.exists(path):
-        return DatabaseConnection.open(path)
-    return DatabaseConnection.initialize(path)
-
-
-def _resolve_node(queries: QueryBuilder, symbol: str):
-    """Search for a symbol by name or qualified_name. Returns the node or None."""
-    # Try exact name match first
-    nodes = queries.get_nodes_by_name(symbol)
-    if nodes:
-        if len(nodes) == 1:
-            return nodes[0]
-        # Multiple matches: prefer the one that's a function/method
-        funcs = [n for n in nodes if n["kind"] in ("function", "method")]
-        if funcs:
-            return funcs[0]
-        return nodes[0]
-
-    # Try qualified_name partial match
-    results = queries.search_nodes(symbol, limit=5)
-    if results:
-        return results[0]
-
-    return None
 
 
 def _get_store(db_path: str) -> SqliteStore:
@@ -167,43 +110,6 @@ def _get_store(db_path: str) -> SqliteStore:
     return SqliteStore(db_path)
 
 
-def _build_pipeline_engine(store: SqliteStore, deep: bool = False) -> PipelineEngine:
-    """Build the standard indexing pipeline.
-
-    Passes (in dependency order):
-        1. StatFilterPass       — mtime/size filtering
-        2. ParseExtractPass     — tree-sitter parse + extract
-        3. NodeInsertPass       — write symbol nodes to Store
-        4. EdgeInsertPass       — write call/ref edges to Store
-        5. DataFlowPass         — reads/writes/throws/data_flows
-        6. CrossFileResolvePass — resolve cross-file dangling edges
-        7. TestEdgeAnalysisPass — test<->source associations (test_edge)
-        8. ConfigLinkAnalysisPass — constant<->config key links (config_link)
-        9. CloneDetectionPass   — MinHash+LSH clone detection (similar_to) [--deep only]
-    """
-    engine = PipelineEngine(store=store)
-    engine.register_pass(StatFilterPass())
-    engine.register_pass(ParseExtractPass())
-    engine.register_pass(NodeInsertPass())
-    engine.register_pass(EdgeInsertPass())
-    engine.register_pass(DataFlowPass())
-    engine.register_pass(CrossFileResolvePass())
-    engine.register_pass(TestEdgeAnalysisPass())
-    engine.register_pass(ConfigLinkAnalysisPass())
-    if deep:
-        engine.register_pass(CloneDetectionPass())
-    return engine
-
-
-def _cleanup_deleted_files(store: SqliteStore, current_files: list[str]) -> None:
-    """Remove database records for files that no longer exist on disk."""
-    existing = {f["path"] for f in store.get_all_files()}
-    current = set(current_files)
-    removed = existing - current
-    for path in removed:
-        store.delete_file(path)
-
-
 def _sync_files_from_nodes(store: SqliteStore, root_dir: str = "") -> None:
     """Populate the files table from the nodes table.
 
@@ -240,226 +146,9 @@ def _sync_files_from_nodes(store: SqliteStore, root_dir: str = "") -> None:
         pass  # files table may not exist or have different schema
 
 
-def _upsert_file_records(
-    store: SqliteStore,
-    processed_files: list[str],
-    root_dir: str,
-) -> None:
-    """Upsert file records for files that passed through the pipeline.
-
-    This populates the file record table (path, content_hash, language, size,
-    modified_at) so that StatFilterPass can correctly skip unchanged files on
-    subsequent incremental runs.
-    """
-    for file_path in processed_files:
-        full_path = os.path.join(root_dir, file_path)
-        try:
-            stat = os.stat(full_path)
-        except OSError:
-            continue
-
-        # Read content and compute hash
-        try:
-            with open(full_path, "r", encoding="utf-8", errors="replace") as fh:
-                content = fh.read()
-        except OSError:
-            continue
-
-        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        language = detect_language(file_path)
-
-        # Count nodes for this file
-        node_count = sum(1 for _ in store.iter_nodes_by_file(file_path))
-
-        store.upsert_file(
-            path=file_path,
-            content_hash=content_hash,
-            language=language,
-            node_count=node_count,
-            size=stat.st_size,
-            modified_at=int(stat.st_mtime),
-        )
-
-
 # ============================================================================
 # index
 # ============================================================================
-
-def _run_test_edge_analysis(store: SqliteStore) -> int:
-    """Run TestEdgeAnalyzer and insert test_edge edges into the Store."""
-    try:
-        from .analysis.test_edges import TestEdgeAnalyzer
-        from .edges.kind import EdgeKind
-        analyzer = TestEdgeAnalyzer()
-        test_edges = analyzer.analyze(store)
-        if not test_edges:
-            return 0
-        try:
-            store.delete_edges_by_kind(EdgeKind.TEST_EDGE.value)
-        except Exception:
-            pass
-        edge_dicts = []
-        for te in test_edges:
-            try:
-                edge_dicts.append({
-                    "source": te.test_node_id, "target": te.source_node_id,
-                    "kind": EdgeKind.TEST_EDGE.value,
-                    "source_loc": te.test_file_path,
-                    "target_text": te.source_name,
-                    "provenance": "analysis",
-                    "properties": json.dumps(
-                        {"confidence": te.confidence, "derivation": te.derivation},
-                        ensure_ascii=False),
-                })
-            except Exception:
-                continue
-        if edge_dicts:
-            store.insert_edges(edge_dicts)
-        return len(edge_dicts)
-    except Exception:
-        return 0
-
-
-def _run_dataflow_analysis(store: SqliteStore, root_dir: str) -> int:
-    """Run VariableUsageExtractor and DataFlowExtractor and insert
-    reads, writes, throws, data_flows edges into the Store.
-
-    Processes all Python (.py), TypeScript (.ts/.tsx), and Java (.java)
-    files that have function/method nodes.  On a no-change incremental
-    run this function is skipped entirely (files_indexed == 0 guard
-    at the call site).
-    """
-    try:
-        from tree_sitter_language_pack import get_parser
-        from .indexer.extractors.usage import VariableUsageExtractor
-        from .indexer.extractors.dataflow import DataFlowExtractor
-        from .edges.kind import EdgeKind
-    except ImportError:
-        return 0
-
-    # Delete all existing dataflow edges (full rebuild per invocation)
-    dataflow_kinds = (
-        EdgeKind.READS, EdgeKind.WRITES, EdgeKind.THROWS, EdgeKind.DATA_FLOWS,
-    )
-    for kind in dataflow_kinds:
-        try:
-            store.delete_edges_by_kind(kind.value)
-        except Exception:
-            pass
-
-    ext_to_lang = {
-        ".py": "python",
-        ".ts": "typescript",
-        ".tsx": "typescript",
-        ".java": "java",
-    }
-    total_edges = 0
-
-    for file_record in store.get_all_files():
-        file_path = file_record.get("path", "")
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext not in ext_to_lang:
-            continue
-        language = ext_to_lang[ext]
-
-        # Collect function/method node IDs for this file
-        func_node_ids: dict[str, str] = {}
-        try:
-            for node in store.iter_nodes_by_file(file_path):
-                if node.get("kind") in ("function", "method"):
-                    qname = node.get("qualified_name", "")
-                    nid = node.get("id", "")
-                    if qname and nid:
-                        func_node_ids[qname] = nid
-        except Exception:
-            continue
-
-        if not func_node_ids:
-            continue
-
-        # Read and parse the file
-        full_path = os.path.join(root_dir, file_path)
-        try:
-            with open(full_path, "rb") as fh:
-                source_bytes = fh.read()
-        except OSError:
-            continue
-
-        try:
-            parser = get_parser(language)
-            tree = parser.parse(source_bytes.decode("utf-8", errors="replace"))
-        except Exception:
-            continue
-
-        all_edges: list[dict] = []
-
-        # Variable usage extractor → reads / writes / throws
-        try:
-            usage_extractor = VariableUsageExtractor()
-            all_edges.extend(
-                usage_extractor.extract(
-                    source_bytes, tree, func_node_ids, file_path, language,
-                )
-            )
-        except Exception:
-            pass
-
-        # Data flow extractor → data_flows (arg→param mappings)
-        try:
-            df_extractor = DataFlowExtractor()
-            all_edges.extend(
-                df_extractor.extract(
-                    source_bytes, tree, func_node_ids, file_path, language,
-                )
-            )
-        except Exception:
-            pass
-
-        if all_edges:
-            try:
-                store.insert_edges(all_edges)
-                total_edges += len(all_edges)
-            except Exception:
-                pass
-
-    return total_edges
-
-
-def _run_config_link_analysis(store: SqliteStore, root_dir: str) -> int:
-    """Run ConfigLinkAnalyzer and insert config_link edges into the Store."""
-    try:
-        from .analysis.config_links import ConfigLinkAnalyzer
-        from .edges.kind import EdgeKind
-        analyzer = ConfigLinkAnalyzer()
-        links = analyzer.analyze(store, project_root=root_dir)
-        if not links:
-            return 0
-        try:
-            store.delete_edges_by_kind(EdgeKind.CONFIG_LINK.value)
-        except Exception:
-            pass
-        edge_dicts = []
-        for link in links:
-            try:
-                edge_dicts.append({
-                    "source": link.node_id, "target": "",
-                    "kind": EdgeKind.CONFIG_LINK.value,
-                    "source_loc": link.file_path,
-                    "target_text": link.config_key,
-                    "provenance": "analysis",
-                    "properties": json.dumps(
-                        {"config_file": link.config_file, "config_key": link.config_key,
-                         "confidence": link.confidence, "derivation": link.derivation},
-                        ensure_ascii=False),
-                })
-            except Exception:
-                continue
-        if edge_dicts:
-            store.insert_edges(edge_dicts)
-        return len(edge_dicts)
-    except Exception:
-        return 0
-
 
 @app.command()
 def index(
@@ -474,175 +163,42 @@ def index(
     default_db = os.path.join(root_dir, DEFAULT_DB)
     db_path_resolved = db_path or default_db
 
-    if not serial:
-        # Try Rust acceleration for core indexing (default parallel path only)
-        from .rust_bridge import rust_index, _rust_available
-        if _rust_available():
-            import time as _time
-            typer.echo(f"正在索引: {root_dir}")
-            _t0 = _time.time()
-            result = rust_index(str(db_path_resolved), str(root_dir))
-            _duration_ms = int((_time.time() - _t0) * 1000)
-            # Populate files table from nodes (Rust index fills nodes but not files)
-            store = _get_store(db_path_resolved)
-            _sync_files_from_nodes(store, root_dir)
-            # Handle empty project (no source files found)
-            if store.count_nodes() == 0:
-                from .indexer.registry import get_all_extensions
-                exts = sorted(get_all_extensions())
-                typer.echo(f"  警告: 未找到源文件 ({', '.join(exts)})", err=True)
-                store.close()
-                raise typer.Exit(1)
-            skill_count = _index_skills(root_dir, store)
-            stats = store.stats()
-            typer.echo(f"  索引完成: {stats['file_count']} 个文件,"
-                       f" {stats['node_count']} 个符号,"
-                       f" {stats['edge_count']} 条关系,"
-                       f" 耗时 {_duration_ms}ms")
-            typer.echo(f"  数据库: {stats['node_count']} 节点, {stats['edge_count']} 边,"
-                       f" {stats['file_count']} 文件")
-            if skill_count > 0:
-                typer.echo(f"  技能索引: {skill_count} 个 TWS skill")
-            store.close()
-            return
+    if serial:
+        typer.echo("提示: --serial 已废弃，Rust 核心是唯一后端。使用默认路径。", err=True)
 
-        # Python parallel path: ExtractionOrchestrator + ProcessPoolExecutor
-        # 并行路径（默认）: ExtractionOrchestrator + ProcessPoolExecutor
-        typer.echo(f"正在索引: {root_dir}")
-        db_dir = os.path.dirname(db_path_resolved)
-        if db_dir:
-            os.makedirs(db_dir, exist_ok=True)
-        db = (DatabaseConnection.open(db_path_resolved)
-              if os.path.exists(db_path_resolved)
-              else DatabaseConnection.initialize(db_path_resolved))
-        queries = QueryBuilder(db.conn)
-        try:
-            orch = ExtractionOrchestrator(root_dir, queries)
-            result = orch.index_all(force=force, parallel=True, deep=deep)
-        finally:
-            db.close()
-        # Handle empty project (no source files found)
-        if result.files_indexed == 0 and result.files_skipped == 0:
-            has_no_files = any(
-                "No source files" in e.get("message", "")
-                for e in result.errors
-            )
-            if has_no_files:
-                from .indexer.registry import get_all_extensions
-                exts = sorted(get_all_extensions())
-                typer.echo(f"  警告: 未找到源文件 ({', '.join(exts)})", err=True)
-                raise typer.Exit(1)
-        store = _get_store(db_path_resolved)
-        skill_count = _index_skills(root_dir, store)
-        # P9 analysis: dataflow is now integrated into parallel extraction
-        # (extract_full in worker processes). test_edge + config_link still
-        # run as post-processing passes.
-        if result.files_indexed > 0:
-            result.edges_created += _run_test_edge_analysis(store)
-            result.edges_created += _run_config_link_analysis(store, root_dir)
-        if result.files_indexed > 0 or skill_count > 0:
-            store.rebuild_fts()
-            store.optimize()
-        typer.echo(f"  索引完成: {result.files_indexed} 个文件"
-                   f"{f' (+{result.files_skipped} 跳过)' if result.files_skipped else ''},"
-                   f" {result.nodes_created} 个符号,"
-                   f" {result.edges_created} 条关系,"
-                   f" 耗时 {result.duration_ms}ms")
-        if result.files_errored:
-            typer.echo(f"  {result.files_errored} 个文件解析失败", err=True)
-            for err in result.errors[:3]:
-                err_file = err.get("file_path", "")
-                err_msg = err.get("message", str(err))
-                typer.echo(f"    - {err_file}: {err_msg}", err=True)
-        stats = store.stats()
-        typer.echo(f"  数据库: {stats['node_count']} 节点, {stats['edge_count']} 边,"
-                   f" {stats['file_count']} 文件")
-        if result.resolve_result:
-            rr = result.resolve_result
-            total_checked = rr.resolved + rr.ambiguous + rr.unresolved
-            if total_checked > 0:
-                typer.echo(f"  边解析: {rr.resolved} 补全, {rr.ambiguous} 歧义, {rr.unresolved} 未解析"
-                           f" (共检查 {total_checked} 条)")
-        if skill_count > 0:
-            typer.echo(f"  技能索引: {skill_count} 个 TWS skill")
-        store.close()
-        return
+    # Rust core is the only backend
+    from .rust_bridge import rust_index, _rust_available
+    if not _rust_available():
+        typer.echo("错误: Rust 核心库不可用。请重新安装 tws-graph。", err=True)
+        raise typer.Exit(1)
 
-    # 串行路径（--serial）: PipelineEngine
-
-    # 1. Scan source files
-    files = scan_directory(root_dir)
-
-    # 2. Create Store and clean up deleted files
+    import time as _time
+    typer.echo(f"正在索引: {root_dir}")
+    _t0 = _time.time()
+    result = rust_index(str(db_path_resolved), str(root_dir))
+    _duration_ms = int((_time.time() - _t0) * 1000)
+    # Populate files table from nodes (Rust index fills nodes but not files)
     store = _get_store(db_path_resolved)
-    _cleanup_deleted_files(store, files)
-
-    if not files:
+    _sync_files_from_nodes(store, root_dir)
+    # Handle empty project (no source files found)
+    if store.count_nodes() == 0:
         from .indexer.registry import get_all_extensions
         exts = sorted(get_all_extensions())
         typer.echo(f"  警告: 未找到源文件 ({', '.join(exts)})", err=True)
         store.close()
         raise typer.Exit(1)
-
-    # 3. Build and execute pipeline
-    typer.echo(f"正在索引: {root_dir}")
-    engine = _build_pipeline_engine(store, deep=deep)
-    ctx = engine.execute(files=list(files), root_dir=root_dir, force=force)
-
-    # 4. Manage file records (for StatFilterPass on subsequent runs)
-    _upsert_file_records(store, ctx.files, root_dir)
-
-    # 5. Map pipeline context to output
-    files_indexed = len(ctx.files)
-    files_skipped = ctx.metadata.get("filtered_out", 0)
-    nodes_created = ctx.metadata.get("node_count", 0)
-    edges_created = ctx.metadata.get("edge_count", 0)
-    files_errored = sum(
-        1 for results in ctx.parsed_results.values()
-        if results.get("errors")
-    )
-
-    # 6. Skill indexing (no internal FTS rebuild — caller controls)
-    store.flush()
     skill_count = _index_skills(root_dir, store)
-
-    # 7. Post-processing (A1: only when files or skills changed)
-    if files_indexed > 0 or skill_count > 0:
-        store.rebuild_fts()
-        store.optimize()
-
-    typer.echo(f"  索引完成: {files_indexed} 个文件"
-               f"{f' (+{files_skipped} 跳过)' if files_skipped else ''},"
-               f" {nodes_created} 个符号,"
-               f" {edges_created} 条关系,"
-               f" 耗时 {ctx.duration_ms}ms")
-
-    if files_errored:
-        typer.echo(f"  {files_errored} 个文件解析失败", err=True)
-        for err in ctx.errors[:3]:
-            err_file = err.get("file_path", "")
-            err_msg = err.get("error", str(err))
-            typer.echo(f"    - {err_file}: {err_msg}", err=True)
-
-    # 8. Database stats
+    store.rebuild_fts()
+    store.optimize()
     stats = store.stats()
+    typer.echo(f"  索引完成: {stats['file_count']} 个文件,"
+               f" {stats['node_count']} 个符号,"
+               f" {stats['edge_count']} 条关系,"
+               f" 耗时 {_duration_ms}ms")
     typer.echo(f"  数据库: {stats['node_count']} 节点, {stats['edge_count']} 边,"
                f" {stats['file_count']} 文件")
-
-    # 9. Resolve stats
-    cross_file = ctx.metadata.get("cross_file_resolved", {})
-    if cross_file:
-        resolved = cross_file.get("resolved", 0)
-        ambiguous = cross_file.get("ambiguous", 0)
-        unresolved = cross_file.get("unresolved", 0)
-        total_checked = resolved + ambiguous + unresolved
-        if total_checked > 0:
-            typer.echo(f"  边解析: {resolved} 补全, {ambiguous} 歧义, {unresolved} 未解析"
-                       f" (共检查 {total_checked} 条)")
-
     if skill_count > 0:
         typer.echo(f"  技能索引: {skill_count} 个 TWS skill")
-
     store.close()
 
 
@@ -685,29 +241,6 @@ def _index_skills(root_dir: str, store) -> int:
     return count
 
 
-def _show_unresolved_hint_in_calls(queries, focal_node, direction: str = "inbound"):
-    """If the focal node has unresolved call edges, show hints to the agent.
-
-    Unresolved edges have real sources but dangling targets (external libs, etc.).
-    They appear as outgoing edges FROM existing nodes TO unresolvable targets.
-    """
-    node_id = focal_node["id"]
-    name = focal_node["name"]
-
-    # Check outgoing unresolved calls (source is this node, target is unresolvable)
-    out = queries._exec("""
-        SELECT COUNT(*) as cnt FROM edges
-        WHERE source = ? AND kind = 'calls' AND provenance = 'unresolved'
-    """, (node_id,)).fetchone()
-    if out and out["cnt"] > 0:
-        if direction == "inbound":
-            typer.echo(f"  [?] '{name}' 自身发出了 {out['cnt']} 条未解析的调用"
-                       f"（可能为外部库/动态调度），这些调用者在图中不可见，需手动 grep/read")
-        else:
-            typer.echo(f"  [?] '{name}' 有 {out['cnt']} 条发出的调用无法解析目标"
-                       f"（可能为外部库/动态调度），需手动 grep/read 确认")
-
-
 # ============================================================================
 # calls
 # ============================================================================
@@ -727,84 +260,21 @@ def calls(
       tws-graph calls calculateTotal --inbound
       tws-graph calls UserService --outbound --depth 2
     """
-    # Default: inbound if neither flag is set
     if not inbound and not outbound:
         inbound = True
 
-    direction = "both" if (inbound and outbound) else ("inbound" if inbound else "outbound")
     resolved_db = os.path.abspath(db_path or DEFAULT_DB)
 
-    # Try Rust acceleration
-    if os.path.exists(resolved_db):
-        from .rust_bridge import rust_calls, _rust_available
-        if _rust_available():
-            typer.echo(rust_calls(resolved_db, symbol, inbound, depth))
-            return
-
-    db = _get_db(db_path) if os.path.exists(db_path or DEFAULT_DB) else None
-    if not db:
+    if not os.path.exists(resolved_db):
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
         raise typer.Exit(1)
 
-    queries = QueryBuilder(db.conn)
-    node = _resolve_node(queries, symbol)
-    if not node:
-        typer.echo(f"未找到符号: {symbol}", err=True)
+    from .rust_bridge import rust_calls, _rust_available
+    if not _rust_available():
+        typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
 
-    traverser = GraphTraverser(queries)
-    result = traverser.get_calls(node["id"], direction=direction, max_depth=depth)
-
-    if json_output:
-        typer.echo(json.dumps(_serialize(result), ensure_ascii=False, indent=2))
-    else:
-        _print_calls_result(result, node, direction, depth, queries=queries)
-
-
-def _print_calls_result(result: dict, focal_node, direction: str, depth: int, queries=None):
-    """Format calls result as a tree."""
-    nodes = result["nodes"]
-    edges = result["edges"]
-    root_id = result["roots"][0]
-
-    root = nodes.get(root_id, focal_node)
-    label = f"{root.get('name', '?')} ({root.get('file_path', '?')}:{root.get('start_line', '?')})"
-    typer.echo(f"\n{label}")
-
-    if not edges:
-        typer.echo("  (没有找到已解析的调用关系)")
-        if queries:
-            _show_unresolved_hint_in_calls(queries, focal_node, direction)
-        return
-
-    # Group edges by depth / direction
-    callers = [e for e in edges
-               if (direction == "inbound" and e["target"] == root_id)
-               or (direction == "outbound" and e["source"] == root_id)]
-
-    if direction == "inbound":
-        typer.echo(f"  ↑ 被以下 {len(callers)} 个符号调用:")
-    elif direction == "outbound":
-        typer.echo(f"  ↓ 调用了以下 {len(callers)} 个符号:")
-    else:
-        typer.echo(f"  ↔ 调用关系 ({len(edges)} 条边):")
-
-    for edge in callers[:30]:
-        neighbor_id = edge["source"] if direction == "inbound" else edge["target"]
-        neighbor = nodes.get(neighbor_id, {})
-        name = neighbor.get("name", neighbor_id[:16])
-        fpath = neighbor.get("file_path", "?")
-        line = neighbor.get("start_line", "?")
-        kind = neighbor.get("kind", "?")
-        vis = neighbor.get("visibility", "")
-        vis_tag = f"({vis}) " if vis else ""
-        typer.echo(f"    {vis_tag}{name} ({kind})  {fpath}:{line}")
-
-    total_others = sum(1 for nid in nodes if nid != root_id and nid not in
-                       {e.get("source") if direction == "inbound" else e.get("target")
-                        for e in callers})
-    if total_others > 0:
-        typer.echo(f"  ... 还有 {total_others} 个间接相关符号 (depth={depth})")
+    typer.echo(rust_calls(resolved_db, symbol, inbound, depth))
 
     if queries:
         _show_unresolved_hint_in_calls(queries, focal_node, direction)
@@ -821,93 +291,16 @@ def impact(
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
 ):
-    """分析修改一个符号的影响范围。
-
-    从符号出发沿调用者方向展开，按模块分组输出。
-
-    示例：
-      tws-graph impact calculateTotal
-      tws-graph impact UserService.createOrder --depth 3
-    """
+    """分析修改一个符号的影响范围。"""
     resolved_db = os.path.abspath(db_path or DEFAULT_DB)
-
-    # Try Rust acceleration
-    if os.path.exists(resolved_db):
-        from .rust_bridge import rust_impact, _rust_available
-        if _rust_available():
-            typer.echo(rust_impact(resolved_db, symbol, depth))
-            return
-
-    db = _get_db(db_path) if os.path.exists(db_path or DEFAULT_DB) else None
-    if not db:
+    if not os.path.exists(resolved_db):
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
         raise typer.Exit(1)
-
-    queries = QueryBuilder(db.conn)
-    node = _resolve_node(queries, symbol)
-    if not node:
-        typer.echo(f"未找到符号: {symbol}", err=True)
+    from .rust_bridge import rust_impact, _rust_available
+    if not _rust_available():
+        typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
-
-    traverser = GraphTraverser(queries)
-    result = traverser.get_impact_radius(node["id"], max_depth=depth)
-
-    if json_output:
-        typer.echo(json.dumps(_serialize(result), ensure_ascii=False, indent=2))
-    else:
-        _print_impact_result(result, node, depth, queries=queries)
-
-
-def _print_impact_result(result: dict, focal_node, depth: int, queries=None):
-    """Format impact result grouped by file."""
-    nodes = result["nodes"]
-    modules = result.get("modules", {})
-    root_id = result["roots"][0]
-    root = nodes.get(root_id, focal_node)
-
-    name = root.get("name", "?")
-    fpath = root.get("file_path", "?")
-    line = root.get("start_line", "?")
-    vis = root.get("visibility", "")
-    vis_tag = f" ({vis})" if vis else ""
-
-    typer.echo(f"\n{name}{vis_tag}  ({fpath}:{line})")
-
-    if not modules:
-        typer.echo("  (未发现依赖者)")
-        if queries:
-            _show_unresolved_hint_in_calls(queries, focal_node, "inbound")
-        return
-
-    # Direct callers (depth 1)
-    direct_edges = [e for e in result["edges"] if e["target"] == root_id]
-    direct_ids = {e["source"] for e in direct_edges}
-    direct_nodes = {nid: n for nid, n in nodes.items() if nid in direct_ids}
-
-    if direct_nodes:
-        typer.echo(f"  直接调用者 ({len(direct_nodes)}):")
-        for nid, n in sorted(direct_nodes.items(), key=lambda x: x[1].get("name", "")):
-            n_vis = n.get("visibility", "")
-            n_vis_tag = f"({n_vis}) " if n_vis else ""
-            typer.echo(f"    {n_vis_tag}{n.get('name', '?')}"
-                       f"  →  {n.get('file_path', '?')}:{n.get('start_line', '?')}")
-
-    # Indirect (depth > 1)
-    indirect = {nid: n for nid, n in nodes.items()
-                if nid not in direct_ids and nid != root_id}
-    if indirect:
-        typer.echo(f"\n  间接影响 (depth={depth}, {len(indirect)} 个符号):")
-        for mod, mod_nodes in sorted(modules.items()):
-            rel = [n for n in mod_nodes if n["id"] in indirect]
-            if rel:
-                typer.echo(f"    [{mod}]  ({len(rel)} 个符号)")
-                for n in rel[:5]:
-                    typer.echo(f"      {n.get('name', '?')} ({n.get('kind', '?')})")
-                if len(rel) > 5:
-                    typer.echo(f"      ... 还有 {len(rel) - 5} 个")
-
-    if queries:
-        _show_unresolved_hint_in_calls(queries, focal_node, "inbound")
+    typer.echo(rust_impact(resolved_db, symbol, depth))
 
 
 # ============================================================================
@@ -921,78 +314,16 @@ def trace(
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
 ):
-    """查找两个符号之间的完整调用链。
-
-    如果某个符号对应多个节点（同名但不同文件），会尝试找到有路径的一对。
-
-    示例：
-      tws-graph trace main handleRequest
-      tws-graph trace router.getUser validateInput
-    """
+    """查找两个符号之间的完整调用链。"""
     resolved_db = os.path.abspath(db_path or DEFAULT_DB)
-
-    # Try Rust acceleration
-    if os.path.exists(resolved_db):
-        from .rust_bridge import rust_trace, _rust_available
-        if _rust_available():
-            result = rust_trace(resolved_db, from_symbol, to_symbol)
-            if json_output:
-                typer.echo(result)
-            else:
-                typer.echo(result)
-            return
-
-    db = _get_db(db_path) if os.path.exists(db_path or DEFAULT_DB) else None
-    if not db:
+    if not os.path.exists(resolved_db):
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
         raise typer.Exit(1)
-
-    queries = QueryBuilder(db.conn)
-
-    from_nodes = queries.get_nodes_by_name(from_symbol) or queries.search_nodes(from_symbol, limit=3)
-    to_nodes = queries.get_nodes_by_name(to_symbol) or queries.search_nodes(to_symbol, limit=3)
-
-    if not from_nodes:
-        typer.echo(f"未找到入口符号: {from_symbol}", err=True)
+    from .rust_bridge import rust_trace, _rust_available
+    if not _rust_available():
+        typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
-    if not to_nodes:
-        typer.echo(f"未找到目标符号: {to_symbol}", err=True)
-        raise typer.Exit(1)
-
-    traverser = GraphTraverser(queries)
-
-    # Try all combinations to find a path
-    for fn in from_nodes:
-        for tn in to_nodes:
-            path = traverser.find_path(fn["id"], tn["id"])
-            if path:
-                if json_output:
-                    typer.echo(json.dumps(_serialize(path), ensure_ascii=False, indent=2))
-                else:
-                    _print_trace_result(path)
-                return
-
-    typer.echo(f"未找到从 '{from_symbol}' 到 '{to_symbol}' 的调用路径。"
-               f"\n（可能是动态调度、闭包、回调，或跨模块引用未解析。）", err=True)
-    raise typer.Exit(1)
-
-
-def _print_trace_result(path: list[dict]):
-    """Format trace path as numbered steps."""
-    typer.echo(f"\n调用链 ({len(path)} 步):")
-    for i, step in enumerate(path):
-        node = step["node"]
-        name = node.get("name", "?")
-        fpath = node.get("file_path", "?")
-        line = node.get("start_line", "?")
-        kind = node.get("kind", "?")
-
-        marker = "→ " if i == 0 else "   "
-        if i > 0 and step.get("via_edge"):
-            edge = step["via_edge"]
-            typer.echo(f"     │  [{edge.get('kind', 'calls')}]"
-                       f"  {edge.get('source_loc', '')}")
-        typer.echo(f"  {i+1}. {marker}{name} ({kind})  {fpath}:{line}")
+    typer.echo(rust_trace(resolved_db, from_symbol, to_symbol))
 
 
 # ============================================================================
@@ -1012,20 +343,14 @@ def snapshot(
       tws-graph diff before after # 对比差异
     """
     src = os.path.abspath(db_path or DEFAULT_DB)
-
-    # Try Rust acceleration
-    from .rust_bridge import rust_snapshot_create, _rust_available
-    if _rust_available() and os.path.exists(src):
-        typer.echo(rust_snapshot_create(src, name))
-        return
-
     if not os.path.exists(src):
         typer.echo(f"错误: 索引数据库不存在 ({src})。请先运行 tws-graph index。", err=True)
         raise typer.Exit(1)
-
-    snapshots_dir = os.path.dirname(src)
-    dest = save_snapshot(src, name, snapshots_dir)
-    typer.echo(f"快照已保存: {dest}")
+    from .rust_bridge import rust_snapshot_create, _rust_available
+    if not _rust_available():
+        typer.echo("错误: Rust 核心库不可用。", err=True)
+        raise typer.Exit(1)
+    typer.echo(rust_snapshot_create(src, name))
 
 
 # ============================================================================
@@ -1040,88 +365,21 @@ def diff(
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径（用于解析快照目录）"),
 ):
-    """对比两个索引快照，输出符号级差异报告。
-
-    在改代码前用 tws-graph snapshot before 拍快照，
-    改代码后用 tws-graph index + tws-graph snapshot after 拍快照，
-    然后用此命令对比。
-
-    示例：
-      tws-graph diff              # 列出所有快照
-      tws-graph diff before after
-      tws-graph diff before after --brief  # 仅输出 changed/unchanged
-    """
+    """对比两个索引快照，输出符号级差异报告。"""
     base = os.path.abspath(db_path or DEFAULT_DB)
-    snapshots_dir = os.path.dirname(base)
-
-    # Try Rust acceleration
     from .rust_bridge import rust_snapshot_list, rust_snapshot_diff, _rust_available
-    if _rust_available():
-        # No arguments: list snapshots
-        if not before and not after:
-            typer.echo(rust_snapshot_list(base))
-            return
-        # Compare two snapshots
-        if before and after:
-            typer.echo(rust_snapshot_diff(base, before, after))
-            return
-
-    # No arguments: list snapshots
+    if not _rust_available():
+        typer.echo("错误: Rust 核心库不可用。", err=True)
+        raise typer.Exit(1)
     if not before and not after:
-        available = list_snapshots(snapshots_dir)
-        if available:
-            typer.echo("可用快照:")
-            for s in available:
-                typer.echo(f"  {s}")
-        else:
-            typer.echo("无可用快照。请先运行 tws-graph snapshot <name>。")
+        typer.echo(rust_snapshot_list(base))
+        return
+    if before and after:
+        typer.echo(rust_snapshot_diff(base, before, after))
         return
 
-    if not before or not after:
-        typer.echo("错误: 需要同时提供 BEFORE 和 AFTER 快照名称。", err=True)
-        typer.echo("用法: tws-graph diff <before> <after>", err=True)
-        raise typer.Exit(1)
-
-    before_path = os.path.join(snapshots_dir, f"index-{before}.db")
-    after_path = os.path.join(snapshots_dir, f"index-{after}.db")
-
-    try:
-        report = compare_snapshots(before_path, after_path)
-    except FileNotFoundError as e:
-        typer.echo(f"错误: {e}", err=True)
-        available = list_snapshots(snapshots_dir)
-        if available:
-            typer.echo(f"可用快照: {', '.join(available)}")
-        else:
-            typer.echo("无可用快照。请先运行 tws-graph snapshot <name>。")
-        raise typer.Exit(1)
-
-    if json_output:
-        typer.echo(json.dumps({
-            "added_symbols": report.added_symbols,
-            "removed_symbols": report.removed_symbols,
-            "signature_changed": report.signature_changed,
-            "added_edges": report.added_edges,
-            "removed_edges": report.removed_edges,
-            "affected_file_count": len(report.affected_files),
-        }, ensure_ascii=False, indent=2))
-    else:
-        typer.echo(format_diff_report(report, brief=brief))
-
-
-# ============================================================================
-# helpers
-# ============================================================================
-
-def _serialize(obj):
-    """Recursively convert sqlite3.Row objects to JSON-serializable types."""
-    if isinstance(obj, dict):
-        return {k: _serialize(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_serialize(v) for v in obj]
-    if hasattr(obj, "keys"):  # sqlite3.Row
-        return {k: _serialize(obj[k]) for k in obj.keys()}
-    return obj
+    typer.echo("错误: 需要同时提供 BEFORE 和 AFTER 快照名称。", err=True)
+    raise typer.Exit(1)
 
 
 # ============================================================================
@@ -1133,69 +391,32 @@ def sync(
     project_path: str = typer.Argument(".", help="项目根目录"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
 ):
-    """增量同步：仅重建 mtime 或 content hash 发生变化的文件。
-
-    比 `tws-graph index` 快，适合放在 git hooks 中自动运行。
-
-    示例：
-      tws-graph sync
-      tws-graph sync /path/to/project
-    """
+    """增量同步。v7.0.0: 调用 Rust index（Rust 核心内置增量逻辑）。"""
     root_dir = os.path.abspath(project_path)
     default_db = os.path.join(root_dir, DEFAULT_DB)
     db_path_resolved = db_path or default_db
 
-    # 1. Scan source files
-    files = scan_directory(root_dir)
-
-    # 2. Create Store and clean up deleted files
-    store = _get_store(db_path_resolved)
-    _cleanup_deleted_files(store, files)
-
-    if not files:
-        from .indexer.registry import get_all_extensions
-        exts = sorted(get_all_extensions())
-        typer.echo(f"  警告: 未找到源文件 ({', '.join(exts)})", err=True)
-        store.close()
+    from .rust_bridge import rust_index, _rust_available
+    if not _rust_available():
+        typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
 
-    # 3. Build and execute pipeline (force=False for incremental stat filter)
-    engine = _build_pipeline_engine(store)
-    ctx = engine.execute(files=list(files), root_dir=root_dir, force=False)
-
-    # 5. Manage file records for changed files
-    _upsert_file_records(store, ctx.files, root_dir)
-
-    # 6. Map pipeline context to output
-    files_indexed = len(ctx.files)
-    files_skipped = ctx.metadata.get("filtered_out", 0)
-    nodes_created = ctx.metadata.get("node_count", 0)
-    edges_created = ctx.metadata.get("edge_count", 0)
-
-    # 7. Post-processing (A1: only when files changed)
-    if files_indexed > 0:
+    import time as _time
+    typer.echo(f"正在同步: {root_dir}")
+    _t0 = _time.time()
+    result = rust_index(str(db_path_resolved), str(root_dir))
+    _duration_ms = int((_time.time() - _t0) * 1000)
+    store = _get_store(db_path_resolved)
+    _sync_files_from_nodes(store, root_dir)
+    skill_count = _index_skills(root_dir, store)
+    if skill_count > 0 or store.count_nodes() > 0:
         store.rebuild_fts()
         store.optimize()
-
-    if files_indexed == 0:
-        typer.echo(f"  同步完成: 无变化 ({files_skipped} 个文件无需更新)"
-                   f" 耗时 {ctx.duration_ms}ms")
-    else:
-        typer.echo(f"  同步完成: {files_indexed} 个文件更新"
-                   f"{f' (+{files_skipped} 跳过)' if files_skipped else ''},"
-                   f" {nodes_created} 符号, {edges_created} 关系,"
-                   f" 耗时 {ctx.duration_ms}ms")
-
-    # 7. Resolve stats
-    cross_file = ctx.metadata.get("cross_file_resolved", {})
-    if cross_file:
-        resolved = cross_file.get("resolved", 0)
-        ambiguous = cross_file.get("ambiguous", 0)
-        unresolved = cross_file.get("unresolved", 0)
-        total_checked = resolved + ambiguous + unresolved
-        if total_checked > 0:
-            typer.echo(f"  边解析: {resolved} 补全, {ambiguous} 歧义, {unresolved} 未解析")
-
+    stats = store.stats()
+    typer.echo(f"  同步完成: {stats['file_count']} 文件,"
+               f" {stats['node_count']} 符号,"
+               f" {stats['edge_count']} 关系,"
+               f" 耗时 {_duration_ms}ms")
     store.close()
 
 
