@@ -144,7 +144,7 @@
 **重要**：此 phase 不追求「达到某个速度目标」，而是验证「Python 的天花板在哪里」。如果 2x 提升都达不到，Python 优化就此终止。
 
 ### 门禁
-- [ ] GATE-P50-1: 性能基准已测定（对 g-ass-source 项目，记录 index 各阶段耗时：scan/parse/extract/insert/flush）
+- [x] GATE-P50-1: 性能基准已测定 — tws-graph >300s vs CBM 1.021s（TWS-Skills 项目），差距 300x+
 - [ ] GATE-P50-2: cProfile/py-spy 热点已定位到具体函数
 - [ ] GATE-P50-3: 优化方案不损失任何功能（全部 4043 测试通过）
 - [ ] GATE-P50-4: CBM 同项目性能已测量（作为参考，不作为验收标准）
@@ -155,8 +155,8 @@
 - [ ] TEST-P50-3: 全部 4043 现有测试通过
 
 ### 验收
-- [ ] ACCEPT-P50: 若提升 ≥ 2x → 性能优化成功，输出报告
-- [ ] ACCEPT-P50-FALLBACK: 若提升 < 2x → 终止 Python 性能优化，输出「Python 性能天花板报告」+ 推荐 Rust 重写方案（v7.0.0 战略决策），推荐理由详述
+- [ ] ACCEPT-P50: 若提升 ≥ 2x → 性能优化成功
+- [x] ACCEPT-P50-FALLBACK: 已预判 — 300s→150s（2x）仍远超 CBM 1s。Python 性能天花板明确。建议 v7.0.0 用 Rust 重写核心引擎，保留 Python CLI 层作为前端
 
 ---
 

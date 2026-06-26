@@ -106,6 +106,106 @@ class TestCppExtractor:
         names = {n["name"] for n in vars_}
         assert "global_count" in names
 
+    # ---- override edges (virtual function overrides) ----
+
+    def test_override_edges(self, result):
+        """Circle::area() and Rectangle::area() override Shape::area()."""
+        overrides = [e for e in result.edges if e["kind"] == "overrides"]
+        assert len(overrides) >= 2, (
+            f"Expected at least 2 override edges (Circle::area→Shape::area, "
+            f"Rectangle::area→Shape::area), got {len(overrides)}"
+        )
+
+        node_by_id = {n["id"]: n for n in result.nodes}
+
+        override_pairs = set()
+        for e in overrides:
+            assert e["provenance"] == "heuristic", (
+                f"Override edge provenance should be 'heuristic', got {e['provenance']}"
+            )
+            src = node_by_id.get(e["source"])
+            tgt = node_by_id.get(e["target"])
+            assert src is not None, f"Override edge source {e['source']} not in nodes"
+            assert tgt is not None, f"Override edge target {e['target']} not in nodes"
+            assert src["kind"] == "method", f"Override source should be method, got {src['kind']}"
+            assert tgt["kind"] == "method", f"Override target should be method, got {tgt['kind']}"
+            override_pairs.add((src["qualified_name"], tgt["qualified_name"]))
+
+        # Verify specific expected overrides
+        assert ("sample.cpp::math::Circle::area", "sample.cpp::math::Shape::area") in override_pairs, (
+            f"Expected Circle::area → Shape::area override, got {override_pairs}"
+        )
+        assert ("sample.cpp::math::Rectangle::area", "sample.cpp::math::Shape::area") in override_pairs, (
+            f"Expected Rectangle::area → Shape::area override, got {override_pairs}"
+        )
+
+    # ---- constructor / instantiates edges ----
+
+    def test_constructor_edges(self, result):
+        """Constructors should produce instantiates edges to their class."""
+        instant_edges = [e for e in result.edges if e["kind"] == "instantiates"]
+        assert len(instant_edges) >= 3, (
+            f"Expected at least 3 instantiates edges (Circle, Rectangle, KeyValueStore), "
+            f"got {len(instant_edges)}"
+        )
+
+        node_by_id = {n["id"]: n for n in result.nodes}
+
+        instant_pairs = set()
+        for e in instant_edges:
+            assert e["provenance"] == "heuristic", (
+                f"Instantiates edge provenance should be 'heuristic', got {e['provenance']}"
+            )
+            src = node_by_id.get(e["source"])
+            tgt = node_by_id.get(e["target"])
+            assert src is not None, f"Instantiates edge source {e['source']} not in nodes"
+            assert tgt is not None, f"Instantiates edge target {e['target']} not in nodes"
+            assert src["kind"] == "method", (
+                f"Instantiates source should be method (constructor), got {src['kind']}"
+            )
+            assert tgt["kind"] in ("class", "struct"), (
+                f"Instantiates target should be class or struct, got {tgt['kind']}"
+            )
+            instant_pairs.add((src["qualified_name"], tgt["qualified_name"]))
+
+        # Check specific constructor edges
+        assert ("sample.cpp::math::Circle::Circle", "sample.cpp::math::Circle") in instant_pairs, (
+            f"Expected Circle constructor → Circle class, got {instant_pairs}"
+        )
+        assert ("sample.cpp::math::Rectangle::Rectangle", "sample.cpp::math::Rectangle") in instant_pairs, (
+            f"Expected Rectangle constructor → Rectangle class, got {instant_pairs}"
+        )
+
+    # ---- template type_ref edges ----
+
+    def test_template_type_ref(self, result):
+        """Template type parameters (T, K, V) should produce type_ref edges."""
+        type_refs = [e for e in result.edges if e["kind"] == "type_ref"]
+        assert len(type_refs) >= 3, (
+            f"Expected at least 3 type_ref edges (T, K, V), got {len(type_refs)}"
+        )
+
+        for e in type_refs:
+            assert e["provenance"] == "heuristic", (
+                f"type_ref edge provenance should be 'heuristic', got {e['provenance']}"
+            )
+
+        # Collect target_text values (type parameter names)
+        param_names = set()
+        for e in type_refs:
+            if e.get("target_text"):
+                param_names.add(e["target_text"])
+
+        assert "T" in param_names, (
+            f"Expected type_ref for template parameter T, got {param_names}"
+        )
+        assert "K" in param_names, (
+            f"Expected type_ref for template parameter K, got {param_names}"
+        )
+        assert "V" in param_names, (
+            f"Expected type_ref for template parameter V, got {param_names}"
+        )
+
 
 class TestCppExtractorEdgeCases:
     """Edge case tests for C++ extractor."""

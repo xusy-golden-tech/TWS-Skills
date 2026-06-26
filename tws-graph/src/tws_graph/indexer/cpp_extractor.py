@@ -11,6 +11,17 @@ def _node_text(node, source: bytes) -> str:
     return source[node.start_byte():node.end_byte()].decode("utf-8", errors="replace")
 
 
+def _node_has_keyword(node, src_bytes, keyword):
+    """Check if keyword appears in the declaration part of a function/declaration node."""
+    text = src_bytes[node.start_byte():node.end_byte()].decode("utf-8", errors="replace")
+    # Strip trailing body/terminator to check only the declaration part
+    for term_char in ('{', ';'):
+        idx = text.find(term_char)
+        if idx != -1:
+            text = text[:idx]
+    return keyword in text
+
+
 def _children(node):
     for i in range(node.child_count()):
         yield node.child(i)
@@ -152,8 +163,31 @@ def visit_cpp(file_path: str, source: str, tree) -> ExtractionResult:
 
         # If inside a class, qualify as method
         if name_stack and (scope_stack and scope_stack[-1] in ("class", "struct")):
-            qualified_method_name = f"{name_stack[-1]}::{name}"
-            nid = add_node("method", qualified_method_name, node)
+            nid = add_node("method", name, node)
+            class_name = name_stack[-1]
+
+            # --- Instantiates: constructor detection ---
+            if name == class_name:
+                # This method is a constructor (same name as containing class/struct)
+                if class_name in _class_node_ids:
+                    add_edge(nid, _class_node_ids[class_name], "instantiates",
+                             node.start_position().row + 1)
+
+            # --- Virtual method detection (classes only) ---
+            if scope_stack[-1] == "class" and _node_has_keyword(node, src_bytes, "virtual"):
+                if class_name not in _class_virtual_methods:
+                    _class_virtual_methods[class_name] = {}
+                _class_virtual_methods[class_name][name] = nid
+
+            # --- Overrides detection ---
+            if class_name in _class_bases:
+                for base_name in _class_bases[class_name]:
+                    if (base_name in _class_virtual_methods
+                            and name in _class_virtual_methods[base_name]):
+                        add_edge(nid, _class_virtual_methods[base_name][name],
+                                 "overrides", node.start_position().row + 1)
+                        break
+
         else:
             nid = add_node("function", name, node)
 
@@ -198,6 +232,16 @@ def visit_cpp(file_path: str, source: str, tree) -> ExtractionResult:
         if not name:
             return
         nid = add_node("class", name, node)
+        _class_node_ids[name] = nid
+
+        # Extract base classes for override tracking
+        base_clause = _find_named_child(node, "base_class_clause")
+        if base_clause:
+            bases = []
+            for child in _named_children(base_clause):
+                if child.kind() == "type_identifier":
+                    bases.append(_node_text(child, src_bytes))
+            _class_bases[name] = bases
 
         if node_stack:
             add_edge(node_stack[-1], nid, "contains", node.start_position().row + 1)
@@ -210,7 +254,12 @@ def visit_cpp(file_path: str, source: str, tree) -> ExtractionResult:
             for child in _named_children(body):
                 ckind = child.kind()
                 if ckind == "field_declaration":
-                    _visit_field_in_type(child, nid)
+                    # tree-sitter puts virtual/pure-virtual method declarations
+                    # in field_declaration nodes (not declaration nodes)
+                    if _find_named_child(child, "function_declarator"):
+                        _visit_declaration_in_class(child, nid)
+                    else:
+                        _visit_field_in_type(child, nid)
                 elif ckind == "function_definition":
                     _visit_function(child)
                 elif ckind == "declaration":
@@ -225,6 +274,7 @@ def visit_cpp(file_path: str, source: str, tree) -> ExtractionResult:
         if not name:
             return
         nid = add_node("struct", name, node)
+        _class_node_ids[name] = nid
 
         if node_stack:
             add_edge(node_stack[-1], nid, "contains", node.start_position().row + 1)
@@ -237,7 +287,11 @@ def visit_cpp(file_path: str, source: str, tree) -> ExtractionResult:
             for child in _named_children(body):
                 ckind = child.kind()
                 if ckind == "field_declaration":
-                    _visit_field_in_type(child, nid)
+                    # tree-sitter puts constructor/method decls in field_declaration nodes
+                    if _find_named_child(child, "function_declarator"):
+                        _visit_declaration_in_class(child, nid)
+                    else:
+                        _visit_field_in_type(child, nid)
                 elif ckind == "function_definition":
                     _visit_function(child)
                 elif ckind == "declaration":
@@ -289,6 +343,10 @@ def visit_cpp(file_path: str, source: str, tree) -> ExtractionResult:
             add_edge(node_stack[-1], nid, "contains",
                      node.start_position().row + 1)
 
+        # --- type_ref edges for template parameters ---
+        for pname in params:
+            add_edge(nid, "", "type_ref", node.start_position().row + 1, pname)
+
         # Visit children of template (class/function/struct/declaration)
         for child in _named_children(node):
             if child.kind() in ("class_specifier", "function_definition",
@@ -309,6 +367,39 @@ def visit_cpp(file_path: str, source: str, tree) -> ExtractionResult:
             add_edge(node_stack[-1], nid, "contains", node.start_position().row + 1)
 
     def _visit_field_in_type(field_node, parent_id):
+        # Check for function declarator first (method declarations like
+        # "virtual double area() const = 0;" — pure virtual, no body).
+        func_decl = _find_named_child(field_node, "function_declarator")
+        if func_decl:
+            id_node = _find_identifier_deep(func_decl, src_bytes)
+            if id_node:
+                mname = _node_text(id_node, src_bytes)
+                mid = add_node("method", mname, field_node)
+                add_edge(parent_id, mid, "contains", field_node.start_position().row + 1)
+
+                class_name = name_stack[-1] if name_stack else ""
+                # --- Instantiates: constructor detection ---
+                if mname == class_name and class_name in _class_node_ids:
+                    add_edge(mid, _class_node_ids[class_name], "instantiates",
+                             field_node.start_position().row + 1)
+
+                # --- Virtual method detection ---
+                if (scope_stack and scope_stack[-1] == "class" and class_name
+                        and _node_has_keyword(field_node, src_bytes, "virtual")):
+                    if class_name not in _class_virtual_methods:
+                        _class_virtual_methods[class_name] = {}
+                    _class_virtual_methods[class_name][mname] = mid
+
+                # --- Overrides detection ---
+                if class_name and class_name in _class_bases:
+                    for base_name in _class_bases[class_name]:
+                        if (base_name in _class_virtual_methods
+                                and mname in _class_virtual_methods[base_name]):
+                            add_edge(mid, _class_virtual_methods[base_name][mname],
+                                     "overrides", field_node.start_position().row + 1)
+                            break
+            return
+
         declarator = _find_named_child(field_node, "field_identifier")
         if not declarator:
             declarator = _find_named_child(field_node, "identifier")
@@ -326,9 +417,30 @@ def visit_cpp(file_path: str, source: str, tree) -> ExtractionResult:
             id_node = _find_identifier_deep(func_decl, src_bytes)
             if id_node:
                 mname = _node_text(id_node, src_bytes)
-                qualified_mname = f"{name_stack[-1]}::{mname}" if name_stack else mname
-                mid = add_node("method", qualified_mname, decl_node)
+                mid = add_node("method", mname, decl_node)
                 add_edge(parent_id, mid, "contains", decl_node.start_position().row + 1)
+
+                class_name = name_stack[-1] if name_stack else ""
+                # --- Instantiates: constructor detection ---
+                if mname == class_name and class_name in _class_node_ids:
+                    add_edge(mid, _class_node_ids[class_name], "instantiates",
+                             decl_node.start_position().row + 1)
+
+                # --- Virtual method detection from declaration ---
+                if (scope_stack and scope_stack[-1] == "class" and class_name
+                        and _node_has_keyword(decl_node, src_bytes, "virtual")):
+                    if class_name not in _class_virtual_methods:
+                        _class_virtual_methods[class_name] = {}
+                    _class_virtual_methods[class_name][mname] = mid
+
+                # --- Overrides detection from declaration ---
+                if class_name and class_name in _class_bases:
+                    for base_name in _class_bases[class_name]:
+                        if (base_name in _class_virtual_methods
+                                and mname in _class_virtual_methods[base_name]):
+                            add_edge(mid, _class_virtual_methods[base_name][mname],
+                                     "overrides", decl_node.start_position().row + 1)
+                            break
             return
 
         # Plain field declaration
@@ -396,6 +508,11 @@ def visit_cpp(file_path: str, source: str, tree) -> ExtractionResult:
 
     # Need scope_stack for C++
     scope_stack: list[str] = []
+
+    # State for override/constructor/template tracking
+    _class_bases: dict[str, list[str]] = {}           # class_name -> [base_class_name]
+    _class_virtual_methods: dict[str, dict[str, str]] = {}  # class_name -> {method_name: node_id}
+    _class_node_ids: dict[str, str] = {}               # class_name -> node_id
 
     # Walk the tree
     for child in _named_children(tree.root_node()):

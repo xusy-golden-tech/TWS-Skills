@@ -526,3 +526,144 @@ fn output(v: i32) { println!("{}", v); }
 
         call_edges = [e for e in result.edges if e["kind"] == "calls"]
         assert len(call_edges) >= 2
+
+    # -------------------------------------------------------------------
+    # P51 Rust deep-upgrade tests — uses sample.rs fixture
+    # -------------------------------------------------------------------
+
+    def _load_rust_fixture(self):
+        """Helper: parse sample.rs and return visit_rust result."""
+        from tws_graph.indexer.rust_extractor import visit_rust
+        import tree_sitter_language_pack
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "rust", "sample.rs")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        parser = tree_sitter_language_pack.get_parser("rust")
+        tree = parser.parse(code)
+        return visit_rust(fixture_path, code, tree)
+
+    def test_use_imports(self):
+        """Verify use declarations produce imports edges."""
+        result = self._load_rust_fixture()
+
+        import_edges = [e for e in result.edges if e["kind"] == "imports"]
+        target_texts = [e.get("target_text", "") for e in import_edges]
+
+        assert len(import_edges) >= 7, \
+            f"Expected >=7 import edges from use declarations, got {len(import_edges)}: {target_texts}"
+        assert any("std::collections" in t for t in target_texts), \
+            f"'std::collections' not in imports: {target_texts}"
+        assert any("HashMap" in t for t in target_texts), \
+            f"'HashMap' not in imports: {target_texts}"
+        assert any("std::fmt" in t or "fmt" in t for t in target_texts), \
+            f"'std::fmt' not in imports: {target_texts}"
+        assert any("PathBuf" in t for t in target_texts), \
+            f"'PathBuf' not in imports: {target_texts}"
+
+    def test_mod_imports(self):
+        """Verify mod declarations produce imports edges."""
+        result = self._load_rust_fixture()
+
+        import_edges = [e for e in result.edges if e["kind"] == "imports"]
+        target_texts = [e.get("target_text", "") for e in import_edges]
+
+        assert any("database" in t for t in target_texts), \
+            f"'database' mod not in imports: {target_texts}"
+        assert any("handlers" in t for t in target_texts), \
+            f"'handlers' mod not in imports: {target_texts}"
+        assert any("models" in t for t in target_texts), \
+            f"'models' mod not in imports: {target_texts}"
+
+    def test_trait_implements(self):
+        """Verify impl Trait for Type produces implements edges."""
+        result = self._load_rust_fixture()
+
+        impl_edges = [e for e in result.edges if e["kind"] == "implements"]
+        assert len(impl_edges) >= 2, \
+            f"Expected >=2 implements edges, got {len(impl_edges)}"
+
+        # MemoryStore should implement DataStore
+        struct_nodes = [n for n in result.nodes if n["name"] == "MemoryStore"]
+        trait_nodes = [n for n in result.nodes if n["name"] == "DataStore"]
+
+        assert len(struct_nodes) >= 1, "MemoryStore node not found"
+        assert len(trait_nodes) >= 1, "DataStore node not found"
+
+        struct_id = struct_nodes[0]["id"]
+        trait_id = trait_nodes[0]["id"]
+        found = any(
+            e["source"] == struct_id and e["target"] == trait_id
+            for e in impl_edges
+        )
+        assert found, f"MemoryStore should implement DataStore. impl_edges={impl_edges}"
+
+    def test_derive_attributes(self):
+        """Verify #[derive(Debug, Clone, ...)] produces decorates edges."""
+        result = self._load_rust_fixture()
+
+        decorates_edges = [e for e in result.edges if e["kind"] == "decorates"]
+        assert len(decorates_edges) > 0, \
+            f"Expected decorates edges for derive attributes, got {len(decorates_edges)}"
+
+        target_texts = [e.get("target_text", "") for e in decorates_edges]
+        assert any("Debug" in t for t in target_texts), \
+            f"'Debug' derive not found in: {target_texts}"
+        assert any("Clone" in t for t in target_texts), \
+            f"'Clone' derive not found in: {target_texts}"
+        assert any("Default" in t for t in target_texts), \
+            f"'Default' derive not found in: {target_texts}"
+
+    def test_generics_and_lifetimes(self):
+        """Verify generic parameters and lifetimes produce type_ref edges."""
+        result = self._load_rust_fixture()
+
+        type_ref_edges = [e for e in result.edges if e["kind"] == "type_ref"]
+        assert len(type_ref_edges) > 0, \
+            f"Expected type_ref edges for generics/lifetimes, got 0"
+
+        target_texts = [e.get("target_text", "") for e in type_ref_edges]
+        # load_config has R: Read → type_ref to Read
+        assert any("Read" in t for t in target_texts), \
+            f"'Read' not found in type_refs: {target_texts}"
+        # save_record has W: Write → type_ref to Write
+        assert any("Write" in t for t in target_texts), \
+            f"'Write' not found in type_refs: {target_texts}"
+
+    def test_macro_calls(self):
+        """Verify macro invocations (println!, write!, format!, vec![]) produce calls edges."""
+        result = self._load_rust_fixture()
+
+        call_edges = [e for e in result.edges if e["kind"] == "calls"]
+        target_texts = [e.get("target_text", "") for e in call_edges]
+
+        # At minimum we should find some macro calls
+        assert len(call_edges) > 0, f"Expected calls edges including macro calls, got 0"
+
+        # Try to find specific macro invocations
+        assert any("println" in t for t in target_texts), \
+            f"'println' macro call not found in calls: {target_texts}"
+        assert any("format" in t for t in target_texts), \
+            f"'format' macro call not found in calls: {target_texts}"
+
+    def test_variable_reads_writes(self):
+        """Verify let declarations and assignments produce reads/writes edges."""
+        result = self._load_rust_fixture()
+
+        read_edges = [e for e in result.edges if e["kind"] == "reads"]
+        write_edges = [e for e in result.edges if e["kind"] == "writes"]
+
+        assert len(read_edges) > 0, \
+            f"Expected read edges in function bodies, got 0"
+        assert len(write_edges) > 0, \
+            f"Expected write edges for let/assignment, got 0"
+
+        # Specific variable checks
+        read_targets = [e.get("target_text", "") for e in read_edges]
+        write_targets = [e.get("target_text", "") for e in write_edges]
+
+        assert any("result" in t for t in read_targets), \
+            f"'result' variable read not found: {read_targets}"
+        assert any("buffer" in t for t in write_targets), \
+            f"'buffer' variable write not found: {write_targets}"
