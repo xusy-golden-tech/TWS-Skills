@@ -8,7 +8,7 @@ Uses tree-sitter >= 0.25 method-based API.
 """
 
 import hashlib
-from .base import ExtractionResult
+from .base import ExtractionResult, children as _children, named_children as _named_children
 
 
 # ---------------------------------------------------------------------------
@@ -22,16 +22,6 @@ def _hash_id(qualified_name: str, file_path: str) -> str:
 
 def _node_text(node, source: bytes) -> str:
     return source[node.start_byte():node.end_byte()].decode("utf-8", errors="replace")
-
-
-def _children(node):
-    for i in range(node.child_count()):
-        yield node.child(i)
-
-
-def _named_children(node):
-    for i in range(node.named_child_count()):
-        yield node.named_child(i)
 
 
 def _find_child(node, kind: str):
@@ -124,7 +114,8 @@ def _is_annotation_command(cmd, source: bytes) -> bool:
     if not decorate:
         return False
     # It's an annotation if the first named child is decorate AND no block
-    first = next(_named_children(cmd), None)
+    nc = _named_children(cmd)
+    first = nc[0] if nc else None
     if first and first.kind() == "decorate":
         return True
     return False

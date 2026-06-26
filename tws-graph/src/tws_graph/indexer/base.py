@@ -39,16 +39,25 @@ def node_text(node, source: bytes) -> str:
     return source[node.start_byte():node.end_byte()].decode("utf-8")
 
 
+# ---------------------------------------------------------------------------
+# P50: Materialised child accessors.
+# These return plain lists instead of generators, avoiding Python generator
+# overhead in the hot extraction loop.
+# ---------------------------------------------------------------------------
+
+
 def children(node):
-    """Generator over all children (named and unnamed)."""
-    for i in range(node.child_count()):
-        yield node.child(i)
+    """Children of *node* (named and unnamed), materialised as a list.
+
+    P50: Materialised instead of generator — avoids per-child ``yield``
+    overhead in the hot extraction loop.
+    """
+    return [node.child(i) for i in range(node.child_count())]
 
 
 def named_children(node):
-    """Generator over named children only."""
-    for i in range(node.named_child_count()):
-        yield node.named_child(i)
+    """Named children of *node*, materialised as a list."""
+    return [node.named_child(i) for i in range(node.named_child_count())]
 
 
 def find_child(node, kind: str):
@@ -261,12 +270,12 @@ class BaseExtractor(ABC):
 
     @staticmethod
     def children(node):
-        """All children."""
+        """All children (P50: materialised list)."""
         return children(node)
 
     @staticmethod
     def named_children(node):
-        """Named children."""
+        """Named children (P50: materialised list)."""
         return named_children(node)
 
     @staticmethod

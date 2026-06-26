@@ -264,6 +264,9 @@ class ExtractionOrchestrator:
         Classifies each unresolved call target as external (stdlib / built-in /
         third-party) or internal (possible index gap) via
         :func:`is_call_target_external`.
+
+        P50: Collects all refs into a list then calls insert_unresolved_refs
+        once — eliminates 12,637 individual SQLite round-trips.
         """
         if not resolve_result or resolve_result.unresolved == 0:
             return
@@ -280,10 +283,11 @@ class ExtractionOrchestrator:
             WHERE e.provenance = 'unresolved'
         """).fetchall()
 
+        refs = []
         for row in rows:
             target_text = row["target_text"] or ""
             is_ext = is_call_target_external(target_text, project_files)
-            ref = {
+            refs.append({
                 "from_node_id": row["source"],
                 "reference_name": target_text,
                 "reference_kind": row["kind"] or "call",
@@ -292,8 +296,9 @@ class ExtractionOrchestrator:
                 "file_path": row["file_path"] or "",
                 "language": row["language"] or "",
                 "is_external": int(is_ext),
-            }
-            self.queries.insert_unresolved_ref(ref)
+            })
+        if refs:
+            self.queries.insert_unresolved_refs(refs)
 
     def _populate_import_unresolved(self) -> None:
         """Populate unresolved_refs from import edges, classifying external vs internal.
@@ -302,6 +307,9 @@ class ExtractionOrchestrator:
           - Check if the imported module name maps to a project file
           - If no project file matches → is_external=True (SDK/lib)
           - If project file matches but not in nodes → is_external=False (index gap)
+
+        P50: Collects all refs into a list then calls insert_unresolved_refs
+        once — eliminates N individual SQLite round-trips.
         """
         import os
 
@@ -316,6 +324,7 @@ class ExtractionOrchestrator:
               AND e.target_text IS NOT NULL
         """).fetchall()
 
+        refs = []
         for row in rows:
             full_name = row["target_text"]
             source_file = row["file_path"]
@@ -330,7 +339,7 @@ class ExtractionOrchestrator:
                     is_external = False
                     break
 
-            ref = {
+            refs.append({
                 "from_node_id": row["source"],
                 "reference_name": full_name,
                 "reference_kind": "import",
@@ -339,8 +348,9 @@ class ExtractionOrchestrator:
                 "file_path": source_file,
                 "language": row["language"] or "",
                 "is_external": int(is_external),
-            }
-            self.queries.insert_unresolved_ref(ref)
+            })
+        if refs:
+            self.queries.insert_unresolved_refs(refs)
 
 
 def _module_in_project(module_name: str, source_file: str, project_files: set[str]) -> bool:

@@ -10,6 +10,7 @@ Uses tree-sitter >= 0.25 method-based API:
 import hashlib
 from functools import lru_cache
 
+from .base import children as _children, named_children as _named_children
 from .parser import ExtractionResult
 
 
@@ -23,16 +24,7 @@ def _node_text(node, source: bytes) -> str:
     return source[node.start_byte():node.end_byte()].decode("utf-8")
 
 
-def _children(node):
-    """Generator over all children of a node (named and unnamed)."""
-    for i in range(node.child_count()):
-        yield node.child(i)
-
-
-def _named_children(node):
-    """Generator over named children only."""
-    for i in range(node.named_child_count()):
-        yield node.named_child(i)
+# _children and _named_children are imported from .base (P50: cached)
 
 
 def _get_docstring(body_node, source: bytes) -> str:

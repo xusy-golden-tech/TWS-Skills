@@ -413,7 +413,12 @@ class QueryBuilder:
         ))
 
     def insert_edges(self, edges: list[dict]):
-        """Batch insert edges. Source must exist in DB; target may be cross-file.
+        """Batch insert edges via executemany. Source must exist in DB; target may
+        be cross-file.
+
+        P50: Replaced per-edge ``conn.execute()`` loop with single ``executemany``
+        call — this was called 138,027 times individually, accounting for 38% of
+        total indexing time.
 
         Caller manages transaction.
         """
@@ -424,9 +429,21 @@ class QueryBuilder:
         existing = self.get_nodes_by_ids(list(source_ids))
         existing_ids = set(existing.keys())
 
-        for e in edges:
-            if e["source"] in existing_ids:
-                self.insert_edge(e)
+        valid_params = [
+            (
+                e["source"], e["target"], e.get("target_text"),
+                e["kind"], e.get("source_loc"), e.get("provenance", "tree-sitter"),
+            )
+            for e in edges
+            if e["source"] in existing_ids
+        ]
+        if valid_params:
+            self._execmany(
+                "INSERT OR IGNORE INTO edges"
+                " (source, target, target_text, kind, source_loc, provenance)"
+                " VALUES (?,?,?,?,?,?)",
+                valid_params,
+            )
 
     def get_outgoing_edges(self, source_id: str, kinds: Optional[list[str]] = None) -> list[sqlite3.Row]:
         if kinds:
@@ -571,9 +588,34 @@ class QueryBuilder:
         ))
 
     def insert_unresolved_refs(self, refs: list[dict]):
-        """Batch insert unresolved refs (caller manages transaction)."""
-        for ref in refs:
-            self.insert_unresolved_ref(ref)
+        """Batch insert unresolved refs via executemany (caller manages transaction).
+
+        P50: Replaced per-ref ``conn.execute()`` loop (12,637 individual
+        round-trips) with a single ``executemany`` call.
+        """
+        if not refs:
+            return
+        params = [
+            (
+                r["from_node_id"],
+                r.get("reference_name", ""),
+                r.get("reference_kind", "call"),
+                r.get("line", 0),
+                r.get("col", 0),
+                _to_json(r.get("candidates")),
+                r.get("file_path", ""),
+                r.get("language", ""),
+                r.get("is_external", 0),
+            )
+            for r in refs
+        ]
+        self._execmany(
+            "INSERT INTO unresolved_refs"
+            " (from_node_id, reference_name, reference_kind, line, col,"
+            "  candidates, file_path, language, is_external)"
+            " VALUES (?,?,?,?,?, ?,?,?,?)",
+            params,
+        )
 
     def get_unresolved_refs_by_file(self, file_path: str) -> list[sqlite3.Row]:
         return self._exec(

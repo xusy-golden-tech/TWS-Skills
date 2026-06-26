@@ -12,24 +12,14 @@ from __future__ import annotations
 
 from tws_graph.edges.kind import EdgeKind
 
+from ..base import children as _children, named_children as _named_children
+
 # ---------------------------------------------------------------------------
 # Tree-sitter navigation helpers (tree-sitter >= 0.25 method-based API)
 # ---------------------------------------------------------------------------
 
 def _node_text(node, source: bytes) -> str:
     return source[node.start_byte():node.end_byte()].decode("utf-8")
-
-
-def _children(node):
-    """Yield every child (named + unnamed) of *node*."""
-    for i in range(node.child_count()):
-        yield node.child(i)
-
-
-def _named_children(node):
-    """Yield only named children of *node*."""
-    for i in range(node.named_child_count()):
-        yield node.named_child(i)
 
 
 # ---------------------------------------------------------------------------

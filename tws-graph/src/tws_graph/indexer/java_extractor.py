@@ -15,6 +15,7 @@ import hashlib
 from functools import lru_cache
 from typing import Optional
 
+from .base import children as _children, named_children as _named_children
 from .parser import ExtractionResult
 
 
@@ -28,14 +29,9 @@ def _node_text(node, source: bytes) -> str:
     return source[node.start_byte():node.end_byte()].decode("utf-8", errors="replace")
 
 
-def _children(node):
-    for i in range(node.child_count()):
-        yield node.child(i)
+# _children imported from .base (P50: cached)
 
 
-def _named_children(node):
-    for i in range(node.named_child_count()):
-        yield node.named_child(i)
 
 
 def _find_child(node, kind: str):
@@ -800,11 +796,13 @@ def visit_java(file_path: str, source: str, tree) -> ExtractionResult:
         """Handle field access as reads."""
         # Object field access: obj.field → read
         # Don't extract for lhs of assignments (handled there)
-        for child in _named_children(node):
+        nc = _named_children(node)
+        first_child = nc[0] if nc else None
+        for child in nc:
             if child.kind() == "identifier" and _node_text(child, src_bytes) not in _JAVA_KEYWORDS:
                 field_name = _node_text(child, src_bytes)
                 # Track reads on the last identifier (the field being read)
-                if child != next(_named_children(node), None):
+                if child != first_child:
                     add_edge(
                         caller_id,
                         _hash_id(f"var::{field_name}", file_path),

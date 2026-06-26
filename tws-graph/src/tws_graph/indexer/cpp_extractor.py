@@ -4,7 +4,7 @@ Uses tree-sitter >= 0.25 method-based API.
 provenance="heuristic": no macro expansion, no template instantiation.
 """
 
-from .base import ExtractionResult, hash_id
+from .base import ExtractionResult, hash_id, children as _children, named_children as _named_children
 
 
 def _node_text(node, source: bytes) -> str:
@@ -22,14 +22,9 @@ def _node_has_keyword(node, src_bytes, keyword):
     return keyword in text
 
 
-def _children(node):
-    for i in range(node.child_count()):
-        yield node.child(i)
+# _children imported from .base (P50: cached)
 
 
-def _named_children(node):
-    for i in range(node.named_child_count()):
-        yield node.named_child(i)
 
 
 def _find_child(node, kind: str):

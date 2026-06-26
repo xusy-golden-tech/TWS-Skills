@@ -17,6 +17,7 @@ Uses tree-sitter >= 0.25 method-based API:
 
 from tws_graph.edges.kind import EdgeKind
 
+from ..base import children as _children, named_children as _named_children
 
 # ---------------------------------------------------------------------------
 # 工具函数（与已有 extractor 保持一致的 API 用法）
@@ -24,18 +25,6 @@ from tws_graph.edges.kind import EdgeKind
 
 def _node_text(node, source: bytes) -> str:
     return source[node.start_byte():node.end_byte()].decode("utf-8")
-
-
-def _children(node):
-    """Generator over all children of a node (named and unnamed)."""
-    for i in range(node.child_count()):
-        yield node.child(i)
-
-
-def _named_children(node):
-    """Generator over named children only."""
-    for i in range(node.named_child_count()):
-        yield node.named_child(i)
 
 
 # ---------------------------------------------------------------------------

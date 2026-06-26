@@ -12,6 +12,7 @@ Call resolution uses scoped type inference:
 """
 
 import hashlib
+from .base import children as _children, named_children as _named_children
 from .parser import ExtractionResult
 
 
@@ -24,10 +25,7 @@ def _node_text(node, source: bytes) -> str:
     return source[node.start_byte():node.end_byte()].decode("utf-8")
 
 
-def _children(node):
-    """Generator over all children of a node."""
-    for i in range(node.child_count()):
-        yield node.child(i)
+# _children imported from .base (P50: cached)
 
 
 def _named_children(node):
