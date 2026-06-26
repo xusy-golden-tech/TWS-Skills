@@ -1,13 +1,24 @@
-//! TypeScript LSP adapter — configures TypeScript Language Server.
+//! TypeScript LSP adapter — configures typescript-language-server.
+
+use super::LspAdapter;
 
 /// TypeScript LSP server configuration.
 pub struct TypeScriptLspAdapter;
 
-impl TypeScriptLspAdapter {
-    pub fn server_command() -> &'static str {
+impl LspAdapter for TypeScriptLspAdapter {
+    fn language(&self) -> &'static str {
+        "typescript"
+    }
+
+    fn server_command(&self) -> &'static str {
         "typescript-language-server"
     }
-    pub fn args() -> Vec<&'static str> {
+
+    fn args(&self) -> Vec<&'static str> {
         vec!["--stdio"]
+    }
+
+    fn install_hint(&self) -> &'static str {
+        "npm install -g typescript-language-server typescript"
     }
 }

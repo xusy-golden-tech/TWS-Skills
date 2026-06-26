@@ -1,17 +1,17 @@
-//! C LSP adapter — configures clangd.
+//! Rust LSP adapter — configures rust-analyzer.
 
 use super::LspAdapter;
 
-/// C LSP server configuration.
-pub struct CLspAdapter;
+/// Rust LSP server configuration.
+pub struct RustLspAdapter;
 
-impl LspAdapter for CLspAdapter {
+impl LspAdapter for RustLspAdapter {
     fn language(&self) -> &'static str {
-        "c"
+        "rust"
     }
 
     fn server_command(&self) -> &'static str {
-        "clangd"
+        "rust-analyzer"
     }
 
     fn args(&self) -> Vec<&'static str> {
@@ -19,6 +19,6 @@ impl LspAdapter for CLspAdapter {
     }
 
     fn install_hint(&self) -> &'static str {
-        "Install clangd via your system package manager (e.g. apt install clangd)"
+        "rustup component add rust-analyzer"
     }
 }

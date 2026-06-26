@@ -1,13 +1,24 @@
-//! PHP LSP adapter — configures Intelephense.
+//! PHP LSP adapter — configures intelephense.
+
+use super::LspAdapter;
 
 /// PHP LSP server configuration.
 pub struct PhpLspAdapter;
 
-impl PhpLspAdapter {
-    pub fn server_command() -> &'static str {
+impl LspAdapter for PhpLspAdapter {
+    fn language(&self) -> &'static str {
+        "php"
+    }
+
+    fn server_command(&self) -> &'static str {
         "intelephense"
     }
-    pub fn args() -> Vec<&'static str> {
+
+    fn args(&self) -> Vec<&'static str> {
         vec!["--stdio"]
+    }
+
+    fn install_hint(&self) -> &'static str {
+        "npm install -g intelephense"
     }
 }

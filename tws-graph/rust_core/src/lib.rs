@@ -21,9 +21,11 @@ mod lint;
 mod lsp;
 mod mcp;
 mod query;
+mod semantic;
 mod services;
 mod snapshot;
-mod watcher;
+mod watch;
+mod federate;
 
 use pyo3::prelude::*;
 
