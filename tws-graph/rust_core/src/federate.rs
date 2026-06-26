@@ -33,7 +33,7 @@ pub struct RepoInfo {
 }
 
 /// A result from a federated query, grouped by repository.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FederatedResult {
     /// Name of the repository this result came from.
     pub repo_name: String,

@@ -10,11 +10,11 @@
 //! - `message` (as `class`): message definition
 //! - `enum`: enum definition
 //! - `enum_member`: enum value definition
+//! - `field`: field inside a message
 //!
 //! # Edge kinds produced
-//! - `contains`: containment
+//! - `contains`: containment (file → all children, parent → member)
 //! - `imports`: import statements
-//! - `calls`: (not applicable, but rpc methods use request/response types)
 
 use crate::db::hash_id;
 use crate::indexer::context::ExtractionContext;
@@ -69,6 +69,7 @@ fn walk_node(
         "service" => extract_service(source, node, ctx, parent_id)?,
         "enum" => extract_enum(source, node, ctx, parent_id)?,
         "import" => extract_import(source, node, ctx, parent_id)?,
+        "field" => extract_field(source, node, ctx, parent_id)?,
         _ => {
             for i in 0..node.named_child_count() {
                 if let Some(child) = node.named_child(i) {
@@ -210,6 +211,26 @@ fn extract_import(
     let target = hash_id(&ctx.file_path, &target_qn);
     ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&path));
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Field extraction (inside messages)
+// ---------------------------------------------------------------------------
+
+fn extract_field(
+    source: &[u8],
+    node: Node,
+    ctx: &mut ExtractionContext,
+    parent_id: &str,
+) -> anyhow::Result<()> {
+    let name = get_child_text(source, node, "identifier");
+    if name.is_empty() {
+        return Ok(());
+    }
+    let line = node.start_position().row as u32 + 1;
+    let field_id = ctx.add_node(NodeKind::Field, &name, &node, HashMap::new());
+    ctx.add_edge(parent_id, &field_id, EdgeKind::Contains, line, None);
     Ok(())
 }
 
@@ -541,5 +562,110 @@ message Simple {}
         let files = find_nodes(&ctx, NodeKind::ProtoFile);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name, "simple.proto");
+    }
+
+    // ------------------------------------------------------------------
+    // 13. Field nodes inside messages
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_field_nodes() {
+        let ctx = extract(
+            r#"syntax = "proto3";
+message Person {
+  string first_name = 1;
+  string last_name = 2;
+  int32 age = 3;
+}
+"#,
+            "test.proto",
+        );
+        let fields = find_nodes(&ctx, NodeKind::Field);
+        assert_eq!(fields.len(), 3, "Expected 3 field nodes, got {}", fields.len());
+        let names: Vec<_> = fields.iter().map(|n| n.name.as_str()).collect();
+        assert!(names.contains(&"first_name"));
+        assert!(names.contains(&"last_name"));
+        assert!(names.contains(&"age"));
+    }
+
+    // ------------------------------------------------------------------
+    // 14. Field contains edges
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_field_contains_edges() {
+        let ctx = extract(
+            r#"syntax = "proto3";
+message Product {
+  string sku = 1;
+  double price = 2;
+}
+"#,
+            "test.proto",
+        );
+        let contains = find_edges(&ctx, EdgeKind::Contains);
+        // File → Product, Product → sku, Product → price
+        assert!(contains.len() >= 3, "Expected >= 3 CONTAINS edges, got {}", contains.len());
+    }
+
+    // ------------------------------------------------------------------
+    // 15. Proto file with multiple constructs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_multi_construct_file() {
+        let ctx = extract(
+            r#"syntax = "proto3";
+package demo.v1;
+
+import "common.proto";
+
+message Request {
+  string query = 1;
+}
+
+message Response {
+  string result = 1;
+}
+
+enum Status {
+  OK = 0;
+  ERROR = 1;
+}
+
+service SearchService {
+  rpc Search(Request) returns (Response);
+}
+"#,
+            "demo.proto",
+        );
+
+        // Verify all construct types are present
+        let files = find_nodes(&ctx, NodeKind::ProtoFile);
+        assert_eq!(files.len(), 1);
+
+        let msgs = find_nodes(&ctx, NodeKind::Class);
+        assert_eq!(msgs.len(), 2, "Expected 2 messages");
+
+        let enums = find_nodes(&ctx, NodeKind::Enum);
+        assert_eq!(enums.len(), 1, "Expected 1 enum");
+
+        let svcs = find_nodes(&ctx, NodeKind::Service);
+        assert_eq!(svcs.len(), 1, "Expected 1 service");
+
+        let rpcs = find_nodes(&ctx, NodeKind::RpcMethod);
+        assert_eq!(rpcs.len(), 1, "Expected 1 RPC method");
+
+        let fields = find_nodes(&ctx, NodeKind::Field);
+        assert_eq!(fields.len(), 2, "Expected 2 fields");
+
+        let members = find_nodes(&ctx, NodeKind::EnumMember);
+        assert_eq!(members.len(), 2, "Expected 2 enum members");
+
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        assert!(!imports.is_empty(), "Expected at least 1 import edge");
+
+        let contains = find_edges(&ctx, EdgeKind::Contains);
+        assert!(!contains.is_empty(), "Expected CONTAINS edges");
     }
 }

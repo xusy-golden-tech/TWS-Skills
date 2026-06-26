@@ -204,6 +204,42 @@ def _cleanup_deleted_files(store: SqliteStore, current_files: list[str]) -> None
         store.delete_file(path)
 
 
+def _sync_files_from_nodes(store: SqliteStore, root_dir: str = "") -> None:
+    """Populate the files table from the nodes table.
+
+    The Rust index creates nodes/edges but does not populate the files tracking
+    table. This function fills it so that get_file_count() returns correct
+    results and incremental sync can detect changes properly.
+    """
+    import time as _time
+    now = int(_time.time())
+    try:
+        conn = store._conn_mgr.conn
+        # Collect distinct file paths from nodes
+        rows = conn.execute(
+            "SELECT DISTINCT file_path FROM nodes WHERE file_path IS NOT NULL"
+        ).fetchall()
+        for (file_path,) in rows:
+            # Try to get real file stats from disk
+            size = 0
+            modified_at = 0
+            full_path = os.path.join(root_dir, file_path) if root_dir else file_path
+            try:
+                st = os.stat(full_path)
+                size = st.st_size
+                modified_at = int(st.st_mtime)
+            except OSError:
+                pass
+            conn.execute(
+                "INSERT OR IGNORE INTO files (path, content_hash, language, node_count, indexed_at, size, modified_at) "
+                "VALUES (?, '', 'python', 0, ?, ?, ?)",
+                (file_path, now, size, modified_at),
+            )
+        conn.commit()
+    except Exception:
+        pass  # files table may not exist or have different schema
+
+
 def _upsert_file_records(
     store: SqliteStore,
     processed_files: list[str],
@@ -439,6 +475,38 @@ def index(
     db_path_resolved = db_path or default_db
 
     if not serial:
+        # Try Rust acceleration for core indexing (default parallel path only)
+        from .rust_bridge import rust_index, _rust_available
+        if _rust_available():
+            import time as _time
+            typer.echo(f"正在索引: {root_dir}")
+            _t0 = _time.time()
+            result = rust_index(str(db_path_resolved), str(root_dir))
+            _duration_ms = int((_time.time() - _t0) * 1000)
+            # Populate files table from nodes (Rust index fills nodes but not files)
+            store = _get_store(db_path_resolved)
+            _sync_files_from_nodes(store, root_dir)
+            # Handle empty project (no source files found)
+            if store.count_nodes() == 0:
+                from .indexer.registry import get_all_extensions
+                exts = sorted(get_all_extensions())
+                typer.echo(f"  警告: 未找到源文件 ({', '.join(exts)})", err=True)
+                store.close()
+                raise typer.Exit(1)
+            skill_count = _index_skills(root_dir, store)
+            stats = store.stats()
+            typer.echo(f"  索引完成: {stats['file_count']} 个文件,"
+                       f" {stats['node_count']} 个符号,"
+                       f" {stats['edge_count']} 条关系,"
+                       f" 耗时 {_duration_ms}ms")
+            typer.echo(f"  数据库: {stats['node_count']} 节点, {stats['edge_count']} 边,"
+                       f" {stats['file_count']} 文件")
+            if skill_count > 0:
+                typer.echo(f"  技能索引: {skill_count} 个 TWS skill")
+            store.close()
+            return
+
+        # Python parallel path: ExtractionOrchestrator + ProcessPoolExecutor
         # 并行路径（默认）: ExtractionOrchestrator + ProcessPoolExecutor
         typer.echo(f"正在索引: {root_dir}")
         db_dir = os.path.dirname(db_path_resolved)
