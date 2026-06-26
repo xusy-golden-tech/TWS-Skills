@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 TWS (Thoughtful Workflow System) is a collection of structured AI skill prompts that enforce disciplined software development workflows. It has two parts:
 
-1. **Skill files** — 40 `SKILL.md` markdown files, each containing YAML frontmatter + instructions for Claude Code agents. These are the "product."
+1. **Skill files** — 41 `SKILL.md` markdown files, each containing YAML frontmatter + instructions for Claude Code agents. These are the "product."
 2. **tws-graph** — a Python CLI that pre-builds a tree-sitter-based code symbol graph (SQLite). Agents query it via bash instead of grep + read. Lives in `tws-graph/`.
 
 See `USAGE.md` for user-facing setup instructions.
@@ -16,10 +16,10 @@ See `USAGE.md` for user-facing setup instructions.
 The skill system has four layers with strict call-direction rules:
 
 ```
-Entry (using-tws) → Flows (flow-*) → Components (comp-*) → Foundation (found-*)
+Entry (using-tws / using-tws-goal) → Flows (flow-*) → Components (comp-*) → Foundation (found-*)
 ```
 
-- **Entry**: Scene router — loads the matching flow skill
+- **Entry**: Scene routers — `using-tws` (interactive, step-by-step confirmation) and `using-tws-goal` (autonomous, goal-driven TDD loop). Both route to the same flow skills but differ in execution mode
 - **Flows**: Workflow definitions (add-feature, fix-bug, hotfix, refactor, new-project, documentation, investigate)
 - **Components**: Executable units (design-doc, implementation, test, code-review, reproduce, root-cause-analysis, etc.) — loaded by sub-agents via the Skill tool
 - **Foundation**: Global rules (7 skills: core-principles, artifact-split, review-methodology, review-triage, branch-flow, environment-gov, impact-report)
@@ -90,7 +90,7 @@ Tests use temporary SQLite databases (`tmp_path` fixture) — no external depend
 tws-graph lint       # runs all 5 rules: frontmatter, SUBAGENT-STOP, cross-refs, prefix, unreferenced
 ```
 
-The linter checks 41 skills across D:\TWS-Skills (root project). Currently: 0 errors, 0 warnings.
+The linter checks 42 skills across D:\TWS-Skills (root project). Currently: 0 errors, 213 warnings (all pre-existing dangling-refs in comp-frontend-ui-design).
 
 ## Project Initialization (.tws/)
 

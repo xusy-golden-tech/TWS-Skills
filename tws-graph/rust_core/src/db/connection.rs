@@ -148,14 +148,40 @@ impl Database {
     // Query methods
     // -----------------------------------------------------------------------
 
-    /// Escape special characters in an FTS5 query string so they are
-    /// treated as literal text rather than query operators.
+    /// Build a safe FTS5 query string with prefix matching.
     ///
-    /// Wraps the text in double quotes (treating it as a phrase query)
-    /// and escapes any internal double quotes by doubling them.
+    /// Splits the query into terms, escapes dangerous characters, appends `*`
+    /// for prefix matching, and joins terms with `AND`.  This matches the
+    /// behaviour of Python's `_build_fts_query()` exactly, avoiding the
+    /// case-sensitive exact-phrase behaviour of FTS5 double-quoting.
     pub fn fts5_escape_query(text: &str) -> String {
-        let escaped = text.replace('"', "\"\"");
-        format!("\"{}\"", escaped)
+        let terms: Vec<&str> = text.split_whitespace().collect();
+        let escaped: Vec<String> = terms
+            .into_iter()
+            .filter_map(|t| {
+                // Strip qualifier prefixes (kind:, lang:, path:) that may appear
+                // in raw query strings.
+                let t = if t.contains(':') {
+                    t.split(':').nth(1).unwrap_or(t)
+                } else {
+                    t
+                };
+                // Escape double quotes (would trigger phrase mode in FTS5)
+                let t = t.replace('"', "\"\"");
+                if t.is_empty() {
+                    None
+                } else {
+                    // Prefix match: `term*` triggers FTS5 prefix queries.
+                    Some(format!("{}*", t))
+                }
+            })
+            .collect();
+        if escaped.is_empty() {
+            // If all terms were filtered out, return the original (sanitized)
+            text.replace('"', "\"\"")
+        } else {
+            escaped.join(" AND ")
+        }
     }
 
     /// Get all outbound edges from a node.
@@ -228,10 +254,10 @@ impl Database {
         lang: Option<&str>,
         path: Option<&str>,
         limit: usize,
-    ) -> rusqlite::Result<Vec<(String, String, String, String, String, String, Option<f64>)>> {
+    ) -> rusqlite::Result<Vec<(String, String, String, String, String, String, Option<f64>, Option<i64>)>> {
         let qualified_text = Self::fts5_escape_query(text);
         let mut sql = String::from(
-            "SELECT n.id, n.kind, n.name, n.qualified_name, n.file_path, n.language, nodes_fts.rank \
+            "SELECT n.id, n.kind, n.name, n.qualified_name, n.file_path, n.language, nodes_fts.rank, n.start_line \
              FROM nodes_fts \
              JOIN nodes n ON n.rowid = nodes_fts.rowid \
              WHERE nodes_fts MATCH ?1",
@@ -262,6 +288,7 @@ impl Database {
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
                 ))
             },
         )?;
@@ -277,27 +304,41 @@ impl Database {
         text: &str,
         kind: Option<&str>,
         lang: Option<&str>,
+        path: Option<&str>,
         limit: usize,
-    ) -> rusqlite::Result<Vec<(String, String, String, String, String, String, Option<f64>)>> {
+    ) -> rusqlite::Result<Vec<(String, String, String, String, String, String, Option<f64>, Option<i64>)>> {
         let pattern = format!("%{}%", text);
         let mut sql = String::from(
-            "SELECT id, kind, name, qualified_name, file_path, language, NULL as rank \
+            "SELECT id, kind, name, qualified_name, file_path, language, NULL as rank, start_line \
              FROM nodes \
              WHERE (name LIKE ?1 OR qualified_name LIKE ?1)",
         );
+        let mut next_param = 2usize;
         if kind.is_some() {
-            sql.push_str(" AND kind = ?2");
+            sql.push_str(&format!(" AND kind = ?{}", next_param));
+            next_param += 1;
         }
         if lang.is_some() {
-            sql.push_str(" AND language = ?3");
+            sql.push_str(&format!(" AND language = ?{}", next_param));
+            next_param += 1;
         }
-        sql.push_str(" LIMIT ?4");
+        if path.is_some() {
+            sql.push_str(&format!(" AND file_path LIKE ?{}", next_param));
+            next_param += 1;
+        }
+        sql.push_str(&format!(" LIMIT ?{}", next_param));
 
         let mut stmt = self.conn.prepare(&sql)?;
         let limit_i64 = limit as i64;
+        let path_pattern = path.map(|p| format!("%{}%", p));
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(pattern)];
+        if let Some(k) = kind { params.push(Box::new(k.to_string())); }
+        if let Some(l) = lang { params.push(Box::new(l.to_string())); }
+        if let Some(ref pp) = path_pattern { params.push(Box::new(pp.clone())); }
+        params.push(Box::new(limit_i64));
 
         let rows = stmt.query_map(
-            rusqlite::params![pattern, kind, lang, limit_i64],
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
             |row| {
                 Ok((
                     row.get(0)?,
@@ -307,6 +348,7 @@ impl Database {
                     row.get(4)?,
                     row.get(5)?,
                     None::<f64>,
+                    row.get(7)?,
                 ))
             },
         )?;
@@ -315,35 +357,54 @@ impl Database {
 
     /// Search nodes using Levenshtein edit distance <= 2 on the `name` field.
     ///
-    /// Returns `(id, kind, name, qualified_name, file_path, language, rank)` rows
+    /// Uses a prefix pre-filter (first character) to limit the candidate set,
+    /// matching Python's `_search_fuzzy` behaviour.  Returns
+    /// `(id, kind, name, qualified_name, file_path, language, rank)` rows
     /// with rank set to the edit distance (lower is better).
     pub fn search_edit_distance(
         &self,
         text: &str,
         kind: Option<&str>,
         lang: Option<&str>,
+        path: Option<&str>,
         limit: usize,
-    ) -> rusqlite::Result<Vec<(String, String, String, String, String, String, Option<f64>)>> {
-        // Build query dynamically so we never pass unused params.
-        let mut clauses: Vec<&str> = Vec::new();
+    ) -> rusqlite::Result<Vec<(String, String, String, String, String, String, Option<f64>, Option<i64>)>> {
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Build query with prefix pre-filter (first character of query)
+        let mut clauses: Vec<String> = Vec::new();
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
+        // Prefix pre-filter: only examine nodes whose name starts with the
+        // same first character (dramatically reduces candidate set for large DBs).
+        let prefix = &text[..text.chars().next().map(|c| c.len_utf8()).unwrap_or(1)];
+        clauses.push("name LIKE ?".to_string());
+        params.push(Box::new(format!("{}%", prefix)));
+
         if let Some(k) = kind {
-            clauses.push("kind = ?");
+            clauses.push(format!("kind = ?"));
             params.push(Box::new(k.to_string()));
         }
         if let Some(l) = lang {
-            clauses.push("language = ?");
+            clauses.push(format!("language = ?"));
             params.push(Box::new(l.to_string()));
+        }
+        if let Some(p) = path {
+            clauses.push(format!("file_path LIKE ?"));
+            params.push(Box::new(format!("%{}%", p)));
         }
 
         let mut sql = String::from(
-            "SELECT id, kind, name, qualified_name, file_path, language FROM nodes",
+            "SELECT id, kind, name, qualified_name, file_path, language, start_line FROM nodes",
         );
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&clauses.join(" AND "));
         }
+        // Limit candidates for performance (Python caps at 200)
+        sql.push_str(" LIMIT 200");
 
         let mut stmt = self.conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
@@ -355,15 +416,16 @@ impl Database {
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
+                row.get::<_, Option<i64>>(6)?,
             ))
         })?;
 
-        let mut scored: Vec<(String, String, String, String, String, String, Option<f64>)> = rows
+        let mut scored: Vec<(String, String, String, String, String, String, Option<f64>, Option<i64>)> = rows
             .filter_map(|r| r.ok())
-            .filter_map(|(id, k, name, qn, fp, lang_val)| {
+            .filter_map(|(id, k, name, qn, fp, lang_val, start_line)| {
                 let dist = levenshtein_distance(&name.to_lowercase(), &text.to_lowercase());
                 if dist <= 2 {
-                    Some((id, k, name, qn, fp, lang_val, Some(dist as f64)))
+                    Some((id, k, name, qn, fp, lang_val, Some(dist as f64), start_line))
                 } else {
                     None
                 }

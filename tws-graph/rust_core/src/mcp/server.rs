@@ -230,7 +230,7 @@ fn tool_search_symbols(db: &Database, args: &Value) -> Result<Value, String> {
 
     let items: Vec<Value> = results
         .iter()
-        .map(|(id, k, name, qn, fp, lang_val, rank)| {
+        .map(|(id, k, name, qn, fp, lang_val, rank, start_line)| {
             json!({
                 "id": id,
                 "kind": k,
@@ -239,6 +239,7 @@ fn tool_search_symbols(db: &Database, args: &Value) -> Result<Value, String> {
                 "file_path": fp,
                 "language": lang_val,
                 "rank": rank,
+                "line_number": start_line,
             })
         })
         .collect();
@@ -260,7 +261,7 @@ fn tool_semantic_search(db: &Database, args: &Value) -> Result<Value, String> {
 
     // If FTS5 returns few results, try LIKE search
     if results.len() < limit {
-        let like_results = db.search_like(&query, None, None, limit)
+        let like_results = db.search_like(&query, None, None, None, limit)
             .map_err(|e| e.to_string())?;
         for r in like_results {
             results.push(r);
@@ -269,7 +270,7 @@ fn tool_semantic_search(db: &Database, args: &Value) -> Result<Value, String> {
 
     // Also try edit distance for fuzzy matching
     if results.len() < limit {
-        let edit_results = db.search_edit_distance(&query, None, None, limit)
+        let edit_results = db.search_edit_distance(&query, None, None, None, limit)
             .map_err(|e| e.to_string())?;
         for r in edit_results {
             results.push(r);
@@ -288,7 +289,7 @@ fn tool_semantic_search(db: &Database, args: &Value) -> Result<Value, String> {
 
     let items: Vec<Value> = unique
         .iter()
-        .map(|(id, k, name, qn, fp, lang_val, rank)| {
+        .map(|(id, k, name, qn, fp, lang_val, rank, start_line)| {
             json!({
                 "id": id,
                 "kind": k,
@@ -297,6 +298,7 @@ fn tool_semantic_search(db: &Database, args: &Value) -> Result<Value, String> {
                 "file_path": fp,
                 "language": lang_val,
                 "rank": rank,
+                "line_number": start_line,
             })
         })
         .collect();
@@ -905,7 +907,7 @@ fn tool_find_pattern(db: &Database, args: &Value) -> Result<Value, String> {
 
     let items: Vec<Value> = results
         .iter()
-        .map(|(id, k, name, qn, fp, lang_val, _rank)| {
+        .map(|(id, k, name, qn, fp, lang_val, _rank, _start_line)| {
             json!({
                 "id": id,
                 "kind": k,

@@ -170,6 +170,8 @@ pub struct SearchResult {
     pub docstring: Option<String>,
     /// BM25 score (lower is better).
     pub rank: Option<f64>,
+    /// Start line number (1-based) from the nodes table.
+    pub start_line: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +279,7 @@ mod tests {
             signature: None,
             docstring: Some("Calculate total".to_string()),
             rank: Some(1.5),
+            start_line: None,
         };
 
         let json = serde_json::to_string(&result).unwrap();

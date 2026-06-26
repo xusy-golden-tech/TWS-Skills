@@ -511,7 +511,7 @@ impl Walker {
         ctx.push_scope_node(&func_id);
 
         if let Some(body) = node.child_by_field_name("body") {
-            self.walk_body_for_calls(source, body, ctx, &func_id)?;
+            self.walk_body_for_calls_depth(source, body, ctx, &func_id, 0)?;
         }
 
         ctx.pop_scope();
@@ -522,6 +522,12 @@ impl Walker {
     // Body walking for calls, macros, let declarations, assignments
     // ------------------------------------------------------------------
 
+    /// Maximum recursion depth for `walk_body_for_calls` to prevent stack
+    /// overflow on deeply-nested ASTs.  200 levels is far beyond what any
+    /// legitimate source file should contain; hitting this is either a
+    /// pathological file or a cycle in the tree-walking logic.
+    const MAX_WALK_DEPTH: usize = 30;
+
     fn walk_body_for_calls(
         &mut self,
         source: &[u8],
@@ -529,12 +535,28 @@ impl Walker {
         ctx: &mut ExtractionContext,
         parent_id: &str,
     ) -> anyhow::Result<()> {
+        self.walk_body_for_calls_depth(source, node, ctx, parent_id, 0)
+    }
+
+    fn walk_body_for_calls_depth(
+        &mut self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+        depth: usize,
+    ) -> anyhow::Result<()> {
+        if depth >= Self::MAX_WALK_DEPTH {
+            return Ok(());
+        }
+        let next_depth = depth + 1;
+
         match node.kind() {
             "call_expression" => {
                 self.extract_call(source, node, ctx, parent_id)?;
                 // Recurse into arguments for nested calls
                 if let Some(args) = node.child_by_field_name("arguments") {
-                    self.walk_body_for_calls(source, args, ctx, parent_id)?;
+                    self.walk_body_for_calls_depth(source, args, ctx, parent_id, next_depth)?;
                 }
             }
             "macro_invocation" => {
@@ -545,7 +567,7 @@ impl Walker {
                 // Recurse into value and children
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
-                        self.walk_body_for_calls(source, child, ctx, parent_id)?;
+                        self.walk_body_for_calls_depth(source, child, ctx, parent_id, next_depth)?;
                     }
                 }
             }
@@ -556,7 +578,7 @@ impl Walker {
                 }
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
-                        self.walk_body_for_calls(source, child, ctx, parent_id)?;
+                        self.walk_body_for_calls_depth(source, child, ctx, parent_id, next_depth)?;
                     }
                 }
             }
@@ -564,7 +586,7 @@ impl Walker {
                 self.record_read(source, node, ctx, parent_id);
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
-                        self.walk_body_for_calls(source, child, ctx, parent_id)?;
+                        self.walk_body_for_calls_depth(source, child, ctx, parent_id, next_depth)?;
                     }
                 }
             }
@@ -590,7 +612,7 @@ impl Walker {
             | "while_let_expression" => {
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
-                        self.walk_body_for_calls(source, child, ctx, parent_id)?;
+                        self.walk_body_for_calls_depth(source, child, ctx, parent_id, next_depth)?;
                     }
                 }
             }
@@ -609,7 +631,7 @@ impl Walker {
                             || ck == "if_expression"
                             || ck == "match_expression"
                         {
-                            self.walk_body_for_calls(source, child, ctx, parent_id)?;
+                            self.walk_body_for_calls_depth(source, child, ctx, parent_id, next_depth)?;
                         }
                     }
                 }
@@ -666,24 +688,11 @@ impl Walker {
                     }
                 }
                 "generic_function" => {
-                    // foo::<Type>(args) — extract the function part
-                    let inner = f.child_by_field_name("function");
-                    if let Some(_inner_fn) = inner {
-                        return self.extract_call(source, node, ctx, parent_id);
-                    }
-                    // Fallback: find identifier among children
-                    for i in 0..f.named_child_count() {
-                        if let Some(child) = f.named_child(i) {
-                            if child.kind() == "identifier" {
-                                let name = get_text(source, Some(child));
-                                if !name.is_empty() && !is_rust_builtin(&name) {
-                                    let target_qn = build_call_target(&ctx.file_path, &self.type_stack, &name);
-                                    let target = hash_id(&ctx.file_path, &target_qn);
-                                    ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&name));
-                                }
-                            }
-                        }
-                    }
+                    // foo::<Type>(args) — extract the inner function part.
+                    // Recurse on the generic_function node itself, which has
+                    // the same node shape as a call_expression (a "function"
+                    // child containing the actual function name).
+                    return self.extract_call(source, f, ctx, parent_id);
                 }
                 _ => {}
             },
@@ -722,7 +731,7 @@ impl Walker {
 
         // Also walk token_tree for nested invocations
         if let Some(tt) = node.child_by_field_name("token_tree") {
-            self.walk_body_for_calls(source, tt, ctx, parent_id)?;
+            self.walk_body_for_calls_depth(source, tt, ctx, parent_id, 0)?;
         }
 
         Ok(())
@@ -1379,6 +1388,86 @@ mod tests {
         let ctx = extract("", "src/empty.rs");
         let files = find_nodes(&ctx, NodeKind::File);
         assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn test_thread_spawn_closure() {
+        let ctx = extract(
+            r#"use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use std::path::PathBuf;
+use std::collections::HashMap;
+
+pub struct Watcher {
+    root: PathBuf,
+    interval: Duration,
+    running: Arc<AtomicBool>,
+}
+impl Watcher {
+    pub fn start(&mut self) -> mpsc::Receiver<()> {
+        let (tx, rx) = mpsc::channel();
+        let root = self.root.clone();
+        let interval = self.interval;
+        let running = Arc::clone(&self.running);
+        running.store(true, Ordering::SeqCst);
+        std::thread::Builder::new()
+            .name("test".into())
+            .spawn(move || {
+                let mut last: HashMap<PathBuf, u64> = HashMap::new();
+                while running.load(Ordering::SeqCst) {
+                    std::thread::sleep(interval);
+                    if tx.send(()).is_err() {
+                        running.store(false, Ordering::SeqCst);
+                        return;
+                    }
+                }
+            })
+            .expect("spawn");
+        rx
+    }
+}
+"#,
+            "src/watcher.rs",
+        );
+        assert!(!ctx.result.nodes.is_empty());
+    }
+
+    #[test]
+    fn test_thread_spawn_via_registry() {
+        use crate::indexer::registry::Registry;
+        let source = r#"use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+pub struct W { r: Arc<AtomicBool> }
+impl W {
+    pub fn start(&mut self) -> mpsc::Receiver<()> {
+        let (tx, rx) = mpsc::channel();
+        let r = Arc::clone(&self.r);
+        r.store(true, Ordering::SeqCst);
+        std::thread::spawn(move || {
+            while r.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if tx.send(()).is_err() { return; }
+            }
+        });
+        rx
+    }
+}
+"#;
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_rust::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+
+        let mut ctx = ExtractionContext::new("src/w.rs".to_string(), "rust".to_string());
+        let mut registry = Registry::new();
+        registry.register(Box::new(super::RustExtractor));
+
+        let extractor = registry.find_by_extension("rs").unwrap();
+        extractor.extract(source.as_bytes(), &tree, &mut ctx)
+            .expect("extract via registry should succeed");
+        assert!(!ctx.result.nodes.is_empty());
     }
 
     #[test]

@@ -31,6 +31,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::path::Path;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 // ============================================================================
 // Helper: open a database from a path string
@@ -62,6 +63,92 @@ fn ping() -> PyResult<String> {
 // Index
 // ============================================================================
 
+/// Process a single file during indexing.
+///
+/// Extracted into a standalone function to keep stack frames bounded on
+/// platforms with small default thread stacks (notably Windows, 1 MB).
+#[allow(clippy::too_many_arguments)]
+fn index_one_file(
+    conn: &rusqlite::Connection,
+    root_path: &Path,
+    file_path: &Path,
+    registry: &indexer::registry::Registry,
+) -> Option<(usize, usize)> {
+    let file_path_str = file_path.to_string_lossy();
+
+    // Detect language
+    let lang = indexer::language::detect(&file_path_str)?;
+
+    // Find extractor
+    let ext_str = file_path.extension()?.to_str()?;
+    let extractor = registry.find_by_extension(ext_str)?;
+
+    // Get tree-sitter Language (lazily initialized via LazyLock)
+    let ts_lang = lang_to_tree_sitter(lang)?;
+
+    // Read file
+    let abs_path = root_path.join(file_path);
+    let source_bytes = std::fs::read(&abs_path).ok()?;
+
+    // Compute relative path
+    let rel_path = file_path_str.replace('\\', "/");
+
+    // Create extraction context
+    let mut ctx = indexer::context::ExtractionContext::new(rel_path, lang.to_string());
+
+    // Parse with tree-sitter
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_lang).ok()?;
+    let tree = parser.parse(&source_bytes, None)?;
+
+    // Extract
+    extractor.extract(&source_bytes, &tree, &mut ctx).ok()?;
+
+    let result = std::mem::take(&mut ctx.result);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    // Insert nodes
+    let mut node_count: usize = 0;
+    let mut edge_count: usize = 0;
+    let _ = conn.execute_batch("BEGIN TRANSACTION");
+    for node in &result.nodes {
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO nodes (id, kind, name, qualified_name, file_path, language, \
+             start_line, end_line, signature, docstring, visibility, is_abstract, \
+             is_exported, decorators, framework, properties, body, body_hash, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            rusqlite::params![
+                node.id, node.kind, node.name, node.qualified_name,
+                node.file_path, node.language,
+                node.start_line, node.end_line,
+                node.signature, node.docstring, node.visibility,
+                node.is_abstract,
+                node.is_exported, node.decorators, node.framework,
+                node.properties,
+                node.body, node.body_hash, ts,
+            ],
+        );
+        node_count += 1;
+    }
+    for edge in &result.edges {
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO edges (source, target, target_text, kind, source_loc, provenance, properties) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                edge.source, edge.target, edge.target_text, edge.kind,
+                edge.source_loc, edge.provenance, edge.properties,
+            ],
+        );
+        edge_count += 1;
+    }
+    let _ = conn.execute_batch("COMMIT");
+
+    Some((node_count, edge_count))
+}
+
 /// Run a full index of source files in `root`, storing results in `db_path`.
 /// Returns a summary string with node/edge counts.
 ///
@@ -71,6 +158,11 @@ fn ping() -> PyResult<String> {
 /// 3. Parse with the appropriate tree-sitter grammar
 /// 4. Extract symbols and edges using the language-specific extractor
 /// 5. Insert results into the SQLite database
+///
+/// Per-file processing is delegated to `index_one_file()` to keep stack
+/// frames small.  On Windows the default thread stack is only 1 MB, which
+/// is insufficient when all 28+ tree-sitter grammars are initialised
+/// eagerly inside a single function body.
 #[pyfunction]
 fn index(db_path: &str, root: &str) -> PyResult<String> {
     let db = init_db(db_path)?;
@@ -90,103 +182,11 @@ fn index(db_path: &str, root: &str) -> PyResult<String> {
     let mut file_count: usize = 0;
 
     for file_path in &files {
-        // Detect language from file path
-        let file_path_str = file_path.to_string_lossy();
-        let lang = match indexer::language::detect(&file_path_str) {
-            Some(l) => l,
-            None => continue,
-        };
-
-        // Find extractor by file extension
-        let ext_str = file_path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-        let extractor = match registry.find_by_extension(ext_str) {
-            Some(e) => e,
-            None => continue,
-        };
-
-        // Get the tree-sitter Language for this language
-        let ts_lang = match lang_to_tree_sitter(lang) {
-            Some(l) => l,
-            None => continue,
-        };
-
-        // Compute absolute path for reading
-        let abs_path = root_path.join(file_path);
-
-        // Read file content as bytes
-        let source_bytes = match std::fs::read(&abs_path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        // Compute relative path from root for the database
-        let rel_path = file_path_str.replace('\\', "/");
-
-        // Create extraction context
-        let mut ctx = indexer::context::ExtractionContext::new(rel_path.clone(), lang.to_string());
-
-        // Parse with tree-sitter
-        let mut parser = tree_sitter::Parser::new();
-        if parser.set_language(&ts_lang).is_err() {
-            continue;
+        if let Some((nodes, edges)) = index_one_file(&conn, &root_path, file_path, &registry) {
+            total_nodes += nodes;
+            total_edges += edges;
+            file_count += 1;
         }
-        let tree = match parser.parse(&source_bytes, None) {
-            Some(t) => t,
-            None => continue,
-        };
-
-        // Extract
-        if extractor.extract(&source_bytes, &tree, &mut ctx).is_err() {
-            continue;
-        }
-
-        // Build the result and insert nodes/edges
-        let result = std::mem::take(&mut ctx.result);
-
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
-
-        // Use a transaction for this file
-        let _ = conn.execute_batch("BEGIN TRANSACTION");
-
-        for node in &result.nodes {
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO nodes (id, kind, name, qualified_name, file_path, language, \
-                 start_line, end_line, signature, docstring, visibility, is_abstract, \
-                 is_exported, decorators, framework, properties, body, body_hash, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
-                rusqlite::params![
-                    node.id, node.kind, node.name, node.qualified_name,
-                    node.file_path, node.language,
-                    node.start_line, node.end_line,
-                    node.signature, node.docstring, node.visibility,
-                    node.is_abstract,
-                    node.is_exported, node.decorators, node.framework,
-                    node.properties,
-                    node.body, node.body_hash, ts,
-                ],
-            );
-            total_nodes += 1;
-        }
-
-        for edge in &result.edges {
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO edges (source, target, target_text, kind, source_loc, provenance, properties) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    edge.source, edge.target, edge.target_text, edge.kind,
-                    edge.source_loc, edge.provenance, edge.properties,
-                ],
-            );
-            total_edges += 1;
-        }
-
-        let _ = conn.execute_batch("COMMIT");
-        file_count += 1;
     }
 
     db.optimize()
@@ -239,41 +239,79 @@ fn register_all_extractors(registry: &mut indexer::registry::Registry) {
 }
 
 /// Map a canonical language name to its tree-sitter Language.
+///
+/// Each tree-sitter Language is lazily initialized via `std::sync::LazyLock`
+/// to avoid stack overflow on Windows (where the default thread stack is
+/// only 1 MB — far too small for 28+ statically-initialized parser objects).
 fn lang_to_tree_sitter(lang: &str) -> Option<tree_sitter::Language> {
+    static PY_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_python::LANGUAGE.into());
+    static TS_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into());
+    static JAVA_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_java::LANGUAGE.into());
+    static GO_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_go::LANGUAGE.into());
+    static RUST_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_rust::LANGUAGE.into());
+    static KOTLIN_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_kotlin_ng::LANGUAGE.into());
+    static PHP_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_php::LANGUAGE_PHP.into());
+    static RUBY_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_ruby::LANGUAGE.into());
+    static C_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_c::LANGUAGE.into());
+    static CPP_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_cpp::LANGUAGE.into());
+    static CSHARP_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_c_sharp::LANGUAGE.into());
+    static SCALA_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_scala::LANGUAGE.into());
+    static ELIXIR_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_elixir::LANGUAGE.into());
+    static HASKELL_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_haskell::LANGUAGE.into());
+    static CLOJURE_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_clojure::LANGUAGE.into());
+    static LUA_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_lua::LANGUAGE.into());
+    static BASH_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_bash::LANGUAGE.into());
+    static HTML_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_html::LANGUAGE.into());
+    static CSS_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_css::LANGUAGE.into());
+    static MD_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_md::LANGUAGE.into());
+    static TOML_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_toml_ng::LANGUAGE.into());
+    static YAML_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_yaml::LANGUAGE.into());
+    static HCL_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_hcl::LANGUAGE.into());
+    static JSON_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_json::LANGUAGE.into());
+    static SQL_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_sequel::LANGUAGE.into());
+    static DOCKER_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_containerfile::LANGUAGE.into());
+    static PROTO_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_proto::LANGUAGE.into());
+    static DART_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_dart::LANGUAGE.into());
+    static SWIFT_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_swift::LANGUAGE.into());
+    static GROOVY_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_groovy::LANGUAGE.into());
+    static ZIG_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_zig::LANGUAGE.into());
+    static NIX_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_nix::LANGUAGE.into());
+    static CMAKE_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_cmake::LANGUAGE.into());
+
     match lang {
-        "python" => Some(tree_sitter_python::LANGUAGE.into()),
-        "typescript" | "javascript" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
-        "java" => Some(tree_sitter_java::LANGUAGE.into()),
-        "go" => Some(tree_sitter_go::LANGUAGE.into()),
-        "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
-        "kotlin" => Some(tree_sitter_kotlin_ng::LANGUAGE.into()),
-        "php" => Some(tree_sitter_php::LANGUAGE_PHP.into()),
-        "ruby" => Some(tree_sitter_ruby::LANGUAGE.into()),
-        "c" => Some(tree_sitter_c::LANGUAGE.into()),
-        "cpp" => Some(tree_sitter_cpp::LANGUAGE.into()),
-        "csharp" => Some(tree_sitter_c_sharp::LANGUAGE.into()),
-        "scala" => Some(tree_sitter_scala::LANGUAGE.into()),
-        "elixir" => Some(tree_sitter_elixir::LANGUAGE.into()),
-        "haskell" => Some(tree_sitter_haskell::LANGUAGE.into()),
-        "clojure" => Some(tree_sitter_clojure::LANGUAGE.into()),
-        "lua" => Some(tree_sitter_lua::LANGUAGE.into()),
-        "bash" => Some(tree_sitter_bash::LANGUAGE.into()),
-        "html" => Some(tree_sitter_html::LANGUAGE.into()),
-        "css" => Some(tree_sitter_css::LANGUAGE.into()),
-        "markdown" => Some(tree_sitter_md::LANGUAGE.into()),
-        "toml" => Some(tree_sitter_toml_ng::LANGUAGE.into()),
-        "yaml" => Some(tree_sitter_yaml::LANGUAGE.into()),
-        "hcl" => Some(tree_sitter_hcl::LANGUAGE.into()),
-        "json" => Some(tree_sitter_json::LANGUAGE.into()),
-        "sql" => Some(tree_sitter_sequel::LANGUAGE.into()),
-        "dockerfile" => Some(tree_sitter_containerfile::LANGUAGE.into()),
-        "proto" => Some(tree_sitter_proto::LANGUAGE.into()),
-        "dart" => Some(tree_sitter_dart::LANGUAGE.into()),
-        "swift" => Some(tree_sitter_swift::LANGUAGE.into()),
-        "groovy" => Some(tree_sitter_groovy::LANGUAGE.into()),
-        "zig" => Some(tree_sitter_zig::LANGUAGE.into()),
-        "nix" => Some(tree_sitter_nix::LANGUAGE.into()),
-        "cmake" => Some(tree_sitter_cmake::LANGUAGE.into()),
+        "python" => Some(PY_LANG.clone()),
+        "typescript" | "javascript" => Some(TS_LANG.clone()),
+        "java" => Some(JAVA_LANG.clone()),
+        "go" => Some(GO_LANG.clone()),
+        "rust" => Some(RUST_LANG.clone()),
+        "kotlin" => Some(KOTLIN_LANG.clone()),
+        "php" => Some(PHP_LANG.clone()),
+        "ruby" => Some(RUBY_LANG.clone()),
+        "c" => Some(C_LANG.clone()),
+        "cpp" => Some(CPP_LANG.clone()),
+        "csharp" => Some(CSHARP_LANG.clone()),
+        "scala" => Some(SCALA_LANG.clone()),
+        "elixir" => Some(ELIXIR_LANG.clone()),
+        "haskell" => Some(HASKELL_LANG.clone()),
+        "clojure" => Some(CLOJURE_LANG.clone()),
+        "lua" => Some(LUA_LANG.clone()),
+        "bash" => Some(BASH_LANG.clone()),
+        "html" => Some(HTML_LANG.clone()),
+        "css" => Some(CSS_LANG.clone()),
+        "markdown" => Some(MD_LANG.clone()),
+        "toml" => Some(TOML_LANG.clone()),
+        "yaml" => Some(YAML_LANG.clone()),
+        "hcl" => Some(HCL_LANG.clone()),
+        "json" => Some(JSON_LANG.clone()),
+        "sql" => Some(SQL_LANG.clone()),
+        "dockerfile" => Some(DOCKER_LANG.clone()),
+        "proto" => Some(PROTO_LANG.clone()),
+        "dart" => Some(DART_LANG.clone()),
+        "swift" => Some(SWIFT_LANG.clone()),
+        "groovy" => Some(GROOVY_LANG.clone()),
+        "zig" => Some(ZIG_LANG.clone()),
+        "nix" => Some(NIX_LANG.clone()),
+        "cmake" => Some(CMAKE_LANG.clone()),
         _ => None,
     }
 }
@@ -300,6 +338,7 @@ fn search(py: Python<'_>, db_path: &str, query_text: &str, limit: Option<usize>)
         item.set_item("kind", &r.kind)?;
         item.set_item("file_path", &r.file_path)?;
         item.set_item("language", &r.language)?;
+        item.set_item("line_number", r.start_line.unwrap_or(0))?;
         list.append(item)?;
     }
     Ok(list.into())
@@ -770,21 +809,101 @@ fn snapshot_diff(db_path: &str, a: &str, b: &str, brief: Option<bool>) -> PyResu
 // Tool operations
 // ============================================================================
 
-/// Lint skill files in the given directory and return results as JSON string.
+/// Lint skill files in the given directory and return results.
+///
+/// Returns a JSON string matching the Python `LintReport` format:
+/// ```json
+/// {
+///   "files_checked": N,
+///   "errors": N,
+///   "warnings": N,
+///   "items": [
+///     {"skill": "...", "file": "...", "rule": "...", "message": "...", "severity": "..."}
+///   ]
+/// }
+/// ```
+/// When `json_output` is false, a human-readable summary string is returned instead.
 #[pyfunction]
-fn lint_skills(skills_dir: &str) -> PyResult<String> {
+fn lint_skills(skills_dir: &str, json_output: Option<bool>) -> PyResult<String> {
     let issues = lint::lint_skills(Path::new(skills_dir));
-    let json_issues: Vec<serde_json::Value> = issues.iter().map(|i| {
-        serde_json::json!({
-            "rule": i.rule,
-            "file": i.file,
-            "line": i.line,
-            "severity": i.severity,
-            "message": i.message,
-        })
-    }).collect();
-    serde_json::to_string_pretty(&json_issues)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+
+    // Count number of skill files checked (unique files from issues + dirs scanned)
+    let skill_file_count = {
+        let mut files = std::collections::HashSet::new();
+        for i in &issues {
+            files.insert(i.file.clone());
+        }
+        // Also count files with no issues by scanning dirs
+        if let Ok(entries) = std::fs::read_dir(Path::new(skills_dir)) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let skill_md = path.join("SKILL.md");
+                    if skill_md.exists() {
+                        files.insert(skill_md.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+        files.len()
+    };
+
+    let errors: Vec<_> = issues.iter().filter(|i| i.severity == "error").collect();
+    let warnings: Vec<_> = issues.iter().filter(|i| i.severity == "warning").collect();
+
+    let use_json = json_output.unwrap_or(false);
+
+    if use_json {
+        let json_issues: Vec<serde_json::Value> = issues.iter().map(|i| {
+            // Extract skill name from file path (parent directory name)
+            let skill_name = std::path::Path::new(&i.file)
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            serde_json::json!({
+                "skill": skill_name,
+                "file": i.file,
+                "rule": i.rule,
+                "message": i.message,
+                "severity": i.severity,
+            })
+        }).collect();
+
+        let output = serde_json::json!({
+            "files_checked": skill_file_count,
+            "errors": errors.len(),
+            "warnings": warnings.len(),
+            "items": json_issues,
+        });
+        serde_json::to_string_pretty(&output)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    } else {
+        // Plain-text output matching Python's lint text format
+        if issues.is_empty() {
+            return Ok(format!("  检查 {} 个文件，全部通过", skill_file_count));
+        }
+
+        let mut out = String::new();
+        if !errors.is_empty() {
+            out.push_str(&format!("\n  {} 个错误:\n", errors.len()));
+            for w in &errors {
+                out.push_str(&format!("    [{}] {}: {}\n", w.rule, w.file, w.message));
+            }
+        }
+
+        if !warnings.is_empty() {
+            out.push_str(&format!("\n  {} 个警告:\n", warnings.len()));
+            for w in &warnings {
+                out.push_str(&format!("    [{}] {}: {}\n", w.rule, w.file, w.message));
+            }
+        }
+
+        out.push_str(&format!("\n  检查 {} 个文件: {} 错误, {} 警告",
+            skill_file_count, errors.len(), warnings.len()));
+
+        Ok(out)
+    }
 }
 
 /// Install git hooks for auto-sync.

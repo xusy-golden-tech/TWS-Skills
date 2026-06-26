@@ -732,6 +732,14 @@ def calls(
         inbound = True
 
     direction = "both" if (inbound and outbound) else ("inbound" if inbound else "outbound")
+    resolved_db = os.path.abspath(db_path or DEFAULT_DB)
+
+    # Try Rust acceleration
+    if os.path.exists(resolved_db):
+        from .rust_bridge import rust_calls, _rust_available
+        if _rust_available():
+            typer.echo(rust_calls(resolved_db, symbol, inbound, depth))
+            return
 
     db = _get_db(db_path) if os.path.exists(db_path or DEFAULT_DB) else None
     if not db:
@@ -821,6 +829,15 @@ def impact(
       tws-graph impact calculateTotal
       tws-graph impact UserService.createOrder --depth 3
     """
+    resolved_db = os.path.abspath(db_path or DEFAULT_DB)
+
+    # Try Rust acceleration
+    if os.path.exists(resolved_db):
+        from .rust_bridge import rust_impact, _rust_available
+        if _rust_available():
+            typer.echo(rust_impact(resolved_db, symbol, depth))
+            return
+
     db = _get_db(db_path) if os.path.exists(db_path or DEFAULT_DB) else None
     if not db:
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
@@ -912,6 +929,19 @@ def trace(
       tws-graph trace main handleRequest
       tws-graph trace router.getUser validateInput
     """
+    resolved_db = os.path.abspath(db_path or DEFAULT_DB)
+
+    # Try Rust acceleration
+    if os.path.exists(resolved_db):
+        from .rust_bridge import rust_trace, _rust_available
+        if _rust_available():
+            result = rust_trace(resolved_db, from_symbol, to_symbol)
+            if json_output:
+                typer.echo(result)
+            else:
+                typer.echo(result)
+            return
+
     db = _get_db(db_path) if os.path.exists(db_path or DEFAULT_DB) else None
     if not db:
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
@@ -982,6 +1012,13 @@ def snapshot(
       tws-graph diff before after # 对比差异
     """
     src = os.path.abspath(db_path or DEFAULT_DB)
+
+    # Try Rust acceleration
+    from .rust_bridge import rust_snapshot_create, _rust_available
+    if _rust_available() and os.path.exists(src):
+        typer.echo(rust_snapshot_create(src, name))
+        return
+
     if not os.path.exists(src):
         typer.echo(f"错误: 索引数据库不存在 ({src})。请先运行 tws-graph index。", err=True)
         raise typer.Exit(1)
@@ -1016,6 +1053,18 @@ def diff(
     """
     base = os.path.abspath(db_path or DEFAULT_DB)
     snapshots_dir = os.path.dirname(base)
+
+    # Try Rust acceleration
+    from .rust_bridge import rust_snapshot_list, rust_snapshot_diff, _rust_available
+    if _rust_available():
+        # No arguments: list snapshots
+        if not before and not after:
+            typer.echo(rust_snapshot_list(base))
+            return
+        # Compare two snapshots
+        if before and after:
+            typer.echo(rust_snapshot_diff(base, before, after))
+            return
 
     # No arguments: list snapshots
     if not before and not after:
@@ -1173,9 +1222,25 @@ def lint(
       tws-graph lint .
       tws-graph lint /path/to/TWS-Skills --json
     """
-    from .skill_linter import lint_skills
-
     root_dir = os.path.abspath(project_path)
+
+    # Try Rust acceleration
+    from .rust_bridge import rust_lint, _rust_available
+    if _rust_available():
+        result = rust_lint(root_dir, json_output)
+        typer.echo(result)
+        # Check JSON for errors to set exit code
+        if json_output:
+            import json
+            try:
+                parsed = json.loads(result)
+                if parsed.get("errors", 0) > 0:
+                    raise typer.Exit(1)
+            except json.JSONDecodeError:
+                pass
+        return
+
+    from .skill_linter import lint_skills
     report = lint_skills(root_dir)
 
     if json_output:
@@ -1310,6 +1375,31 @@ def search(
     # ------------------------------------------------------------------
     # Existing FTS5 / field-qualified search path
     # ------------------------------------------------------------------
+    resolved_db = os.path.abspath(db_path or DEFAULT_DB)
+
+    # Try Rust acceleration
+    if os.path.exists(resolved_db):
+        from .rust_bridge import rust_search, _rust_available
+        if _rust_available():
+            results = rust_search(resolved_db, query_str, limit)
+            if not results:
+                typer.echo(f"未找到匹配: {query_str}")
+                return
+            if json_output:
+                typer.echo(json.dumps(_serialize(results), ensure_ascii=False, indent=2))
+            else:
+                typer.echo(f"\n找到 {len(results)} 个结果:")
+                for row in results:
+                    name = row.get("name", row.get("qualified_name", ""))
+                    kind = row.get("kind", "?")
+                    fpath = row.get("file_path", "?")
+                    line = row.get("start_line", "?")
+                    lang = row.get("language", "?")
+                    sig = row.get("signature") or ""
+                    sig_short = f"  ({sig[:50]}...)" if sig and len(sig) > 50 else f"  ({sig})" if sig else ""
+                    typer.echo(f"  {name} [{kind}] ({lang}) {fpath}:{line}{sig_short}")
+            return
+
     db = _get_db(db_path) if os.path.exists(db_path or DEFAULT_DB) else None
     if not db:
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
@@ -1384,6 +1474,15 @@ def unresolved(
     大部分未解析引用是外部 SDK/库的符号（如 Android SDK、JDK、第三方库），
     这些符号不在项目源码里，无法解析是正常的。关注项目内部未能解析的引用即可。
     """
+    resolved_db = os.path.abspath(db_path or DEFAULT_DB)
+
+    # Try Rust acceleration
+    if os.path.exists(resolved_db):
+        from .rust_bridge import rust_unresolved, _rust_available
+        if _rust_available():
+            typer.echo(rust_unresolved(resolved_db))
+            return
+
     db = _get_db(db_path) if os.path.exists(db_path or DEFAULT_DB) else None
     if not db:
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
@@ -1450,9 +1549,25 @@ def hooks(
       tws-graph hooks status
       tws-graph hooks remove
     """
-    from .hooks import install_hooks, remove_hooks, status_hooks
-
     root = os.path.abspath(project_path)
+
+    # Try Rust acceleration
+    from .rust_bridge import _rust_available
+    if _rust_available():
+        if action == "install":
+            from .rust_bridge import rust_hooks_install
+            typer.echo(rust_hooks_install(root))
+            return
+        elif action == "remove":
+            from .rust_bridge import rust_hooks_remove
+            typer.echo(rust_hooks_remove(root))
+            return
+        elif action == "status":
+            from .rust_bridge import rust_hooks_status
+            typer.echo(rust_hooks_status(root))
+            return
+
+    from .hooks import install_hooks, remove_hooks, status_hooks
 
     if action == "install":
         try:
@@ -1872,6 +1987,12 @@ def watch(
         )
         raise typer.Exit(1)
 
+    # Try Rust acceleration
+    from .rust_bridge import rust_watch_start, _rust_available
+    if _rust_available():
+        typer.echo(rust_watch_start(resolved_db, root_dir, interval))
+        return
+
     # Track changed files for debounced sync
     changed_files: list[str] = []
     changed_files_lock = threading.Lock()
@@ -2115,6 +2236,12 @@ def lsp_setup(
       tws-graph lsp setup
       tws-graph lsp setup --json
     """
+    # Try Rust acceleration
+    from .rust_bridge import rust_lsp_setup, _rust_available
+    if _rust_available():
+        typer.echo(rust_lsp_setup(os.path.abspath(DEFAULT_DB)))
+        return
+
     from tws_graph.lsp.discovery import discover_all
     from tws_graph.lsp.adapters import get_all_adapters
 
@@ -2326,13 +2453,22 @@ def cycles(
       tws-graph cycles
       tws-graph cycles --max 10
     """
-    db = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
-    if not db:
+    resolved_db = os.path.abspath(db or DEFAULT_DB)
+
+    # Try Rust acceleration
+    if os.path.exists(resolved_db):
+        from .rust_bridge import rust_cycles, _rust_available
+        if _rust_available():
+            typer.echo(rust_cycles(resolved_db))
+            return
+
+    db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
+    if not db_conn:
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
         raise typer.Exit(1)
 
     from tws_graph.analysis.architecture import detect_cycles
-    queries = QueryBuilder(db.conn)
+    queries = QueryBuilder(db_conn.conn)
     result = detect_cycles(queries, max_cycles=max_cycles)
 
     if not result:
@@ -2370,6 +2506,15 @@ def layers(
     例：
       tws-graph layers --layers '{"ui": {"pattern": "src/ui/**", "level": 1}, "data": {"pattern": "src/data/**", "level": 3}}'
     """
+    resolved_db = os.path.abspath(db or DEFAULT_DB)
+
+    # Try Rust acceleration
+    if os.path.exists(resolved_db):
+        from .rust_bridge import rust_layers, _rust_available
+        if _rust_available():
+            typer.echo(rust_layers(resolved_db))
+            return
+
     db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
     if not db_conn:
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
@@ -2432,6 +2577,15 @@ def metrics(
       tws-graph metrics
       tws-graph metrics --module src/tws_graph --sort cohesion -n 20
     """
+    resolved_db = os.path.abspath(db or DEFAULT_DB)
+
+    # Try Rust acceleration
+    if os.path.exists(resolved_db):
+        from .rust_bridge import rust_metrics, _rust_available
+        if _rust_available():
+            typer.echo(rust_metrics(resolved_db))
+            return
+
     db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
     if not db_conn:
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
@@ -2509,6 +2663,15 @@ def taint(
       tws-graph taint
       tws-graph taint --depth 10 --json
     """
+    resolved_db = os.path.abspath(db or DEFAULT_DB)
+
+    # Try Rust acceleration
+    if os.path.exists(resolved_db):
+        from .rust_bridge import rust_taint, _rust_available
+        if _rust_available():
+            typer.echo(rust_taint(resolved_db))
+            return
+
     db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
     if not db_conn:
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
@@ -2622,6 +2785,31 @@ def export_json_cmd(
 
 def _run_export(fmt: str, db, depth, kind, from_node, limit, output):
     """Common export logic."""
+    resolved_db = os.path.abspath(db or DEFAULT_DB)
+
+    # Try Rust acceleration
+    if os.path.exists(resolved_db):
+        from .rust_bridge import _rust_available
+        if _rust_available():
+            result = None
+            if fmt == "dot":
+                from .rust_bridge import rust_export_dot
+                result = rust_export_dot(resolved_db, from_node or "", depth, kind)
+            elif fmt == "mermaid":
+                from .rust_bridge import rust_export_mermaid
+                result = rust_export_mermaid(resolved_db, from_node or "", depth, kind)
+            elif fmt == "json":
+                from .rust_bridge import rust_export_json
+                result = rust_export_json(resolved_db, kind, limit)
+            if result is not None:
+                if output:
+                    with open(output, "w", encoding="utf-8") as f:
+                        f.write(result)
+                    typer.echo(f"已写入: {output}")
+                else:
+                    typer.echo(result)
+                return
+
     db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
     if not db_conn:
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
@@ -2678,6 +2866,15 @@ def query(
     """
     from .gql import parse_gql, execute_gql
 
+    resolved_db = os.path.abspath(db or DEFAULT_DB)
+
+    # Try Rust acceleration
+    if os.path.exists(resolved_db):
+        from .rust_bridge import rust_gql_query, _rust_available
+        if _rust_available():
+            typer.echo(rust_gql_query(resolved_db, gql_query))
+            return
+
     db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
     if db_conn is None:
         typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
@@ -2728,6 +2925,15 @@ def predict_impact(
       tws-graph predict-impact MyClass.my_method
       tws-graph predict-impact auth_login --depth 5 --json
     """
+    resolved_db = os.path.abspath(db or DEFAULT_DB)
+
+    # Try Rust acceleration
+    if os.path.exists(resolved_db):
+        from .rust_bridge import rust_predict_impact, _rust_available
+        if _rust_available():
+            typer.echo(rust_predict_impact(resolved_db, symbol))
+            return
+
     from .analysis.impact_prediction import predict_impact as do_predict
 
     db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
@@ -3003,6 +3209,15 @@ def health(
       tws-graph health --worst 10
       tws-graph health --top 5 --json
     """
+    resolved_db = os.path.abspath(db or DEFAULT_DB)
+
+    # Try Rust acceleration
+    if os.path.exists(resolved_db):
+        from .rust_bridge import rust_health, _rust_available
+        if _rust_available():
+            typer.echo(rust_health(resolved_db, worst if worst > 0 else 10))
+            return
+
     from .analysis.code_health import compute_health_scores
 
     db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None

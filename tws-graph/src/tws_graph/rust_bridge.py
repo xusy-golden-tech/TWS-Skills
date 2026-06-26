@@ -30,8 +30,11 @@ def rust_search(db_path: str, query: str, limit: int = 50) -> list[dict]:
     return search(db_path, query, limit)
 
 
-def rust_calls(db_path: str, node_name: str, inbound: bool = False, depth: int = 5) -> str:
-    """Find call targets/callers using Rust BFS."""
+def rust_calls(db_path: str, node_name: str, inbound: bool = True, depth: int = 5) -> str:
+    """Find call targets/callers using Rust BFS.
+
+    Default: inbound=True (show callers), matching CLI default behavior.
+    """
     from _core._core import calls
     return calls(db_path, node_name, inbound, depth)
 
@@ -90,10 +93,10 @@ def rust_health(db_path: str, worst: int = 10) -> str:
     return health(db_path, worst)
 
 
-def rust_lint(skills_dir: str) -> str:
+def rust_lint(skills_dir: str, json_output: bool = False) -> str:
     """Validate skill files using Rust."""
     from _core._core import lint_skills
-    return lint_skills(skills_dir)
+    return lint_skills(skills_dir, json_output)
 
 
 def rust_semantic_search(db_path: str, query: str, limit: int | None = None) -> str:

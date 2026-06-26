@@ -66,15 +66,15 @@ pub fn execute_search(
 
     // Tier 2: LIKE fallback
     if !text.is_empty() {
-        let like_results = db.search_like(text, kind, lang, limit)?;
+        let like_results = db.search_like(text, kind, lang, path, limit)?;
         if !like_results.is_empty() {
             return Ok(convert_like_results(like_results));
         }
     }
 
-    // Tier 3: Edit distance <= 2
-    if !text.is_empty() {
-        let edit_results = db.search_edit_distance(text, kind, lang, limit)?;
+    // Tier 3: Edit distance <= 2 (only for queries >= 3 chars — matches Python)
+    if !text.is_empty() && text.len() >= 3 {
+        let edit_results = db.search_edit_distance(text, kind, lang, path, limit)?;
         if !edit_results.is_empty() {
             return Ok(convert_edit_results(edit_results));
         }
@@ -82,7 +82,7 @@ pub fn execute_search(
 
     // No text — just apply kind/lang/path filters without text search
     if text.is_empty() {
-        let results = db.search_like("", kind, lang, limit)?;
+        let results = db.search_like("", kind, lang, path, limit)?;
         return Ok(convert_like_results(results));
     }
 
@@ -106,11 +106,11 @@ pub fn search_and_rank(
 // Conversion helpers
 // ---------------------------------------------------------------------------
 
-fn convert_fts5_results(
-    rows: Vec<(String, String, String, String, String, String, Option<f64>)>,
-) -> Vec<SearchResult> {
+type SearchRow = (String, String, String, String, String, String, Option<f64>, Option<i64>);
+
+fn convert_fts5_results(rows: Vec<SearchRow>) -> Vec<SearchResult> {
     rows.into_iter()
-        .map(|(id, kind, name, qualified_name, file_path, language, rank)| SearchResult {
+        .map(|(id, kind, name, qualified_name, file_path, language, rank, start_line)| SearchResult {
             id,
             name,
             qualified_name,
@@ -120,15 +120,14 @@ fn convert_fts5_results(
             signature: None,
             docstring: None,
             rank,
+            start_line,
         })
         .collect()
 }
 
-fn convert_like_results(
-    rows: Vec<(String, String, String, String, String, String, Option<f64>)>,
-) -> Vec<SearchResult> {
+fn convert_like_results(rows: Vec<SearchRow>) -> Vec<SearchResult> {
     rows.into_iter()
-        .map(|(id, kind, name, qualified_name, file_path, language, rank)| SearchResult {
+        .map(|(id, kind, name, qualified_name, file_path, language, rank, start_line)| SearchResult {
             id,
             name,
             qualified_name,
@@ -138,15 +137,14 @@ fn convert_like_results(
             signature: None,
             docstring: None,
             rank,
+            start_line,
         })
         .collect()
 }
 
-fn convert_edit_results(
-    rows: Vec<(String, String, String, String, String, String, Option<f64>)>,
-) -> Vec<SearchResult> {
+fn convert_edit_results(rows: Vec<SearchRow>) -> Vec<SearchResult> {
     rows.into_iter()
-        .map(|(id, kind, name, qualified_name, file_path, language, rank)| SearchResult {
+        .map(|(id, kind, name, qualified_name, file_path, language, rank, start_line)| SearchResult {
             id,
             name,
             qualified_name,
@@ -156,6 +154,7 @@ fn convert_edit_results(
             signature: None,
             docstring: None,
             rank,
+            start_line,
         })
         .collect()
 }

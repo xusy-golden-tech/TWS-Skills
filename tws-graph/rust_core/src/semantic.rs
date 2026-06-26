@@ -333,7 +333,7 @@ fn fetch_candidates(
     } else {
         // Step 2: Try individual terms via FTS5
         let terms: Vec<&str> = query.split_whitespace().filter(|t| t.len() >= 2).collect();
-        let mut merged: Vec<(String, String, String, String, String, String, Option<f64>)> = Vec::new();
+        let mut merged: Vec<(String, String, String, String, String, String, Option<f64>, Option<i64>)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
         for term in &terms {
@@ -351,15 +351,15 @@ fn fetch_candidates(
             merged
         } else {
             // Step 3: LIKE fallback
-            let like_rows = db.search_like(query, None, None, fts5_limit)?;
+            let like_rows = db.search_like(query, None, None, None, fts5_limit)?;
             if !like_rows.is_empty() {
                 like_rows
             } else {
                 // Step 4: LIKE with individual terms
-                let mut like_merged: Vec<(String, String, String, String, String, String, Option<f64>)> = Vec::new();
+                let mut like_merged: Vec<(String, String, String, String, String, String, Option<f64>, Option<i64>)> = Vec::new();
                 let mut seen = std::collections::HashSet::new();
                 for term in &terms {
-                    if let Ok(term_rows) = db.search_like(term, None, None, fts5_limit) {
+                    if let Ok(term_rows) = db.search_like(term, None, None, None, fts5_limit) {
                         for row in term_rows {
                             if seen.insert(row.0.clone()) {
                                 like_merged.push(row);
@@ -381,7 +381,7 @@ fn fetch_candidates(
 
     // Resolve in-degree counts in batch
     let mut candidates = Vec::with_capacity(raw_rows.len());
-    for (id, kind, name, qualified_name, file_path, language, rank) in raw_rows {
+    for (id, kind, name, qualified_name, file_path, language, rank, _start_line) in raw_rows {
         let in_degree = get_in_degree(conn, &id)?;
         let (docstring, signature) = get_extra_fields(conn, &id)?;
         candidates.push(Candidate {

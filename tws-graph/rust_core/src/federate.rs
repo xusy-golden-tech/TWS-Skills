@@ -159,7 +159,7 @@ impl FederationManager {
 
             // LIKE fallback if FTS5 returned nothing
             if rows.is_empty() && !query.is_empty() {
-                rows = match repo.db.search_like(query, kind, lang, 200) {
+                rows = match repo.db.search_like(query, kind, lang, None, 200) {
                     Ok(r) => r,
                     Err(_) => Vec::new(),
                 };
@@ -167,7 +167,7 @@ impl FederationManager {
 
             // Edit-distance fallback
             if rows.is_empty() && !query.is_empty() {
-                rows = match repo.db.search_edit_distance(query, kind, lang, 200) {
+                rows = match repo.db.search_edit_distance(query, kind, lang, None, 200) {
                     Ok(r) => r,
                     Err(_) => Vec::new(),
                 };
@@ -175,7 +175,7 @@ impl FederationManager {
 
             let results: Vec<Value> = rows
                 .into_iter()
-                .map(|(id, k, name, qname, fpath, language, rank)| {
+                .map(|(id, k, name, qname, fpath, language, rank, _start_line)| {
                     let mut obj = serde_json::Map::new();
                     obj.insert("id".into(), Value::String(id));
                     obj.insert("kind".into(), Value::String(k));
