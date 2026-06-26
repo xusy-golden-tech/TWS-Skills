@@ -1711,3 +1711,572 @@ target_compile_definitions(main PRIVATE PLATFORM_${PLATFORM})
 
         assert len(result.nodes) == 0
         assert not result.errors
+
+
+# ---------------------------------------------------------------------------
+# Nix
+# ---------------------------------------------------------------------------
+
+class TestNixExtractor:
+    """P52: Nix language extractor tests — let bindings, attrsets, functions,
+    inherit, import, with, rec attrsets, apply, select, nested structures."""
+
+    # -- helper --
+    @staticmethod
+    def _load_fixture():
+        import tree_sitter_language_pack
+        from tws_graph.indexer.nix_extractor import visit_nix
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "nix", "sample.nix")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        parser = tree_sitter_language_pack.get_parser("nix")
+        tree = parser.parse(code)
+        return visit_nix(fixture_path, code, tree)
+
+    # -- inline code tests (1-10) --
+
+    def test_let_binding(self):
+        """let bindings produce kind='variable' nodes."""
+        from tws_graph.indexer.nix_extractor import visit_nix
+        import tree_sitter_language_pack
+
+        code = """
+let
+  name = "test";
+  version = "1.0";
+  count = 42;
+in
+name
+"""
+        parser = tree_sitter_language_pack.get_parser("nix")
+        tree = parser.parse(code)
+        result = visit_nix("test/default.nix", code, tree)
+
+        vars_ = [n for n in result.nodes if n["kind"] == "variable"]
+        assert len(vars_) >= 3, f"Expected >=3 variable nodes, got {len(vars_)}"
+        names = {n["name"] for n in vars_}
+        assert "name" in names, f"'name' not found: {names}"
+        assert "version" in names, f"'version' not found: {names}"
+        assert "count" in names, f"'count' not found: {names}"
+
+    def test_attrset(self):
+        """attrset_expression produces kind='class' with property children."""
+        from tws_graph.indexer.nix_extractor import visit_nix
+        import tree_sitter_language_pack
+
+        code = """
+{
+  name = "my-package";
+  version = "2.0";
+  src = ./src;
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("nix")
+        tree = parser.parse(code)
+        result = visit_nix("test/default.nix", code, tree)
+
+        classes = [n for n in result.nodes if n["kind"] == "class"]
+        assert len(classes) >= 1, f"Expected >=1 class node, got {len(classes)}"
+
+        props = [n for n in result.nodes if n["kind"] == "property"]
+        assert len(props) >= 3, f"Expected >=3 property nodes, got {len(props)}"
+        names = {n["name"] for n in props}
+        assert "name" in names
+        assert "version" in names
+        assert "src" in names
+
+    def test_rec_attrset(self):
+        """rec_attrset_expression produces kind='class' nodes."""
+        from tws_graph.indexer.nix_extractor import visit_nix
+        import tree_sitter_language_pack
+
+        code = """
+rec {
+  a = 1;
+  b = a + 1;
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("nix")
+        tree = parser.parse(code)
+        result = visit_nix("test/default.nix", code, tree)
+
+        classes = [n for n in result.nodes if n["kind"] == "class"]
+        assert len(classes) >= 1, f"Expected >=1 class node from rec attrset, got {len(classes)}"
+
+        props = [n for n in result.nodes if n["kind"] == "property"]
+        assert len(props) >= 2, f"Expected >=2 properties in rec attrset, got {len(props)}"
+
+    def test_function(self):
+        """function_expression in a binding produces kind='function'."""
+        from tws_graph.indexer.nix_extractor import visit_nix
+        import tree_sitter_language_pack
+
+        code = """
+let
+  greet = name: "Hello, ${name}";
+  add = a: b: a + b;
+in
+greet
+"""
+        parser = tree_sitter_language_pack.get_parser("nix")
+        tree = parser.parse(code)
+        result = visit_nix("test/default.nix", code, tree)
+
+        funcs = [n for n in result.nodes if n["kind"] == "function"]
+        assert len(funcs) >= 2, f"Expected >=2 function nodes, got {len(funcs)}"
+        names = {n["name"] for n in funcs}
+        assert "greet" in names, f"'greet' not found: {names}"
+        assert "add" in names, f"'add' not found: {names}"
+
+    def test_inherit(self):
+        """inherit (scope) attrs produce imports-like edges."""
+        from tws_graph.indexer.nix_extractor import visit_nix
+        import tree_sitter_language_pack
+
+        code = """
+let
+  foo = "bar";
+  baz = 42;
+in
+{
+  inherit foo baz;
+  inherit (pkgs.stdenv) mkDerivation;
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("nix")
+        tree = parser.parse(code)
+        result = visit_nix("test/default.nix", code, tree)
+
+        import_edges = [e for e in result.edges if e["kind"] == "imports"]
+        target_texts = [e.get("target_text", "") for e in import_edges]
+        # Should have edges for inherit (from parent or from specified scope)
+        assert len(import_edges) >= 2, \
+            f"Expected >=2 import edges from inherit, got {len(import_edges)}: {target_texts}"
+
+    def test_import(self):
+        """import expressions produce imports edges."""
+        from tws_graph.indexer.nix_extractor import visit_nix
+        import tree_sitter_language_pack
+
+        code = """
+let
+  pkgs = import <nixpkgs> {};
+  lib = import ./lib.nix;
+in
+pkgs
+"""
+        parser = tree_sitter_language_pack.get_parser("nix")
+        tree = parser.parse(code)
+        result = visit_nix("test/default.nix", code, tree)
+
+        import_edges = [e for e in result.edges if e["kind"] == "imports"]
+        target_texts = [e.get("target_text", "") for e in import_edges]
+        assert len(import_edges) >= 2, \
+            f"Expected >=2 import edges, got {len(import_edges)}: {target_texts}"
+        assert any("<nixpkgs>" == t or "nixpkgs" in t for t in target_texts), \
+            f"'nixpkgs' not in imports: {target_texts}"
+        assert any("lib.nix" in t for t in target_texts), \
+            f"'lib.nix' not in imports: {target_texts}"
+
+    def test_with_expression(self):
+        """with expressions create scope import context."""
+        from tws_graph.indexer.nix_extractor import visit_nix
+        import tree_sitter_language_pack
+
+        code = """
+with pkgs; [
+  hello
+  gcc
+]
+"""
+        parser = tree_sitter_language_pack.get_parser("nix")
+        tree = parser.parse(code)
+        result = visit_nix("test/default.nix", code, tree)
+
+        import_edges = [e for e in result.edges if e["kind"] == "imports"]
+        target_texts = [e.get("target_text", "") for e in import_edges]
+        assert len(import_edges) >= 1, \
+            f"Expected >=1 import edge from with expression, got {len(import_edges)}: {target_texts}"
+        assert any("pkgs" in t for t in target_texts), \
+            f"'pkgs' not in with imports: {target_texts}"
+
+    def test_apply_expression(self):
+        """apply_expression (function call) produces calls edges."""
+        from tws_graph.indexer.nix_extractor import visit_nix
+        import tree_sitter_language_pack
+
+        code = """
+let
+  f = x: x + 1;
+  result = f 5;
+  multi = f (f 3);
+in
+result
+"""
+        parser = tree_sitter_language_pack.get_parser("nix")
+        tree = parser.parse(code)
+        result = visit_nix("test/default.nix", code, tree)
+
+        call_edges = [e for e in result.edges if e["kind"] == "calls"]
+        assert len(call_edges) >= 2, \
+            f"Expected >=2 call edges, got {len(call_edges)}"
+
+    def test_select_expression(self):
+        """select_expression (expr.attr) is detected during traversal."""
+        from tws_graph.indexer.nix_extractor import visit_nix
+        import tree_sitter_language_pack
+
+        code = """
+let
+  value = pkgs.stdenv.system;
+  libFunc = pkgs.lib.hasAttr "key" attrs;
+in
+value
+"""
+        parser = tree_sitter_language_pack.get_parser("nix")
+        tree = parser.parse(code)
+        result = visit_nix("test/default.nix", code, tree)
+
+        # Select expressions inside bindings should produce calls edges
+        # pkgs.lib.hasAttr call
+        call_edges = [e for e in result.edges if e["kind"] == "calls"]
+        # At minimum we should detect function applications
+        assert len(result.nodes) >= 2, \
+            f"Expected at least variable + bindings, got {len(result.nodes)}"
+
+    def test_nested_structure(self):
+        """Nested let-in-attrsets are extracted correctly."""
+        from tws_graph.indexer.nix_extractor import visit_nix
+        import tree_sitter_language_pack
+
+        code = """
+let
+  outer = "outer";
+  inner = let
+    x = 10;
+    y = 20;
+  in {
+    sum = x + y;
+    config = {
+      name = outer;
+      value = x;
+    };
+  };
+in
+inner
+"""
+        parser = tree_sitter_language_pack.get_parser("nix")
+        tree = parser.parse(code)
+        result = visit_nix("test/default.nix", code, tree)
+
+        # Should have variables from both outer and inner let
+        vars_ = [n for n in result.nodes if n["kind"] == "variable"]
+        names = {n["name"] for n in vars_}
+        assert "outer" in names, f"'outer' not found: {names}"
+        assert "x" in names, f"'x' not found: {names}"
+        assert "y" in names, f"'y' not found: {names}"
+
+        # Should have class from attrset
+        classes = [n for n in result.nodes if n["kind"] == "class"]
+        assert len(classes) >= 2, \
+            f"Expected >=2 class nodes (nested attrset), got {len(classes)}"
+
+        # Should have properties
+        props = [n for n in result.nodes if n["kind"] == "property"]
+        assert len(props) >= 2, f"Expected >=2 property nodes, got {len(props)}"
+
+    # -- fixture tests (11-14) --
+
+    def test_fixture_imports(self):
+        """Fixture contains expected import edges."""
+        result = self._load_fixture()
+
+        import_edges = [e for e in result.edges if e["kind"] == "imports"]
+        target_texts = [e.get("target_text", "") for e in import_edges]
+
+        assert len(import_edges) >= 5, \
+            f"Expected >=5 import edges, got {len(import_edges)}: {target_texts}"
+        assert any("nixpkgs" in t for t in target_texts), \
+            f"'nixpkgs' not in imports: {target_texts}"
+        assert any("lib.nix" in t for t in target_texts), \
+            f"'lib.nix' not in imports: {target_texts}"
+        assert any("helper.nix" in t for t in target_texts), \
+            f"'helper.nix' not in imports: {target_texts}"
+
+    def test_fixture_calls(self):
+        """Fixture contains expected call edges."""
+        result = self._load_fixture()
+
+        call_edges = [e for e in result.edges if e["kind"] == "calls"]
+        assert len(call_edges) >= 3, \
+            f"Expected >=3 call edges, got {len(call_edges)}"
+
+        target_texts = [e.get("target_text", "") for e in call_edges]
+        assert any("greet" in t for t in target_texts), \
+            f"'greet' call not found: {target_texts}"
+        assert any("add" in t for t in target_texts), \
+            f"'add' call not found: {target_texts}"
+
+    def test_fixture_nodes(self):
+        """Fixture has expected node counts and kinds."""
+        result = self._load_fixture()
+
+        kinds = {n["kind"] for n in result.nodes}
+        assert "variable" in kinds, f"Expected 'variable' nodes, got kinds: {kinds}"
+        assert "function" in kinds, f"Expected 'function' nodes, got kinds: {kinds}"
+        assert "class" in kinds, f"Expected 'class' nodes, got kinds: {kinds}"
+        assert "property" in kinds, f"Expected 'property' nodes, got kinds: {kinds}"
+
+        vars_ = [n for n in result.nodes if n["kind"] == "variable"]
+        var_names = {n["name"] for n in vars_}
+        for name in ("packageName", "packageVersion", "enableDebug"):
+            assert name in var_names, f"'{name}' variable not found: {var_names}"
+
+        funcs = [n for n in result.nodes if n["kind"] == "function"]
+        func_names = {n["name"] for n in funcs}
+        for name in ("greet", "add", "mkConfig"):
+            assert name in func_names, f"'{name}' function not found: {func_names}"
+
+        props = [n for n in result.nodes if n["kind"] == "property"]
+        assert len(props) >= 8, \
+            f"Expected >=8 property nodes, got {len(props)}"
+
+    def test_empty_file(self):
+        """Empty Nix file produces no nodes and no errors."""
+        from tws_graph.indexer.nix_extractor import visit_nix
+        import tree_sitter_language_pack
+
+        code = "# Just a comment\n"
+        parser = tree_sitter_language_pack.get_parser("nix")
+        tree = parser.parse(code)
+        result = visit_nix("empty.nix", code, tree)
+
+        assert len(result.nodes) == 0
+        assert not result.errors
+
+
+# ---------------------------------------------------------------------------
+# Zig
+# ---------------------------------------------------------------------------
+
+class TestZigExtractor:
+    """P52: Zig language extractor tests — structs, enums, error sets, unions,
+    functions, tests, usingnamespace, comptime, visibility."""
+
+    # -- helper --
+    @staticmethod
+    def _load_fixture():
+        import tree_sitter_language_pack
+        from tws_graph.indexer.zig_extractor import visit_zig
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "zig", "sample.zig")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        parser = tree_sitter_language_pack.get_parser("zig")
+        tree = parser.parse(code)
+        return visit_zig(fixture_path, code, tree)
+
+    # -- inline code tests (1-5) --
+
+    def test_function(self):
+        """Function declaration extracts kind='function' with signature."""
+        from tws_graph.indexer.zig_extractor import visit_zig
+        import tree_sitter_language_pack
+
+        code = """
+fn add(a: i32, b: i32) i32 {
+    return a + b;
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("zig")
+        tree = parser.parse(code)
+        result = visit_zig("src/math.zig", code, tree)
+
+        funcs = [n for n in result.nodes if n["kind"] == "function"]
+        assert len(funcs) == 1, f"Expected 1 function, got {len(funcs)}"
+        assert funcs[0]["name"] == "add"
+
+    def test_struct(self):
+        """Struct declaration extracts kind='class' with property fields."""
+        from tws_graph.indexer.zig_extractor import visit_zig
+        import tree_sitter_language_pack
+
+        code = """
+pub const Point = struct {
+    x: f64,
+    y: f64,
+};
+"""
+        parser = tree_sitter_language_pack.get_parser("zig")
+        tree = parser.parse(code)
+        result = visit_zig("src/point.zig", code, tree)
+
+        classes = [n for n in result.nodes if n["kind"] == "class"]
+        assert len(classes) == 1
+        assert classes[0]["name"] == "Point"
+
+        props = [n for n in result.nodes if n["kind"] == "property"]
+        assert len(props) >= 2
+
+    def test_enum(self):
+        """Enum declaration extracts kind='enum'."""
+        from tws_graph.indexer.zig_extractor import visit_zig
+        import tree_sitter_language_pack
+
+        code = """
+pub const Color = enum {
+    red,
+    green,
+    blue,
+};
+"""
+        parser = tree_sitter_language_pack.get_parser("zig")
+        tree = parser.parse(code)
+        result = visit_zig("src/color.zig", code, tree)
+
+        enums = [n for n in result.nodes if n["kind"] == "enum"]
+        assert len(enums) == 1, f"Expected 1 enum, got {len(enums)}"
+        assert enums[0]["name"] == "Color"
+
+    def test_error_set(self):
+        """Error set extracts kind='enum'."""
+        from tws_graph.indexer.zig_extractor import visit_zig
+        import tree_sitter_language_pack
+
+        code = """
+pub const AppError = error{
+    NotFound,
+    PermissionDenied,
+};
+"""
+        parser = tree_sitter_language_pack.get_parser("zig")
+        tree = parser.parse(code)
+        result = visit_zig("src/errors.zig", code, tree)
+
+        enums = [n for n in result.nodes if n["kind"] == "enum"]
+        assert len(enums) == 1, f"Expected 1 enum for error set, got {len(enums)}"
+        assert enums[0]["name"] == "AppError"
+
+    def test_test_declaration(self):
+        """Test block extracts kind='function'."""
+        from tws_graph.indexer.zig_extractor import visit_zig
+        import tree_sitter_language_pack
+
+        code = '''
+test "simple check" {
+    try std.testing.expect(1 + 1 == 2);
+}
+'''
+        parser = tree_sitter_language_pack.get_parser("zig")
+        tree = parser.parse(code)
+        result = visit_zig("src/test.zig", code, tree)
+
+        funcs = [n for n in result.nodes if n["kind"] == "function"]
+        assert len(funcs) >= 1, f"Expected >=1 function for test, got {len(funcs)}"
+
+    # -- fixture tests (6-12) --
+
+    def test_call_edges(self):
+        """Function and method calls produce 'calls' edges."""
+        result = self._load_fixture()
+
+        call_edges = [e for e in result.edges if e["kind"] == "calls"]
+        assert len(call_edges) > 0, f"Expected calls edges, got 0"
+
+        target_texts = [e.get("target_text", "") for e in call_edges]
+        # User.init should be called from createUser
+        assert any("init" in t for t in target_texts), \
+            f"'init' call not found in: {target_texts}"
+        # validateEmail should be called from test
+        assert any("validateEmail" in t for t in target_texts), \
+            f"'validateEmail' call not found in: {target_texts}"
+
+    def test_import_edges(self):
+        """@import declarations produce 'imports' edges."""
+        result = self._load_fixture()
+
+        import_edges = [e for e in result.edges if e["kind"] == "imports"]
+        target_texts = [e.get("target_text", "") for e in import_edges]
+
+        assert len(import_edges) >= 2, \
+            f"Expected >=2 import edges, got {len(import_edges)}: {target_texts}"
+        assert any("std" in t for t in target_texts), \
+            f"'std' not in imports: {target_texts}"
+        assert any("helpers.zig" in t for t in target_texts), \
+            f"'helpers.zig' not in imports: {target_texts}"
+
+    def test_usingnamespace(self):
+        """usingnamespace produces imports-like edge."""
+        result = self._load_fixture()
+
+        import_edges = [e for e in result.edges if e["kind"] == "imports"]
+        target_texts = [e.get("target_text", "") for e in import_edges]
+        assert any("helpers.zig" in t for t in target_texts), \
+            f"'helpers.zig' not in usingnamespace imports: {target_texts}"
+
+    def test_visibility(self):
+        """pub keyword produces 'public' visibility, no pub produces 'private'."""
+        result = self._load_fixture()
+
+        nodes_by_name = {}
+        for n in result.nodes:
+            nodes_by_name.setdefault(n["name"], []).append(n)
+
+        # Public function
+        create_user_nodes = nodes_by_name.get("createUser", [])
+        assert len(create_user_nodes) > 0, "createUser not found"
+        assert create_user_nodes[0]["visibility"] == "public", \
+            f"createUser visibility={create_user_nodes[0]['visibility']}"
+
+        # Private function
+        validate_nodes = nodes_by_name.get("validateEmail", [])
+        assert len(validate_nodes) > 0, "validateEmail not found"
+        assert validate_nodes[0]["visibility"] == "private", \
+            f"validateEmail visibility={validate_nodes[0]['visibility']}"
+
+    def test_struct_fields(self):
+        """Container fields inside struct produce kind='property' with contains edges."""
+        result = self._load_fixture()
+
+        props = [n for n in result.nodes if n["kind"] == "property"]
+        assert len(props) >= 4, f"Expected >=4 properties, got {len(props)}"
+        prop_names = {n["name"] for n in props}
+        assert "id" in prop_names
+        assert "name" in prop_names
+        assert "email" in prop_names
+        assert "status" in prop_names
+
+        contains_edges = [e for e in result.edges if e["kind"] == "contains"]
+        assert len(contains_edges) > 0
+
+    def test_struct_methods(self):
+        """Methods declared inside struct produce kind='function' nodes."""
+        result = self._load_fixture()
+
+        funcs = [n for n in result.nodes if n["kind"] == "function"]
+        func_names = {n["name"] for n in funcs}
+        assert "init" in func_names, f"'init' method not found in: {func_names}"
+        assert "isActive" in func_names, f"'isActive' not found in: {func_names}"
+        assert "setStatus" in func_names, f"'setStatus' not found in: {func_names}"
+
+    def test_variable_reads_writes(self):
+        """Function bodies produce reads and writes edges for variable usage."""
+        result = self._load_fixture()
+
+        read_edges = [e for e in result.edges if e["kind"] == "reads"]
+        write_edges = [e for e in result.edges if e["kind"] == "writes"]
+
+        assert len(read_edges) > 0, f"Expected read edges, got 0"
+        assert len(write_edges) > 0, f"Expected write edges, got 0"
+
+        read_targets = [e.get("target_text", "") for e in read_edges]
+        write_targets = [e.get("target_text", "") for e in write_edges]
+
+        # Check that variables from the fixture are read/written
+        assert any("email" in t for t in read_targets) or any("valid" in t for t in read_targets), \
+            f"Expected variable reads, got: {read_targets[:20]}"
+        assert any("user" in t for t in write_targets) or any("globalCounter" in t for t in write_targets), \
+            f"Expected variable writes, got: {write_targets[:20]}"
