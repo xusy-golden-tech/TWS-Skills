@@ -1,8 +1,0 @@
-D:\TWS-Skills\tws-graph\rust_core\target\debug\deps\tree_sitter_cpp-c2c726dd06c068de.d: C:\Users\xusy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-cpp-0.23.4\bindings\rust\lib.rs C:\Users\xusy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-cpp-0.23.4\bindings\rust\../../src/node-types.json C:\Users\xusy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-cpp-0.23.4\bindings\rust\../../queries/highlights.scm C:\Users\xusy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-cpp-0.23.4\bindings\rust\../../queries/tags.scm
-
-D:\TWS-Skills\tws-graph\rust_core\target\debug\deps\libtree_sitter_cpp-c2c726dd06c068de.rmeta: C:\Users\xusy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-cpp-0.23.4\bindings\rust\lib.rs C:\Users\xusy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-cpp-0.23.4\bindings\rust\../../src/node-types.json C:\Users\xusy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-cpp-0.23.4\bindings\rust\../../queries/highlights.scm C:\Users\xusy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-cpp-0.23.4\bindings\rust\../../queries/tags.scm
-
-C:\Users\xusy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-cpp-0.23.4\bindings\rust\lib.rs:
-C:\Users\xusy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-cpp-0.23.4\bindings\rust\../../src/node-types.json:
-C:\Users\xusy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-cpp-0.23.4\bindings\rust\../../queries/highlights.scm:
-C:\Users\xusy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tree-sitter-cpp-0.23.4\bindings\rust\../../queries/tags.scm:

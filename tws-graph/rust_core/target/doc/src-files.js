@@ -1,2 +1,0 @@
-createSrcSidebar('[["cfg_if",["",[],["lib.rs"]]],["tree_sitter_language",["",[],["language.rs"]]],["unicode_ident",["",[],["lib.rs","tables.rs"]]],["windows_link",["",[],["lib.rs"]]]]');
-//{"start":19,"fragment_lengths":[29,49,49,36]}
