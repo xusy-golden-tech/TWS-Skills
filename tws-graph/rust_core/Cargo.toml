@@ -47,7 +47,11 @@ tree-sitter-containerfile = "*"
 tree-sitter-yaml = "*"
 tree-sitter-hcl = "*"
 tree-sitter-json = "*"
-# tree-sitter-proto = "*"
+tree-sitter-proto = "0.1"
+tree-sitter-groovy = "0.1"
+tree-sitter-zig = "1"
+tree-sitter-nix = "0.3"
+tree-sitter-cmake = "0.7"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
