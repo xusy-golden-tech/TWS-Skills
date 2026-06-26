@@ -19,8 +19,10 @@ mod hooks;
 mod indexer;
 mod lint;
 mod lsp;
+mod mcp;
 mod query;
 mod services;
+mod snapshot;
 mod watcher;
 
 use pyo3::prelude::*;
