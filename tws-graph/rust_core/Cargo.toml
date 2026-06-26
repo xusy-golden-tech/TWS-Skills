@@ -1,0 +1,65 @@
+[package]
+name = "tws-graph-core"
+version = "0.1.0"
+edition = "2021"
+description = "TWS CodeGraph Rust core library with PyO3 bindings"
+license = "MIT"
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+tree-sitter = "0.25"
+
+# Tree-sitter language parsers — commented out until extractors import them.
+# Each language crate uses `links = "tree-sitter"` which forces a single version
+# in the dep graph. These cover 28+ languages; uncomment as extractors are
+# implemented and verify version compatibility with the core `tree-sitter` dep.
+#
+# tree-sitter-python = "*"
+# tree-sitter-typescript = "*"
+# tree-sitter-java = "*"
+# tree-sitter-go = "*"
+# tree-sitter-rust = "*"
+# tree-sitter-kotlin = "*"
+# tree-sitter-php = "*"
+# tree-sitter-ruby = "*"
+# tree-sitter-c = "*"
+# tree-sitter-cpp = "*"
+# tree-sitter-c-sharp = "*"
+# tree-sitter-scala = "*"
+# tree-sitter-elixir = "*"
+# tree-sitter-haskell = "*"
+# tree-sitter-clojure = "*"
+# tree-sitter-lua = "*"
+# tree-sitter-bash = "*"
+# tree-sitter-dart = "*"
+# tree-sitter-swift = "*"
+# tree-sitter-html = "*"
+# tree-sitter-css = "*"
+# tree-sitter-markdown = "*"
+# tree-sitter-toml = "*"
+# tree-sitter-sql = "*"
+# tree-sitter-dockerfile = "*"
+# tree-sitter-yaml = "*"
+# tree-sitter-hcl = "*"
+# tree-sitter-json = "*"
+# tree-sitter-proto = "*"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
+sha2 = "0.10"
+regex = "1"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
