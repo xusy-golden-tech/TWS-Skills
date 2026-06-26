@@ -1249,14 +1249,38 @@ def search(
 
     queries = QueryBuilder(db.conn)
 
+    # Check for federation
+    from .federation import load_federation
+    fed_registry = load_federation(".") if db_path is None else load_federation(
+        os.path.dirname(os.path.dirname(os.path.abspath(db_path)))
+    )
+
     # Detect if query has field qualifiers
     has_qualifiers = any(
         f in query_str for f in ("kind:", "lang:", "language:", "path:", "visibility:", "framework:")
     )
     if has_qualifiers:
-        results = queries.search_nodes_field_qualified(query_str, limit=limit)
+        results = list(queries.search_nodes_field_qualified(query_str, limit=limit))
     else:
-        results = queries.search_nodes(query_str, limit=limit)
+        results = list(queries.search_nodes(query_str, limit=limit))
+
+    # Federation: cross-repo search
+    if fed_registry.is_active():
+        current_db = db_path or DEFAULT_DB
+        if not os.path.isabs(current_db):
+            current_db = os.path.join(os.getcwd(), current_db)
+        fed_results = _cross_repo_search_federated(
+            query_str, limit, queries, fed_registry, current_db,
+        )
+        if fed_results:
+            # Merge and deduplicate by node id
+            seen_ids = {r["id"] for r in results}
+            for fr in fed_results:
+                if fr.get("id") and fr["id"] not in seen_ids:
+                    seen_ids.add(fr["id"])
+                    results.append(fr)
+            # Re-sort by any score if available, then limit
+            results = results[:limit]
 
     if not results:
         typer.echo(f"未找到匹配: {query_str}")
@@ -1273,8 +1297,9 @@ def search(
             line = row["start_line"]
             lang = row["language"]
             sig = row["signature"] or ""
+            repo_tag = f" [{row['_repo']}]" if row.keys() and "_repo" in row.keys() else ""
             sig_short = f"  ({sig[:50]}...)" if sig and len(sig) > 50 else f"  ({sig})" if sig else ""
-            typer.echo(f"  {name} [{kind}] ({lang}) {fpath}:{line}{sig_short}")
+            typer.echo(f"  {name} [{kind}] ({lang}) {fpath}:{line}{repo_tag}{sig_short}")
 
 
 # ============================================================================
@@ -2697,6 +2722,198 @@ def predict_impact(
 # ============================================================================
 # Code health command (P41 v5.5.0)
 # ============================================================================
+
+# ============================================================================
+# federate
+# ============================================================================
+
+@app.command()
+def federate(
+    action: str = typer.Argument(..., help="add | remove | list"),
+    path: Optional[str] = typer.Argument(None, help="仓库路径 (add) 或仓库名 (remove)"),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="联邦仓库的逻辑名称"),
+    db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+):
+    """管理多仓库联邦。
+
+    将多个已索引的仓库加入联邦，使 search/calls/impact/trace 等命令
+    能够跨仓库查询。
+
+    示例：
+      tws-graph federate add /path/to/other-repo --name repo-b
+      tws-graph federate remove repo-b
+      tws-graph federate list
+    """
+    from .federation import FederationRegistry, load_federation
+
+    # Determine project root from db_path or cwd
+    if db_path:
+        resolved_db = os.path.abspath(db_path)
+        # Navigate from .tws/codegraph/index.db to project root
+        codegraph_dir = os.path.dirname(resolved_db)
+    else:
+        codegraph_dir = os.path.abspath(DEFAULT_DB).replace("\\", "/")
+        # DEFAULT_DB is relative; resolve from cwd
+        cwd = os.getcwd()
+        codegraph_dir = os.path.join(cwd, ".tws", "codegraph")
+
+    # Ensure codegraph_dir exists
+    os.makedirs(codegraph_dir, exist_ok=True)
+
+    registry = FederationRegistry(codegraph_dir)
+
+    if action == "add":
+        if not path:
+            typer.echo("错误: 'add' 需要提供仓库路径。用法: tws-graph federate add <path> [--name <name>]", err=True)
+            raise typer.Exit(1)
+        repo_path = os.path.abspath(path)
+        repo_name = name or os.path.basename(repo_path)
+        try:
+            info = registry.add(repo_name, repo_path)
+            typer.echo(f"已添加联邦仓库: '{info.name}' -> {info.path}")
+            typer.echo(f"  索引库: {info.db}")
+        except FileNotFoundError as e:
+            typer.echo(f"错误: {e}", err=True)
+            raise typer.Exit(1)
+        except ValueError as e:
+            typer.echo(f"错误: {e}", err=True)
+            raise typer.Exit(1)
+
+    elif action == "remove":
+        if not path:
+            typer.echo("错误: 'remove' 需要提供仓库名。用法: tws-graph federate remove <name>", err=True)
+            raise typer.Exit(1)
+        try:
+            registry.remove(path)
+            typer.echo(f"已移除联邦仓库: '{path}'")
+        except KeyError as e:
+            typer.echo(f"错误: {e}", err=True)
+            raise typer.Exit(1)
+
+    elif action == "list":
+        repos = registry.list_all()
+        if not repos:
+            typer.echo("(无联邦仓库)")
+        else:
+            typer.echo(f"联邦仓库 ({len(repos)} 个):")
+            for rname, rinfo in repos.items():
+                db_exists = "OK" if os.path.isfile(rinfo["db"]) else "MISSING"
+                typer.echo(f"  {rname}: {rinfo['path']}  [{db_exists}]")
+
+    else:
+        typer.echo(f"未知动作: {action}。可用: add, remove, list", err=True)
+        raise typer.Exit(1)
+
+
+def _cross_repo_search_federated(
+    query_str: str,
+    limit: int,
+    queries,
+    federation,
+    current_db_path: str,
+) -> list[dict]:
+    """Search across federated databases using SQLite ATTACH + UNION.
+
+    Args:
+        query_str: The raw query string (may contain field:value qualifiers).
+        limit: Maximum results.
+        queries: QueryBuilder for the local database (used for parsing qualifiers).
+        federation: FederationRegistry instance.
+        current_db_path: Path to the local index.db (for the 'local' alias).
+
+    Returns:
+        List of result rows with an extra ``_repo`` key indicating source.
+    """
+    import sqlite3 as _sqlite3
+
+    # Build a temporary in-memory connection and ATTACH all DBs
+    mem = _sqlite3.connect(":memory:")
+    mem.row_factory = _sqlite3.Row
+
+    fed_aliases: list[str] = []
+    local_attached = False
+
+    try:
+        # ATTACH local DB
+        if os.path.isfile(current_db_path):
+            mem.execute(f"ATTACH DATABASE '{current_db_path}' AS local")
+            local_attached = True
+
+        # ATTACH federated DBs
+        fed_aliases = federation.attach_all(mem, alias_prefix="fed_")
+
+        if not fed_aliases:
+            return []
+
+        # Build UNION ALL query
+        from .store.query_builder import _parse_field_qualifiers
+        from .store.query_builder import QueryBuilder as QB
+
+        qualifiers = _parse_field_qualifiers(query_str)
+        text_terms = qualifiers["text"]
+        filters = qualifiers["filters"]
+
+        # Build FTS5 match expression
+        fts_text = " ".join(text_terms)
+        fts_match = QB._build_fts_query(fts_text) if fts_text else "*"
+
+        # Build WHERE clause for field filters
+        where_parts: list[str] = []
+        for field, value in filters.items():
+            if field == "kind":
+                # Escape single quotes in value
+                safe_val = value.replace("'", "''")
+                where_parts.append(f"n.kind = '{safe_val}'")
+            elif field in ("lang", "language"):
+                safe_val = value.replace("'", "''")
+                where_parts.append(f"n.language = '{safe_val}'")
+            elif field == "path":
+                safe_val = value.replace("'", "''")
+                where_parts.append(f"n.file_path LIKE '%{safe_val}%'")
+        where_clause = (" AND " + " AND ".join(where_parts)) if where_parts else ""
+
+        # Build UNION ALL across all DBs.
+        # Each subquery uses a derived table to allow per-DB ORDER BY + LIMIT,
+        # then the outer query UNIONs and applies a final LIMIT.
+        union_parts: list[str] = []
+        inner_template = (
+            "SELECT * FROM ("
+            "SELECT n.*, '{repo}' AS _repo "
+            "FROM {schema}.nodes_fts AS f "
+            "JOIN {schema}.nodes AS n ON f.rowid = n.rowid "
+            "WHERE nodes_fts MATCH '{match}'{where} "
+            "ORDER BY rank "
+            "LIMIT {lim}"
+            ")"
+        )
+        # Local DB
+        if local_attached and os.path.isfile(current_db_path):
+            union_parts.append(inner_template.format(
+                repo="local", schema="local", match=fts_match,
+                where=where_clause, lim=limit,
+            ))
+        # Federated DBs
+        for alias in fed_aliases:
+            union_parts.append(inner_template.format(
+                repo=alias, schema=alias, match=fts_match,
+                where=where_clause, lim=limit,
+            ))
+
+        union_sql = " UNION ALL ".join(union_parts) + f" LIMIT {limit}"
+        rows = mem.execute(union_sql).fetchall()
+        return [dict(r) for r in rows]
+
+    except Exception:
+        return []
+    finally:
+        federation.detach_all(mem, fed_aliases)
+        if local_attached:
+            try:
+                mem.execute("DETACH DATABASE local")
+            except Exception:
+                pass
+        mem.close()
+
 
 @app.command()
 def health(
