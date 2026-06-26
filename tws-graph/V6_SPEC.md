@@ -214,4 +214,4 @@
 - [x] ACCEPT-GLOBAL-2: tws-graph lint 0 错误 ✅ (213 pre-existing warnings, no new)
 - [x] ACCEPT-GLOBAL-3: 对 TWS-Skills 项目索引成功 ✅
 - [x] ACCEPT-GLOBAL-4: 所有 extractor 测试使用真实项目代码模式 ✅ (P51 fixtures from GitHub projects)
-- [ ] ACCEPT-GLOBAL-5: 版本号升至 6.0.0 ⬜
+- [x] ACCEPT-GLOBAL-5: 版本号升至 6.0.0 ✅
