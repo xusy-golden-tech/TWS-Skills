@@ -667,3 +667,507 @@ fn output(v: i32) { println!("{}", v); }
             f"'result' variable read not found: {read_targets}"
         assert any("buffer" in t for t in write_targets), \
             f"'buffer' variable write not found: {write_targets}"
+
+
+# ---------------------------------------------------------------------------
+# Dart
+# ---------------------------------------------------------------------------
+
+class TestDartExtractor:
+    """P52: Dart language extractor tests — classes, mixins, enums, annotations."""
+
+    # -- helper --
+    @staticmethod
+    def _load_fixture():
+        import tree_sitter_language_pack
+        from tws_graph.indexer.dart_extractor import visit_dart
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "dart", "sample.dart")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        parser = tree_sitter_language_pack.get_parser("dart")
+        tree = parser.parse(code)
+        return visit_dart(fixture_path, code, tree)
+
+    # -- inline code tests (1-5) --
+
+    def test_simple_class(self):
+        from tws_graph.indexer.dart_extractor import visit_dart
+        import tree_sitter_language_pack
+
+        code = """
+class Counter {
+  int _value = 0;
+
+  void increment() {
+    _value++;
+  }
+
+  int get value => _value;
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("dart")
+        tree = parser.parse(code)
+        result = visit_dart("src/counter.dart", code, tree)
+
+        classes = [n for n in result.nodes if n["kind"] == "class"]
+        assert len(classes) == 1
+        assert classes[0]["name"] == "Counter"
+
+        methods = [n for n in result.nodes if n["kind"] == "method"]
+        assert len(methods) >= 2  # increment + value getter
+
+        props = [n for n in result.nodes if n["kind"] == "property"]
+        assert len(props) >= 1  # _value
+
+    def test_abstract_class(self):
+        from tws_graph.indexer.dart_extractor import visit_dart
+        import tree_sitter_language_pack
+
+        code = """
+abstract class Shape {
+  double area();
+  double perimeter();
+}
+
+class Circle extends Shape {
+  double radius;
+  Circle(this.radius);
+
+  @override
+  double area() => 3.14 * radius * radius;
+
+  @override
+  double perimeter() => 2 * 3.14 * radius;
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("dart")
+        tree = parser.parse(code)
+        result = visit_dart("src/shape.dart", code, tree)
+
+        classes = [n for n in result.nodes if n["kind"] == "class"]
+        assert len(classes) >= 2  # Shape + Circle
+
+        # Shape is abstract
+        shape = [n for n in result.nodes if n["name"] == "Shape"]
+        assert len(shape) == 1
+        assert shape[0]["is_abstract"] == 1
+
+        # Circle is not abstract
+        circle = [n for n in result.nodes if n["name"] == "Circle"]
+        assert len(circle) == 1
+        assert circle[0]["is_abstract"] == 0
+
+    def test_mixin(self):
+        from tws_graph.indexer.dart_extractor import visit_dart
+        import tree_sitter_language_pack
+
+        code = """
+mixin Logger {
+  bool _enabled = true;
+  void log(String msg) => print('[LOG] \$msg');
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("dart")
+        tree = parser.parse(code)
+        result = visit_dart("src/logger.dart", code, tree)
+
+        classes = [n for n in result.nodes if n["kind"] == "class"]
+        assert len(classes) == 1
+        assert classes[0]["name"] == "Logger"
+
+        props = [n for n in result.nodes if n["kind"] == "property"]
+        assert len(props) >= 1  # _enabled
+
+        methods = [n for n in result.nodes if n["kind"] == "method"]
+        assert len(methods) >= 1  # log
+
+    def test_enum(self):
+        from tws_graph.indexer.dart_extractor import visit_dart
+        import tree_sitter_language_pack
+
+        code = """
+enum Color { red, green, blue }
+"""
+        parser = tree_sitter_language_pack.get_parser("dart")
+        tree = parser.parse(code)
+        result = visit_dart("src/color.dart", code, tree)
+
+        enums = [n for n in result.nodes if n["kind"] == "enum"]
+        assert len(enums) == 1
+        assert enums[0]["name"] == "Color"
+
+        consts = [n for n in result.nodes if n["kind"] == "enum_constant"]
+        assert len(consts) >= 3
+
+    def test_call_edges(self):
+        from tws_graph.indexer.dart_extractor import visit_dart
+        import tree_sitter_language_pack
+
+        code = """
+class Worker {
+  void start() {
+    init();
+    process();
+    cleanup();
+  }
+
+  void init() {}
+  void process() {}
+  void cleanup() {}
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("dart")
+        tree = parser.parse(code)
+        result = visit_dart("src/worker.dart", code, tree)
+
+        call_edges = [e for e in result.edges if e["kind"] == "calls"]
+        assert len(call_edges) >= 3, f"Expected >=3 call edges, got {len(call_edges)}"
+
+    # -- fixture tests (6-12) --
+
+    def test_import_edges(self):
+        result = self._load_fixture()
+
+        import_edges = [e for e in result.edges if e["kind"] == "imports"]
+        target_texts = [e.get("target_text", "") for e in import_edges]
+
+        assert len(import_edges) >= 6, \
+            f"Expected >=6 import edges, got {len(import_edges)}: {target_texts}"
+        assert any("dart:core" in t for t in target_texts), \
+            f"'dart:core' not in imports: {target_texts}"
+        assert any("dart:async" in t for t in target_texts), \
+            f"'dart:async' not in imports: {target_texts}"
+        assert any("package:http/http.dart" in t for t in target_texts), \
+            f"'package:http/http.dart' not in imports: {target_texts}"
+        assert any("package:meta/meta.dart" in t for t in target_texts), \
+            f"'package:meta/meta.dart' not in imports: {target_texts}"
+        assert any("package:json_annotation/json_annotation.dart" in t for t in target_texts), \
+            f"'package:json_annotation/json_annotation.dart' not in imports: {target_texts}"
+        assert any("dart:convert" in t for t in target_texts), \
+            f"'dart:convert' not in imports: {target_texts}"
+
+    def test_class_inheritance(self):
+        result = self._load_fixture()
+
+        extends_edges = [e for e in result.edges if e["kind"] == "extends"]
+        assert len(extends_edges) >= 1, f"Expected >=1 extends edges, got {len(extends_edges)}"
+
+        target_texts = [e.get("target_text", "") for e in extends_edges]
+        assert any("User" in t for t in target_texts), \
+            f"'User' not in extends targets: {target_texts}"
+
+    def test_interface_implementation(self):
+        result = self._load_fixture()
+
+        impl_edges = [e for e in result.edges if e["kind"] == "implements"]
+        assert len(impl_edges) >= 1, f"Expected >=1 implements edges, got {len(impl_edges)}"
+
+        target_texts = [e.get("target_text", "") for e in impl_edges]
+        assert any("Comparable" in t for t in target_texts), \
+            f"'Comparable' not in implements targets: {target_texts}"
+
+    def test_mixin_application(self):
+        result = self._load_fixture()
+
+        impl_edges = [e for e in result.edges if e["kind"] == "implements"]
+        target_texts = [e.get("target_text", "") for e in impl_edges]
+
+        # AdminUser uses Logger mixin via "with Logger" clause
+        assert any("Logger" in t for t in target_texts), \
+            f"'Logger' mixin not found in implements edges: {target_texts}"
+
+    def test_annotations(self):
+        result = self._load_fixture()
+
+        decorates_edges = [e for e in result.edges if e["kind"] == "decorates"]
+        assert len(decorates_edges) > 0, f"Expected decorates edges, got {len(decorates_edges)}"
+
+        target_texts = [e.get("target_text", "") for e in decorates_edges]
+        assert any("override" in t for t in target_texts), \
+            f"'override' annotation not found: {target_texts}"
+        assert any("deprecated" in t for t in target_texts), \
+            f"'deprecated' annotation not found: {target_texts}"
+        assert any("JsonSerializable" in t for t in target_texts), \
+            f"'JsonSerializable' annotation not found: {target_texts}"
+
+    def test_visibility(self):
+        from tws_graph.indexer.dart_extractor import visit_dart
+        import tree_sitter_language_pack
+
+        code = """
+class Service {
+  String publicField = '';
+  String _privateField = '';
+
+  void publicMethod() {}
+  void _privateMethod() {}
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("dart")
+        tree = parser.parse(code)
+        result = visit_dart("src/service.dart", code, tree)
+
+        vis_map = {n["name"]: n["visibility"] for n in result.nodes}
+        assert vis_map.get("publicField") == "public"
+        assert vis_map.get("_privateField") == "private"
+        assert vis_map.get("publicMethod") == "public"
+        assert vis_map.get("_privateMethod") == "private"
+
+    def test_variable_reads_writes(self):
+        result = self._load_fixture()
+
+        read_edges = [e for e in result.edges if e["kind"] == "reads"]
+        write_edges = [e for e in result.edges if e["kind"] == "writes"]
+
+        assert len(read_edges) > 0, f"Expected read edges, got 0"
+        assert len(write_edges) > 0, f"Expected write edges, got 0"
+
+        read_targets = [e.get("target_text", "") for e in read_edges]
+        write_targets = [e.get("target_text", "") for e in write_edges]
+
+        # Check that some variables from the fixture are being read/written
+        assert any("repo" in t for t in read_targets) or any("admin" in t for t in read_targets), \
+            f"Expected variable reads, got: {read_targets[:20]}"
+        assert any("repo" in t for t in write_targets) or any("admin" in t for t in write_targets), \
+            f"Expected variable writes, got: {write_targets[:20]}"
+
+
+# ---------------------------------------------------------------------------
+# Swift
+# ---------------------------------------------------------------------------
+
+class TestSwiftExtractor:
+    """P52: Swift language extractor tests — classes, protocols, structs, enums, extensions."""
+
+    # -- helper --
+    @staticmethod
+    def _load_fixture():
+        import tree_sitter_language_pack
+        from tws_graph.indexer.swift_extractor import visit_swift
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "swift", "sample.swift")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        parser = tree_sitter_language_pack.get_parser("swift")
+        tree = parser.parse(code)
+        return visit_swift(fixture_path, code, tree)
+
+    # -- inline code tests (1-5) --
+
+    def test_simple_class(self):
+        from tws_graph.indexer.swift_extractor import visit_swift
+        import tree_sitter_language_pack
+
+        code = """
+class Calculator {
+    var value: Int = 0
+
+    func add(_ x: Int) {
+        value += x
+    }
+
+    func getValue() -> Int {
+        return value
+    }
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("swift")
+        tree = parser.parse(code)
+        result = visit_swift("src/Calculator.swift", code, tree)
+
+        classes = [n for n in result.nodes if n["kind"] == "class"]
+        assert len(classes) == 1
+        assert classes[0]["name"] == "Calculator"
+
+        methods = [n for n in result.nodes if n["kind"] == "method"]
+        assert len(methods) >= 2  # add + getValue
+
+        props = [n for n in result.nodes if n["kind"] == "property"]
+        assert len(props) >= 1  # value
+
+    def test_protocol(self):
+        from tws_graph.indexer.swift_extractor import visit_swift
+        import tree_sitter_language_pack
+
+        code = """
+protocol Identifiable {
+    var id: String { get }
+    func identify() -> String
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("swift")
+        tree = parser.parse(code)
+        result = visit_swift("src/Identifiable.swift", code, tree)
+
+        interfaces = [n for n in result.nodes if n["kind"] == "interface"]
+        assert len(interfaces) == 1
+        assert interfaces[0]["name"] == "Identifiable"
+
+    def test_struct(self):
+        from tws_graph.indexer.swift_extractor import visit_swift
+        import tree_sitter_language_pack
+
+        code = """
+struct Point {
+    var x: Double
+    var y: Double
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("swift")
+        tree = parser.parse(code)
+        result = visit_swift("src/Point.swift", code, tree)
+
+        classes = [n for n in result.nodes if n["kind"] == "class"]
+        assert len(classes) == 1
+        assert classes[0]["name"] == "Point"
+
+        props = [n for n in result.nodes if n["kind"] == "property"]
+        assert len(props) >= 2
+
+    def test_enum(self):
+        from tws_graph.indexer.swift_extractor import visit_swift
+        import tree_sitter_language_pack
+
+        code = """
+enum Direction {
+    case north
+    case south
+    case east
+    case west
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("swift")
+        tree = parser.parse(code)
+        result = visit_swift("src/Direction.swift", code, tree)
+
+        enums = [n for n in result.nodes if n["kind"] == "enum"]
+        assert len(enums) == 1
+        assert enums[0]["name"] == "Direction"
+
+        consts = [n for n in result.nodes if n["kind"] == "enum_constant"]
+        assert len(consts) >= 4
+
+    def test_call_edges(self):
+        from tws_graph.indexer.swift_extractor import visit_swift
+        import tree_sitter_language_pack
+
+        code = """
+class Worker {
+    func start() {
+        init()
+        process()
+        cleanup()
+    }
+
+    func init() {}
+    func process() {}
+    func cleanup() {}
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("swift")
+        tree = parser.parse(code)
+        result = visit_swift("src/Worker.swift", code, tree)
+
+        call_edges = [e for e in result.edges if e["kind"] == "calls"]
+        assert len(call_edges) >= 3, f"Expected >=3 call edges, got {len(call_edges)}"
+
+    # -- fixture tests (6-10) --
+
+    def test_import_edges(self):
+        result = self._load_fixture()
+
+        import_edges = [e for e in result.edges if e["kind"] == "imports"]
+        target_texts = [e.get("target_text", "") for e in import_edges]
+
+        assert len(import_edges) >= 2, \
+            f"Expected >=2 import edges, got {len(import_edges)}: {target_texts}"
+        assert any("Foundation" in t for t in target_texts), \
+            f"'Foundation' not in imports: {target_texts}"
+        assert any("UIKit" in t for t in target_texts), \
+            f"'UIKit' not in imports: {target_texts}"
+
+    def test_class_inheritance(self):
+        result = self._load_fixture()
+
+        extends_edges = [e for e in result.edges if e["kind"] == "extends"]
+        assert len(extends_edges) >= 1, \
+            f"Expected >=1 extends edges, got {len(extends_edges)}"
+
+        # UserRecord extends BaseRecord
+        user_nodes = [n for n in result.nodes if n["name"] == "UserRecord"]
+        base_nodes = [n for n in result.nodes if n["name"] == "BaseRecord"]
+        assert len(user_nodes) >= 1, "UserRecord node not found"
+        assert len(base_nodes) >= 1, "BaseRecord node not found"
+
+        user_id = user_nodes[0]["id"]
+        base_id = base_nodes[0]["id"]
+        found = any(
+            e["source"] == user_id and e["target"] == base_id
+            for e in extends_edges
+        )
+        assert found, f"UserRecord should extend BaseRecord. extends_edges={extends_edges}"
+
+    def test_protocol_conformance(self):
+        result = self._load_fixture()
+
+        impl_edges = [e for e in result.edges if e["kind"] == "implements"]
+        assert len(impl_edges) >= 1, \
+            f"Expected >=1 implements edges, got {len(impl_edges)}"
+
+        # MemoryStore should implement DataStore
+        mem_nodes = [n for n in result.nodes if n["name"] == "MemoryStore"]
+        ds_nodes = [n for n in result.nodes if n["name"] == "DataStore"]
+        assert len(mem_nodes) >= 1, "MemoryStore node not found"
+        assert len(ds_nodes) >= 1, "DataStore node not found"
+
+        mem_id = mem_nodes[0]["id"]
+        ds_id = ds_nodes[0]["id"]
+        found = any(
+            e["source"] == mem_id and e["target"] == ds_id
+            for e in impl_edges
+        )
+        assert found, f"MemoryStore should implement DataStore. impl_edges={impl_edges}"
+
+    def test_visibility(self):
+        from tws_graph.indexer.swift_extractor import visit_swift
+        import tree_sitter_language_pack
+
+        code = """
+public class Service {
+    public func api() {}
+    private func helper() {}
+    internal func work() {}
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("swift")
+        tree = parser.parse(code)
+        result = visit_swift("src/Service.swift", code, tree)
+
+        methods = [n for n in result.nodes if n["kind"] == "method"]
+        assert len(methods) >= 3, f"Expected >=3 methods, got {len(methods)}"
+
+        vis_map = {n["name"]: n["visibility"] for n in result.nodes}
+        assert vis_map.get("api") == "public", f"vis_map={vis_map}"
+        assert vis_map.get("helper") == "private", f"vis_map={vis_map}"
+        assert vis_map.get("work") == "internal", f"vis_map={vis_map}"
+
+    def test_variable_reads_writes(self):
+        result = self._load_fixture()
+
+        read_edges = [e for e in result.edges if e["kind"] == "reads"]
+        write_edges = [e for e in result.edges if e["kind"] == "writes"]
+
+        assert len(read_edges) > 0, f"Expected read edges, got 0"
+        assert len(write_edges) > 0, f"Expected write edges, got 0"
+
+        read_targets = [e.get("target_text", "") for e in read_edges]
+        write_targets = [e.get("target_text", "") for e in write_edges]
+
+        # Check that variables from the fixture are read/written
+        assert any("name" in t for t in read_targets) or any("storage" in t for t in read_targets), \
+            f"Expected variable reads, got: {read_targets[:20]}"
+        assert any("storage" in t for t in write_targets) or any("stats" in t for t in write_targets), \
+            f"Expected variable writes, got: {write_targets[:20]}"
