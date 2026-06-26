@@ -271,6 +271,114 @@ func (c *Counter) Value() int {
         methods = [n for n in result.nodes if n["kind"] == "method"]
         assert len(methods) >= 2
 
+    def test_import_edges(self):
+        from tws_graph.indexer.go_extractor import visit_go
+        import tree_sitter_language_pack
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "go", "sample.go")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        parser = tree_sitter_language_pack.get_parser("go")
+        tree = parser.parse(code)
+        result = visit_go(fixture_path, code, tree)
+
+        import_edges = [e for e in result.edges if e["kind"] == "imports"]
+        target_texts = [e.get("target_text", "") for e in import_edges]
+
+        assert len(import_edges) >= 6, f"Expected >=6 import edges, got {len(import_edges)}: {target_texts}"
+        assert any("context" in t for t in target_texts), f"'context' not in imports: {target_texts}"
+        assert any("encoding/json" in t for t in target_texts), f"'encoding/json' not in imports: {target_texts}"
+        assert any("fmt" in t for t in target_texts), f"'fmt' not in imports: {target_texts}"
+        assert any("net/http" in t for t in target_texts), f"'net/http' not in imports: {target_texts}"
+        assert any("time" in t for t in target_texts), f"'time' not in imports: {target_texts}"
+        assert any("github.com/gorilla/mux" in t for t in target_texts), \
+            f"'github.com/gorilla/mux' not in imports: {target_texts}"
+
+    def test_interface_implements(self):
+        from tws_graph.indexer.go_extractor import visit_go
+        import tree_sitter_language_pack
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "go", "sample.go")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        parser = tree_sitter_language_pack.get_parser("go")
+        tree = parser.parse(code)
+        result = visit_go(fixture_path, code, tree)
+
+        impl_edges = [e for e in result.edges if e["kind"] == "implements"]
+        assert len(impl_edges) >= 1, f"Expected >=1 implements edge, got {len(impl_edges)}"
+
+        # MemoryStore should implement DataStore
+        mem_store_nodes = [n for n in result.nodes if n["name"] == "MemoryStore"]
+        data_store_nodes = [n for n in result.nodes if n["name"] == "DataStore"]
+
+        assert len(mem_store_nodes) >= 1, "MemoryStore node not found"
+        assert len(data_store_nodes) >= 1, "DataStore node not found"
+
+        mem_id = mem_store_nodes[0]["id"]
+        ds_id = data_store_nodes[0]["id"]
+        found = any(e["source"] == mem_id and e["target"] == ds_id for e in impl_edges)
+        assert found, f"MemoryStore should implement DataStore. impl_edges={impl_edges}"
+
+    def test_struct_tags(self):
+        from tws_graph.indexer.go_extractor import visit_go
+        import tree_sitter_language_pack
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "go", "sample.go")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        parser = tree_sitter_language_pack.get_parser("go")
+        tree = parser.parse(code)
+        result = visit_go(fixture_path, code, tree)
+
+        decorates_edges = [e for e in result.edges if e["kind"] == "decorates"]
+        assert len(decorates_edges) > 0, f"Expected decorates edges for struct tags, got {len(decorates_edges)}"
+
+        target_texts = [e.get("target_text", "") for e in decorates_edges]
+        assert any("json" in t for t in target_texts), f"'json' tag not found in: {target_texts}"
+        assert any("validate" in t for t in target_texts), f"'validate' tag not found in: {target_texts}"
+
+    def test_type_references(self):
+        from tws_graph.indexer.go_extractor import visit_go
+        import tree_sitter_language_pack
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "go", "sample.go")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        parser = tree_sitter_language_pack.get_parser("go")
+        tree = parser.parse(code)
+        result = visit_go(fixture_path, code, tree)
+
+        type_ref_edges = [e for e in result.edges if e["kind"] == "type_ref"]
+        assert len(type_ref_edges) > 0, f"Expected type_ref edges, got 0"
+
+        target_texts = [e.get("target_text", "") for e in type_ref_edges]
+        # Functions reference DataStore, context.Context, CacheStats, time.Duration, etc.
+        assert any("DataStore" in t for t in target_texts), \
+            f"'DataStore' not found in type_refs: {target_texts}"
+
+    def test_variable_reads_writes(self):
+        from tws_graph.indexer.go_extractor import visit_go
+        import tree_sitter_language_pack
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "go", "sample.go")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        parser = tree_sitter_language_pack.get_parser("go")
+        tree = parser.parse(code)
+        result = visit_go(fixture_path, code, tree)
+
+        read_edges = [e for e in result.edges if e["kind"] == "reads"]
+        write_edges = [e for e in result.edges if e["kind"] == "writes"]
+
+        assert len(read_edges) > 0, f"Expected read edges, got 0"
+        assert len(write_edges) > 0, f"Expected write edges, got 0"
+
 
 # ---------------------------------------------------------------------------
 # Rust
