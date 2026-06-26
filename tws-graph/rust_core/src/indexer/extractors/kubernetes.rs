@@ -242,7 +242,7 @@ fn collect_yaml_map(
 
 /// Extract a K8s resource node from a mapping that we've identified as a K8s resource.
 fn extract_k8s_resource(
-    source: &[u8],
+    _source: &[u8],
     node: Node,
     ctx: &mut ExtractionContext,
     parent_id: &str,
@@ -477,37 +477,6 @@ mod tests {
         assert_eq!(resources.len(), 0);
         let files = find_nodes(&ctx, NodeKind::File);
         assert_eq!(files.len(), 1);
-    }
-
-    #[test]
-    fn debug_k8s_structure() {
-        let source = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: myapp\nspec:\n  replicas: 3\n";
-        let mut parser = Parser::new();
-        parser
-            .set_language(&tree_sitter_yaml::LANGUAGE.into())
-            .expect("set yaml language");
-        let tree = parser.parse(source, None).expect("parse yaml source");
-        let root = tree.root_node();
-
-        fn print_node(source: &[u8], node: Node, indent: usize) {
-            let prefix = "  ".repeat(indent);
-            let text = node.utf8_text(source).unwrap_or("").lines().next().unwrap_or("").to_string();
-            let text_short = if text.len() > 60 { format!("{}...", &text[..60]) } else { text };
-            println!("{}{}: kind={:30} text={}", prefix, node.id(), node.kind(), text_short);
-            for i in 0..node.named_child_count() {
-                if let Some(child) = node.named_child(i) {
-                    print_node(source, child, indent + 1);
-                }
-            }
-        }
-        println!("Root kind: {}", root.kind());
-        print_node(source.as_bytes(), root, 0);
-
-        let ctx = extract(source, "deploy.yaml");
-        println!("\n=== EXTRACTED NODES ===");
-        for n in &ctx.result.nodes {
-            println!("  kind={:25} name={}", n.kind, n.name);
-        }
     }
 
     #[test]
