@@ -59,6 +59,17 @@ tws-graph 通过 28+ 个提取器覆盖 30+ 种语言和配置格式。所有提
 ## 前置检查（每次查图前必做）
 
 ```
+0. 确定项目根目录（必须第一步执行）
+   # 用 Git 定位项目根目录，后续所有 tws-graph 命令都从此目录执行
+   Bash: cd $(git rev-parse --show-toplevel 2>/dev/null || pwd) 2>&1
+
+   索引数据库默认路径是项目根下的 .tws/codegraph/index.db。
+   如果你 cd 到子目录再跑 tws-graph 命令而不传 --db，会找不到索引库。
+   
+   ✅ 正确：cd D:/project && tws-graph search MyClass
+   ✅ 正确：tws-graph search MyClass --db D:/project/.tws/codegraph/index.db
+   ❌ 错误：cd D:/project/subdir && tws-graph search MyClass  （找的是 subdir/.tws/codegraph/index.db）
+
 1. 检查可用性
    tws-graph --version
    → 如果报错 command not found 或返回非零：
@@ -436,6 +447,18 @@ tws-graph serve mcp-config
   1. 先用 tws-graph search <关键词> 确认符号名
   2. 如果 search 也找不到 → 标注「图中无此符号，手动追踪」
   3. 不要轻易改符号名去匹配——可能确实不在索引范围内
+```
+
+### 命令返回非零退出码（exit code 1）
+
+```
+最常见原因：工作目录不对，索引库在项目根目录 .tws/ 下，但你 cd 到了子目录
+排查：
+  1. pwd 确认当前目录
+  2. ls .tws/codegraph/index.db 确认索引库是否存在
+  3. 如果不存在 → cd 到项目根目录（git rev-parse --show-toplevel）再试
+  4. 如果确实没有索引库 → tws-graph index
+处理：修正工作目录后重试。连续 2 次失败 → 标注降级，回退 grep
 ```
 
 ### tws-graph 安装失败
