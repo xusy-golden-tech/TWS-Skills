@@ -80,9 +80,9 @@
 
 ### 门禁
 - [x] GATE-P52-1: 6 个语言的 tree-sitter 语法在 tree-sitter-language-pack 中全部可用 ✅
-- [ ] GATE-P52-2: 不可用的语法 → 降级方案（从 GitHub 安装？跳过？标记为 blocked）
-- [ ] GATE-P52-3: 每个语言有 ≥ 1 个 GitHub 真实项目作为测试素材
-- [ ] GATE-P52-4: CBM 对同语言的支持情况已调查
+- [x] GATE-P52-2: 不可用的语法 → 降级方案 → 全部可用，无需降级 ✅
+- [x] GATE-P52-3: 每个语言有 ≥ 1 个 GitHub 真实项目作为测试素材 ✅
+- [x] GATE-P52-4: CBM 对同语言的支持情况已调查 → CBM 原生支持全部 6 种语言 ✅
 
 ### 测试
 - [ ] TEST-P52-Swift: 节点+边产出测试
@@ -99,17 +99,17 @@
 
 ---
 
-## Phase 3: P55 工具分离 + 人类手册 ⬜
+## Phase 3: P55 工具分离 + 人类手册 ✅
 
 **根源问题**：found-tws-graph-usage 包含全部 21 个工具的文档，agent 加载时产生 token 膨胀。Agent 实际只需要核心查询工具（search/calls/impact/trace），人类才需要全套分析工具。
 
 **解决方案**：将工具分为 Agent 用（≤12 个）和 Human 用，found-tws-graph-usage 只列 Agent 工具，人类手册覆盖全部。
 
 ### 门禁
-- [ ] GATE-P55-1: 21 个 MCP 工具按 agent/human 分类完成
-- [ ] GATE-P55-2: 分类标准已定义：agent 需要的是「读」工具（查图、追溯、影响分析），human 需要「写/管理」工具
-- [ ] GATE-P55-3: 17 个 CLI 命令按 agent/human 分类完成
-- [ ] GATE-P55-4: 现有 MCP 工具无功能删除（只能重组）
+- [x] GATE-P55-1: 21 个 MCP 工具按 agent/human 分类完成 ✅
+- [x] GATE-P55-2: 分类标准已定义：agent 需要的是「读」工具（查图、追溯、影响分析），human 需要「写/管理」工具 ✅
+- [x] GATE-P55-3: 17 个 CLI 命令按 agent/human 分类完成 ✅
+- [x] GATE-P55-4: 现有 MCP 工具无功能删除（只能重组） ✅
 
 ### Agent 工具候选（≤12 个）
 ```
@@ -125,15 +125,15 @@
 ```
 
 ### 测试
-- [ ] TEST-P55-1: found-tws-graph-usage 只包含 agent 工具（≤12 个），每个工具有正确用法
-- [ ] TEST-P55-2: docs/tws-graph-manual.md 覆盖全部 17 个 CLI 命令 + 21 个 MCP 工具
-- [ ] TEST-P55-3: tws-graph serve 所有 21 个工具仍可正常注册和调用
-- [ ] TEST-P55-4: MCP 工具注册代码无硬编码的分类逻辑
+- [x] TEST-P55-1: found-tws-graph-usage 只包含 agent 工具（≤12 个），每个工具有正确用法 ✅ (104行)
+- [x] TEST-P55-2: docs/tws-graph-manual.md 覆盖全部 17 个 CLI 命令 + 21 个 MCP 工具 ✅ (195行, 已存在)
+- [x] TEST-P55-3: tws-graph serve 所有 21 个工具仍可正常注册和调用 ✅
+- [x] TEST-P55-4: MCP 工具注册代码无硬编码的分类逻辑 ✅
 
 ### 验收
-- [ ] ACCEPT-P55-AGENT: found-tws-graph-usage 精简至 ≤ 150 行
-- [ ] ACCEPT-P55-HUMAN: docs/tws-graph-manual.md 完成，覆盖全工具 + 使用场景 + 示例
-- [ ] ACCEPT-P55-NO-LOSS: 零功能损失（所有工具仍可通过 MCP/CLI 调用）
+- [x] ACCEPT-P55-AGENT: found-tws-graph-usage 精简至 ≤ 150 行 ✅ (104行)
+- [x] ACCEPT-P55-HUMAN: docs/tws-graph-manual.md 完成，覆盖全工具 + 使用场景 + 示例 ✅
+- [x] ACCEPT-P55-NO-LOSS: 零功能损失（所有工具仍可通过 MCP/CLI 调用） ✅
 
 ---
 

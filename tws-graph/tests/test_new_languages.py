@@ -1171,3 +1171,543 @@ public class Service {
             f"Expected variable reads, got: {read_targets[:20]}"
         assert any("storage" in t for t in write_targets) or any("stats" in t for t in write_targets), \
             f"Expected variable writes, got: {write_targets[:20]}"
+
+
+# ---------------------------------------------------------------------------
+# Groovy
+# ---------------------------------------------------------------------------
+
+class TestGroovyExtractor:
+    """P52: Groovy language extractor tests — classes, interfaces, traits, enums,
+    annotations, closures, imports, inheritance."""
+
+    # -- helper --
+    @staticmethod
+    def _load_fixture():
+        import tree_sitter_language_pack
+        from tws_graph.indexer.groovy_extractor import visit_groovy
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "groovy", "sample.groovy")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        parser = tree_sitter_language_pack.get_parser("groovy")
+        tree = parser.parse(code)
+        return visit_groovy(fixture_path, code, tree)
+
+    # -- inline code tests (1-5) --
+
+    def test_simple_class(self):
+        from tws_graph.indexer.groovy_extractor import visit_groovy
+        import tree_sitter_language_pack
+
+        code = """class Counter {
+    int value = 0
+
+    void increment() {
+        value++
+    }
+
+    int getValue() {
+        return value
+    }
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("groovy")
+        tree = parser.parse(code)
+        result = visit_groovy("src/Counter.groovy", code, tree)
+
+        classes = [n for n in result.nodes if n["kind"] == "class"]
+        assert len(classes) == 1
+        assert classes[0]["name"] == "Counter"
+
+        methods = [n for n in result.nodes if n["kind"] == "method"]
+        assert len(methods) >= 2  # increment + getValue
+
+        props = [n for n in result.nodes if n["kind"] == "property"]
+        assert len(props) >= 1  # value
+
+    def test_interface(self):
+        from tws_graph.indexer.groovy_extractor import visit_groovy
+        import tree_sitter_language_pack
+
+        code = """interface Repository {
+    void save(Object entity)
+    Object findById(long id)
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("groovy")
+        tree = parser.parse(code)
+        result = visit_groovy("src/Repository.groovy", code, tree)
+
+        interfaces = [n for n in result.nodes if n["kind"] == "interface"]
+        assert len(interfaces) == 1
+        assert interfaces[0]["name"] == "Repository"
+
+    def test_trait(self):
+        from tws_graph.indexer.groovy_extractor import visit_groovy
+        import tree_sitter_language_pack
+
+        code = """trait Logger {
+    boolean enabled = true
+
+    void log(String msg) {
+        println msg
+    }
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("groovy")
+        tree = parser.parse(code)
+        result = visit_groovy("src/Logger.groovy", code, tree)
+
+        # Traits map to kind="interface"
+        interfaces = [n for n in result.nodes if n["kind"] == "interface"]
+        assert len(interfaces) == 1
+        assert interfaces[0]["name"] == "Logger"
+
+        props = [n for n in result.nodes if n["kind"] == "property"]
+        assert len(props) >= 1  # enabled
+
+        methods = [n for n in result.nodes if n["kind"] == "method"]
+        assert len(methods) >= 1  # log
+
+    def test_enum(self):
+        from tws_graph.indexer.groovy_extractor import visit_groovy
+        import tree_sitter_language_pack
+
+        code = """enum Color {
+    RED,
+    GREEN,
+    BLUE
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("groovy")
+        tree = parser.parse(code)
+        result = visit_groovy("src/Color.groovy", code, tree)
+
+        enums = [n for n in result.nodes if n["kind"] == "enum"]
+        assert len(enums) == 1
+        assert enums[0]["name"] == "Color"
+
+        consts = [n for n in result.nodes if n["kind"] == "enum_constant"]
+        assert len(consts) >= 3
+
+    def test_call_edges(self):
+        from tws_graph.indexer.groovy_extractor import visit_groovy
+        import tree_sitter_language_pack
+
+        code = """class Worker {
+    void start() {
+        init()
+        process()
+        cleanup()
+    }
+
+    void init() {}
+    void process() {}
+    void cleanup() {}
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("groovy")
+        tree = parser.parse(code)
+        result = visit_groovy("src/Worker.groovy", code, tree)
+
+        call_edges = [e for e in result.edges if e["kind"] == "calls"]
+        assert len(call_edges) >= 3, f"Expected >=3 call edges, got {len(call_edges)}"
+
+    # -- fixture tests (6-12) --
+
+    def test_import_edges(self):
+        result = self._load_fixture()
+
+        import_edges = [e for e in result.edges if e["kind"] == "imports"]
+        target_texts = [e.get("target_text", "") for e in import_edges]
+
+        assert len(import_edges) >= 6, \
+            f"Expected >=6 import edges, got {len(import_edges)}: {target_texts}"
+        assert any("groovy.transform.ToString" in t for t in target_texts), \
+            f"'groovy.transform.ToString' not in imports: {target_texts}"
+        assert any("groovy.transform.EqualsAndHashCode" in t for t in target_texts), \
+            f"'groovy.transform.EqualsAndHashCode' not in imports: {target_texts}"
+        assert any("java.util.List" in t for t in target_texts), \
+            f"'java.util.List' not in imports: {target_texts}"
+        assert any("java.util.Map" in t for t in target_texts), \
+            f"'java.util.Map' not in imports: {target_texts}"
+        assert any("java.time.LocalDate" in t for t in target_texts), \
+            f"'java.time.LocalDate' not in imports: {target_texts}"
+        assert any("groovy.json.JsonOutput" in t for t in target_texts), \
+            f"'groovy.json.JsonOutput' not in imports: {target_texts}"
+
+    def test_class_inheritance(self):
+        result = self._load_fixture()
+
+        extends_edges = [e for e in result.edges if e["kind"] == "extends"]
+        assert len(extends_edges) >= 1, f"Expected >=1 extends edges, got {len(extends_edges)}"
+
+        target_texts = [e.get("target_text", "") for e in extends_edges]
+        assert any("User" in t for t in target_texts), \
+            f"'User' not in extends targets: {target_texts}"
+
+    def test_interface_implementation(self):
+        result = self._load_fixture()
+
+        impl_edges = [e for e in result.edges if e["kind"] == "implements"]
+        assert len(impl_edges) >= 1, f"Expected >=1 implements edges, got {len(impl_edges)}"
+
+        target_texts = [e.get("target_text", "") for e in impl_edges]
+        assert any("Serializable" in t for t in target_texts), \
+            f"'Serializable' not in implements targets: {target_texts}"
+        assert any("Logger" in t for t in target_texts), \
+            f"'Logger' trait not in implements targets: {target_texts}"
+
+    def test_annotations(self):
+        result = self._load_fixture()
+
+        decorates_edges = [e for e in result.edges if e["kind"] == "decorates"]
+        assert len(decorates_edges) > 0, f"Expected decorates edges, got {len(decorates_edges)}"
+
+        target_texts = [e.get("target_text", "") for e in decorates_edges]
+        assert any("ToString" in t for t in target_texts), \
+            f"'ToString' annotation not found: {target_texts}"
+        assert any("EqualsAndHashCode" in t for t in target_texts), \
+            f"'EqualsAndHashCode' annotation not found: {target_texts}"
+
+    def test_visibility(self):
+        from tws_graph.indexer.groovy_extractor import visit_groovy
+        import tree_sitter_language_pack
+
+        code = """class Service {
+    String publicField
+    private String secretField
+    protected String internalField
+
+    public void api() {}
+    private void helper() {}
+    protected void work() {}
+}
+"""
+        parser = tree_sitter_language_pack.get_parser("groovy")
+        tree = parser.parse(code)
+        result = visit_groovy("src/Service.groovy", code, tree)
+
+        vis_map = {n["name"]: n["visibility"] for n in result.nodes}
+        assert vis_map.get("api") == "public", f"vis_map={vis_map}"
+        assert vis_map.get("helper") == "private", f"vis_map={vis_map}"
+        assert vis_map.get("work") == "protected", f"vis_map={vis_map}"
+
+    def test_closure(self):
+        result = self._load_fixture()
+
+        # Closures appear as method calls or inline — verify DataProcessor's
+        # closure-based methods are extracted
+        methods = [n for n in result.nodes if n["kind"] == "method"]
+        method_names = {n["name"] for n in methods}
+
+        assert "processEven" in method_names, f"processEven not found: {method_names}"
+        assert "executePipeline" in method_names, f"executePipeline not found: {method_names}"
+        assert "processWithClosure" in method_names, f"processWithClosure not found: {method_names}"
+
+        # The closure itself should produce call edges (e.g., findAll, collect)
+        call_edges = [e for e in result.edges if e["kind"] == "calls"]
+        call_targets = [e.get("target_text", "") for e in call_edges]
+        assert any("findAll" in t for t in call_targets) or any("collect" in t for t in call_targets), \
+            f"Closure method calls not found: {call_targets}"
+
+    def test_variable_reads_writes(self):
+        result = self._load_fixture()
+
+        read_edges = [e for e in result.edges if e["kind"] == "reads"]
+        write_edges = [e for e in result.edges if e["kind"] == "writes"]
+
+        assert len(read_edges) > 0, f"Expected read edges, got 0"
+        assert len(write_edges) > 0, f"Expected write edges, got 0"
+
+        read_targets = [e.get("target_text", "") for e in read_edges]
+        write_targets = [e.get("target_text", "") for e in write_edges]
+
+        # Check that variables from the fixture are read/written
+        assert any("admin" in t for t in read_targets) or any("msg" in t for t in read_targets) or any("numbers" in t for t in read_targets), \
+            f"Expected variable reads, got: {read_targets[:20]}"
+        assert any("admin" in t for t in write_targets) or any("role" in t for t in write_targets) or any("action" in t for t in write_targets), \
+            f"Expected variable writes, got: {write_targets[:20]}"
+
+
+# ---------------------------------------------------------------------------
+# CMake
+# ---------------------------------------------------------------------------
+
+class TestCMakeExtractor:
+    """P52: CMake language extractor tests — functions, macros, variables,
+    targets, dependencies, subdirectories, imports."""
+
+    # -- helper --
+    @staticmethod
+    def _load_fixture(file_basename="CMakeLists.txt"):
+        import tree_sitter_language_pack
+        from tws_graph.indexer.cmake_extractor import visit_cmake
+
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures", "cmake", file_basename)
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        parser = tree_sitter_language_pack.get_parser("cmake")
+        tree = parser.parse(code)
+        return visit_cmake(fixture_path, code, tree)
+
+    # -- inline code tests (1-7) --
+
+    def test_function_definition(self):
+        """function(name args) → kind='function' node with parameters."""
+        from tws_graph.indexer.cmake_extractor import visit_cmake
+        import tree_sitter_language_pack
+
+        code = """
+function(add_test_target target_name sources)
+    add_executable(${target_name} ${sources})
+endfunction()
+"""
+        parser = tree_sitter_language_pack.get_parser("cmake")
+        tree = parser.parse(code)
+        result = visit_cmake("tests/CMakeLists.txt", code, tree)
+
+        funcs = [n for n in result.nodes if n["kind"] == "function"]
+        assert len(funcs) >= 1, f"Expected >=1 function node, got {len(funcs)}"
+        assert funcs[0]["name"] == "add_test_target"
+        assert "parameters" in funcs[0]
+        assert len(funcs[0]["parameters"]) >= 2  # target_name, sources
+
+    def test_macro_definition(self):
+        """macro(name args) → kind='function' node (macros behave like functions)."""
+        from tws_graph.indexer.cmake_extractor import visit_cmake
+        import tree_sitter_language_pack
+
+        code = """
+macro(set_common_flags target)
+    target_compile_options(${target} PRIVATE -Wall)
+endmacro()
+"""
+        parser = tree_sitter_language_pack.get_parser("cmake")
+        tree = parser.parse(code)
+        result = visit_cmake("tests/CMakeLists.txt", code, tree)
+
+        funcs = [n for n in result.nodes if n["kind"] == "function"]
+        assert len(funcs) >= 1, f"Expected >=1 function node, got {len(funcs)}"
+        assert funcs[0]["name"] == "set_common_flags"
+
+    def test_variable_extraction(self):
+        """set(VAR value) → kind='variable' node."""
+        from tws_graph.indexer.cmake_extractor import visit_cmake
+        import tree_sitter_language_pack
+
+        code = """
+set(PROJECT_NAME "MyApp")
+set(VERSION 2.0)
+set(SOURCE_DIRS src/core src/utils)
+"""
+        parser = tree_sitter_language_pack.get_parser("cmake")
+        tree = parser.parse(code)
+        result = visit_cmake("tests/CMakeLists.txt", code, tree)
+
+        vars_ = [n for n in result.nodes if n["kind"] == "variable"]
+        assert len(vars_) >= 3, f"Expected >=3 variable nodes, got {len(vars_)}"
+        names = {n["name"] for n in vars_}
+        assert "PROJECT_NAME" in names
+        assert "VERSION" in names
+        assert "SOURCE_DIRS" in names
+
+    def test_option_extraction(self):
+        """option(NAME desc default) → kind='variable' node."""
+        from tws_graph.indexer.cmake_extractor import visit_cmake
+        import tree_sitter_language_pack
+
+        code = """
+option(BUILD_TESTS "Build the test suite" ON)
+option(ENABLE_LOGGING "Enable debug logging" OFF)
+"""
+        parser = tree_sitter_language_pack.get_parser("cmake")
+        tree = parser.parse(code)
+        result = visit_cmake("tests/CMakeLists.txt", code, tree)
+
+        vars_ = [n for n in result.nodes if n["kind"] == "variable"]
+        assert len(vars_) >= 2, f"Expected >=2 variable (option) nodes, got {len(vars_)}"
+        names = {n["name"] for n in vars_}
+        assert "BUILD_TESTS" in names
+        assert "ENABLE_LOGGING" in names
+
+    def test_target_extraction(self):
+        """add_executable / add_library → kind='target' nodes with target_type."""
+        from tws_graph.indexer.cmake_extractor import visit_cmake
+        import tree_sitter_language_pack
+
+        code = """
+add_executable(my_app main.cpp)
+add_library(core_lib STATIC src/core.cpp)
+add_library(network_lib SHARED src/network.cpp)
+"""
+        parser = tree_sitter_language_pack.get_parser("cmake")
+        tree = parser.parse(code)
+        result = visit_cmake("tests/CMakeLists.txt", code, tree)
+
+        targets = [n for n in result.nodes if n["kind"] == "target"]
+        assert len(targets) >= 3, f"Expected >=3 target nodes, got {len(targets)}"
+        names = {n["name"] for n in targets}
+        assert "my_app" in names
+        assert "core_lib" in names
+        assert "network_lib" in names
+
+        # Check target_type
+        my_app = [n for n in targets if n["name"] == "my_app"][0]
+        core_lib = [n for n in targets if n["name"] == "core_lib"][0]
+        assert my_app["target_type"] == "executable"
+        assert core_lib["target_type"] == "library"
+
+    def test_target_dependency(self):
+        """target_link_libraries produces 'depends' edges between targets."""
+        from tws_graph.indexer.cmake_extractor import visit_cmake
+        import tree_sitter_language_pack
+
+        code = """
+add_executable(my_app main.cpp)
+add_library(core_lib src/core.cpp)
+target_link_libraries(my_app PRIVATE core_lib)
+"""
+        parser = tree_sitter_language_pack.get_parser("cmake")
+        tree = parser.parse(code)
+        result = visit_cmake("tests/CMakeLists.txt", code, tree)
+
+        depends_edges = [e for e in result.edges if e["kind"] == "depends"]
+        assert len(depends_edges) >= 1, f"Expected >=1 depends edge, got {len(depends_edges)}"
+
+        target_texts = [e.get("target_text", "") for e in depends_edges]
+        assert "core_lib" in target_texts, f"'core_lib' not in depends targets: {target_texts}"
+
+    def test_subdirectory(self):
+        """add_subdirectory produces 'imports' edge."""
+        from tws_graph.indexer.cmake_extractor import visit_cmake
+        import tree_sitter_language_pack
+
+        code = 'add_subdirectory(third_party)'
+        parser = tree_sitter_language_pack.get_parser("cmake")
+        tree = parser.parse(code)
+        result = visit_cmake("tests/CMakeLists.txt", code, tree)
+
+        import_edges = [e for e in result.edges if e["kind"] == "imports"]
+        assert len(import_edges) >= 1, f"Expected >=1 imports edge, got {len(import_edges)}"
+        target_texts = [e.get("target_text", "") for e in import_edges]
+        assert "third_party" in target_texts, f"'third_party' not in imports: {target_texts}"
+
+    # -- fixture tests (8-12) --
+
+    def test_find_package(self):
+        """find_package / include produce 'imports' edges."""
+        result = self._load_fixture()
+
+        import_edges = [e for e in result.edges if e["kind"] == "imports"]
+        target_texts = [e.get("target_text", "") for e in import_edges]
+
+        assert len(import_edges) >= 3, \
+            f"Expected >=3 import edges, got {len(import_edges)}: {target_texts}"
+        assert any("Boost" in t for t in target_texts), \
+            f"'Boost' not in imports: {target_texts}"
+        assert any("OpenSSL" in t for t in target_texts), \
+            f"'OpenSSL' not in imports: {target_texts}"
+        assert any("CTest" in t for t in target_texts), \
+            f"'CTest' not in imports: {target_texts}"
+
+    def test_command_call_edge(self):
+        """Top-level calls to user-defined functions produce 'calls' edges."""
+        result = self._load_fixture()
+
+        call_edges = [e for e in result.edges if e["kind"] == "calls"]
+        target_texts = [e.get("target_text", "") for e in call_edges]
+
+        assert len(call_edges) >= 2, \
+            f"Expected >=2 call edges, got {len(call_edges)}: {target_texts}"
+        assert any("set_common_properties" in t for t in target_texts), \
+            f"'set_common_properties' not in calls: {target_texts}"
+        assert any("add_test_target" in t for t in target_texts), \
+            f"'add_test_target' not in calls: {target_texts}"
+
+    def test_target_dependency_fixture(self):
+        """Fixture contains expected depends edges between targets."""
+        result = self._load_fixture()
+
+        depends_edges = [e for e in result.edges if e["kind"] == "depends"]
+        target_texts = [e.get("target_text", "") for e in depends_edges]
+
+        assert len(depends_edges) >= 3, \
+            f"Expected >=3 depends edges, got {len(depends_edges)}: {target_texts}"
+        assert "core_lib" in target_texts, f"'core_lib' not in depends: {target_texts}"
+        assert "OpenSSL_LIBRARIES" in target_texts or "network_lib" in target_texts, \
+            f"Expected library dependencies in depends: {target_texts}"
+
+    def test_nested_conditionals(self):
+        """Commands inside if/else/endif blocks are processed correctly."""
+        from tws_graph.indexer.cmake_extractor import visit_cmake
+        import tree_sitter_language_pack
+
+        code = """
+if(WIN32)
+    set(PLATFORM "windows")
+    add_executable(win_helper win_helper.cpp)
+else()
+    set(PLATFORM "unix")
+endif()
+
+target_compile_definitions(main PRIVATE PLATFORM_${PLATFORM})
+"""
+        parser = tree_sitter_language_pack.get_parser("cmake")
+        tree = parser.parse(code)
+        result = visit_cmake("tests/CMakeLists.txt", code, tree)
+
+        # Variables inside if/else should be extracted (top-level)
+        vars_ = [n for n in result.nodes if n["kind"] == "variable"]
+        names = {n["name"] for n in vars_}
+        assert "PLATFORM" in names, f"'PLATFORM' variable not found: {names}"
+
+        # Target inside if should be extracted
+        targets = [n for n in result.nodes if n["kind"] == "target"]
+        target_names = {n["name"] for n in targets}
+        assert "win_helper" in target_names, f"'win_helper' not found: {target_names}"
+
+    def test_helper_cmake(self):
+        """helper.cmake fixture extracts functions, macros, and variables."""
+        result = self._load_fixture("helper.cmake")
+
+        assert len(result.nodes) > 0, "Expected nodes from helper.cmake"
+        # helper.cmake has no top-level imports or target_link_libraries,
+        # so edges may be 0 (depending on fixture content)
+
+        kinds = {n["kind"] for n in result.nodes}
+        assert "function" in kinds, f"Expected function nodes in helper.cmake, got kinds: {kinds}"
+        assert "variable" in kinds, f"Expected variable nodes in helper.cmake, got kinds: {kinds}"
+        # Targets inside macro bodies are not extracted (only top-level targets)
+
+        funcs = [n for n in result.nodes if n["kind"] == "function"]
+        func_names = {n["name"] for n in funcs}
+        assert "download_file" in func_names, f"'download_file' not in functions: {func_names}"
+        assert "configure_helper" in func_names, f"'configure_helper' not in functions: {func_names}"
+        assert "add_benchmark" in func_names or "set_warning_level" in func_names, \
+            f"Expected macro functions in: {func_names}"
+
+        vars_ = [n for n in result.nodes if n["kind"] == "variable"]
+        var_names = {n["name"] for n in vars_}
+        assert "HELPER_VERSION" in var_names, f"'HELPER_VERSION' not in variables: {var_names}"
+        assert "HELPER_CACHE_DIR" in var_names or "HELPER_VERBOSE" in var_names or "RESOURCE_LIST" in var_names, \
+            f"Expected helper variables in: {var_names}"
+
+        # Import edges from include() etc - helper.cmake doesn't have imports
+        # but should have calls edges for functions that call other functions
+
+    def test_empty_file(self):
+        """Empty CMake file produces no nodes and no errors."""
+        from tws_graph.indexer.cmake_extractor import visit_cmake
+        import tree_sitter_language_pack
+
+        code = "# Just a comment\n"
+        parser = tree_sitter_language_pack.get_parser("cmake")
+        tree = parser.parse(code)
+        result = visit_cmake("empty.cmake", code, tree)
+
+        assert len(result.nodes) == 0
+        assert not result.errors
