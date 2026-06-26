@@ -37,19 +37,19 @@
 - [x] TEST-P51-Go-var-rw: 变量读写追踪 ✅
 - [x] TEST-P51-Go-regression: 现有 Go 测试全部通过 ✅
 
-- [ ] TEST-P51-Rust-modules: mod 系统 + imports 边
-- [ ] TEST-P51-Rust-traits: trait 实现 + implements 边
-- [ ] TEST-P51-Rust-macros: 宏调用 + calls 边
-- [ ] TEST-P51-Rust-generics: 生命周期/泛型 + type_ref 边
-- [ ] TEST-P51-Rust-derive: #[derive] + decorates 等价边
-- [ ] TEST-P51-Rust-regression: 现有 Rust 测试全部通过
+- [x] TEST-P51-Rust-modules: mod 系统 + imports 边 ✅
+- [x] TEST-P51-Rust-traits: trait 实现 + implements 边 ✅
+- [x] TEST-P51-Rust-macros: 宏调用 + calls 边 ✅
+- [x] TEST-P51-Rust-generics: 生命周期/泛型 + type_ref 边 ✅
+- [x] TEST-P51-Rust-derive: #[derive] + decorates 等价边 ✅
+- [x] TEST-P51-Rust-regression: 现有 Rust 测试全部通过 ✅
 
-- [ ] TEST-P51-C++-include: include 追踪 + imports 边
-- [ ] TEST-P51-C++-virtual: 虚函数覆写 + overrides 边
-- [ ] TEST-P51-C++-template: 模板 + type_ref 边
-- [ ] TEST-P51-C++-namespace: 命名空间 + qualified_name
-- [ ] TEST-P51-C++-constructor: 构造函数 + instantiates 边
-- [ ] TEST-P51-C++-regression: 现有 C++ 测试全部通过
+- [x] TEST-P51-C++-include: include 追踪 + imports 边 ✅
+- [x] TEST-P51-C++-virtual: 虚函数覆写 + overrides 边 ✅
+- [x] TEST-P51-C++-template: 模板 + type_ref 边 ✅
+- [x] TEST-P51-C++-namespace: 命名空间 + qualified_name ✅
+- [x] TEST-P51-C++-constructor: 构造函数 + instantiates 边 ✅
+- [x] TEST-P51-C++-regression: 现有 C++ 测试全部通过 ✅
 
 - [ ] TEST-P51-C#-using: using 指令 + imports 边
 - [ ] TEST-P51-C#-attribute: [JsonProperty] 等属性 + decorates 边

@@ -62,7 +62,9 @@ class TestCSharpMethodExtraction:
     def test_extracts_methods(self, result):
         methods = [n for n in result.nodes if n["kind"] == "method"]
         names = {n["name"] for n in methods}
-        assert "CreateOrder" in names
+        assert "GetHighValueOrders" in names
+        assert "GetTotalsByCustomer" in names
+        assert "HasOrdersForCustomer" in names
         assert "BuildOrder" in names
         assert "ValidateInput" in names
         assert "Process" in names
@@ -74,7 +76,7 @@ class TestCSharpMethodExtraction:
 
     def test_method_visibility(self, result):
         by_name = {n["name"]: n for n in result.nodes if n["kind"] == "method"}
-        assert by_name["CreateOrder"]["visibility"] == "public"
+        assert by_name["GetHighValueOrders"]["visibility"] == "public"
         assert by_name["BuildOrder"]["visibility"] == "private"
 
     def test_static_method(self, result):
@@ -139,7 +141,7 @@ class TestCSharpEdges:
     def test_call_target_text(self, result):
         calls = [e for e in result.edges if e["kind"] == "calls"]
         targets = {e.get("target_text", "") for e in calls}
-        assert any("CreateOrder" in t for t in targets)
+        assert any("CalculateTotal" in t for t in targets)
 
     def test_import_target_text(self, result):
         imports = [e for e in result.edges if e["kind"] == "imports"]
@@ -177,3 +179,96 @@ class TestCSharpEdgeCases:
         for edge in result.edges:
             assert "source_loc" in edge
             assert edge["source_loc"].startswith("sample.cs:")
+
+
+# ===========================================================================
+# P51: Attribute extraction — decorates edges
+# ===========================================================================
+
+class TestCSharpP51Attribute:
+    """P51: [JsonPropertyName] attributes -> decorates edges."""
+
+    def test_decorates_edges_exist(self, result):
+        decorates = [e for e in result.edges if e["kind"] == "decorates"]
+        assert len(decorates) >= 1, "Expected decorates edges from attributes"
+
+    def test_decorates_target_text_has_attribute_name(self, result):
+        decorates = [e for e in result.edges if e["kind"] == "decorates"]
+        targets = {e.get("target_text", "") for e in decorates}
+        assert any("JsonPropertyName" in t for t in targets), \
+            "target_text should contain attribute name JsonPropertyName"
+
+    def test_decorates_target_text_has_param(self, result):
+        decorates = [e for e in result.edges if e["kind"] == "decorates"]
+        targets = {e.get("target_text", "") for e in decorates}
+        assert any("order_id" in t for t in targets), \
+            "target_text should contain attribute param order_id"
+
+
+# ===========================================================================
+# P51: Generic type extraction — type_ref edges
+# ===========================================================================
+
+class TestCSharpP51Generic:
+    """P51: GenericRepository<T> / List<T> -> type_ref edges."""
+
+    def test_type_ref_edges_exist(self, result):
+        type_refs = [e for e in result.edges if e["kind"] == "type_ref"]
+        assert len(type_refs) >= 1, "Expected type_ref edges from generics"
+
+    def test_type_ref_has_T_param(self, result):
+        type_refs = [e for e in result.edges if e["kind"] == "type_ref"]
+        targets = {e.get("target_text", "") for e in type_refs}
+        assert any("T" in t for t in targets), \
+            "Expected generic param T in type_ref target_text"
+
+    def test_type_ref_has_concrete_type(self, result):
+        type_refs = [e for e in result.edges if e["kind"] == "type_ref"]
+        targets = {e.get("target_text", "") for e in type_refs}
+        assert any("OrderDto" in t or "OrderItem" in t for t in targets), \
+            "Expected concrete type like OrderDto/OrderItem in type_ref"
+
+
+# ===========================================================================
+# P51: Property accessor extraction — reads/writes edges
+# ===========================================================================
+
+class TestCSharpP51Property:
+    """P51: property accessor get/set -> reads/writes edges."""
+
+    def test_reads_edges_exist(self, result):
+        reads = [e for e in result.edges if e["kind"] == "reads"]
+        assert len(reads) >= 1, "Expected reads edges from property getters"
+
+    def test_writes_edges_exist(self, result):
+        writes = [e for e in result.edges if e["kind"] == "writes"]
+        assert len(writes) >= 1, "Expected writes edges from property setters"
+
+
+# ===========================================================================
+# P51: Regression verification
+# ===========================================================================
+
+class TestCSharpP51Regression:
+    """P51: verify no regressions in previously passing tests."""
+
+    def test_existing_node_kinds_preserved(self, result):
+        kinds = {n["kind"] for n in result.nodes}
+        for expected in ("class", "method", "interface", "struct",
+                         "field", "namespace", "file", "constructor"):
+            assert expected in kinds, f"Existing node kind '{expected}' missing"
+
+    def test_existing_edge_kinds_preserved(self, result):
+        edge_kinds = {e["kind"] for e in result.edges}
+        for expected in ("calls", "imports", "contains"):
+            assert expected in edge_kinds, f"Existing edge kind '{expected}' missing"
+
+    def test_node_count_not_decreased(self, result):
+        """Regression: we should have at least as many nodes as before."""
+        node_count = len(result.nodes)
+        assert node_count >= 23, f"Expected >=23 nodes, got {node_count}"
+
+    def test_edge_count_not_decreased(self, result):
+        """Regression: we should have at least as many edges as before."""
+        edge_count = len(result.edges)
+        assert edge_count >= 30, f"Expected >=30 edges, got {edge_count}"

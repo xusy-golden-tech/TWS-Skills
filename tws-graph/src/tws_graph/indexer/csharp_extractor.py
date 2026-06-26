@@ -102,13 +102,14 @@ def visit_csharp(file_path: str, content: str, tree) -> ExtractionResult:
         })
         return nid
 
-    def add_edge(source_id: str, target: str, kind: str, line: int, target_text: str | None = None):
+    def add_edge(source_id: str, target: str, kind: str, line: int,
+                 target_text: str | None = None, provenance: str = "tree-sitter"):
         edge = {
             "source": source_id,
             "target": target,
             "kind": kind,
             "source_loc": f"{file_path}:{line}",
-            "provenance": "tree-sitter",
+            "provenance": provenance,
         }
         if target_text:
             edge["target_text"] = target_text
@@ -213,6 +214,30 @@ def visit_csharp(file_path: str, content: str, tree) -> ExtractionResult:
                 name_stack.pop()
                 return
 
+        # -- property_declaration --
+        elif node_kind == "property_declaration":
+            name = _get_name(node, source)
+            if name:
+                modifiers = [_node_text(c, source) for c in _named_children(node) if c.kind() == "modifier"]
+                visibility = _visibility_from_modifiers(modifiers)
+                is_static = int("static" in modifiers)
+
+                nid = add_node("field", name, node,
+                               visibility=visibility,
+                               decorators=["static"] if is_static else [])
+
+                if node_stack:
+                    add_edge(node_stack[-1], nid, "contains", node.start_position().row + 1)
+
+                name_stack.append(name)
+                node_stack.append(nid)
+                scope_kinds.append("property")
+                _walk_children(node)
+                scope_kinds.pop()
+                node_stack.pop()
+                name_stack.pop()
+                return
+
         # -- method_declaration / constructor_declaration --
         elif node_kind in ("method_declaration", "constructor_declaration"):
             name = _get_name(node, source)
@@ -300,6 +325,96 @@ def visit_csharp(file_path: str, content: str, tree) -> ExtractionResult:
                                  node.start_position().row + 1,
                                  target_text=target_qname)
                     break
+
+        # -- attribute_list (attributes/decorators) --
+        elif node_kind == "attribute_list":
+            if node_stack:
+                for attr in _named_children(node):
+                    if attr.kind() == "attribute":
+                        attr_name_node = _find_named_child(attr, "identifier")
+                        if attr_name_node:
+                            attr_name = _node_text(attr_name_node, source)
+                            # Collect attribute argument text
+                            arg_list = _find_named_child(attr, "attribute_argument_list")
+                            args_parts = []
+                            if arg_list:
+                                for arg in _named_children(arg_list):
+                                    if arg.kind() == "attribute_argument":
+                                        args_parts.append(_node_text(arg, source))
+                            args_text = ", ".join(args_parts)
+                            target_text = f"{attr_name}({args_text})" if args_text else attr_name
+
+                            source_id = _hash_id(f"{file_path}::{attr_name}", file_path)
+                            add_edge(source_id, node_stack[-1], "decorates",
+                                     node.start_position().row + 1,
+                                     target_text=target_text,
+                                     provenance="heuristic")
+
+        # -- type_parameter_list (class/method generics e.g. <T>) --
+        elif node_kind == "type_parameter_list":
+            if node_stack:
+                for tp in _named_children(node):
+                    if tp.kind() == "type_parameter":
+                        tp_name = _get_name(tp, source)
+                        if tp_name:
+                            target_qname = f"{file_path}::{tp_name}"
+                            target_id = _hash_id(target_qname, file_path)
+                            add_edge(node_stack[-1], target_id, "type_ref",
+                                     node.start_position().row + 1,
+                                     target_text=tp_name, provenance="heuristic")
+
+        # -- type_argument_list (concrete type args e.g. List<OrderDto>) --
+        elif node_kind == "type_argument_list":
+            if node_stack:
+                for child in _named_children(node):
+                    # Extract the base type name from each type argument child
+                    type_name = None
+                    if child.kind() == "identifier":
+                        type_name = _node_text(child, source)
+                    elif child.kind() == "generic_name":
+                        ident = _find_named_child(child, "identifier")
+                        if ident:
+                            type_name = _node_text(ident, source)
+                    elif child.kind() == "predefined_type":
+                        type_name = _node_text(child, source)
+                    if type_name:
+                        target_qname = f"{file_path}::{type_name}"
+                        target_id = _hash_id(target_qname, file_path)
+                        add_edge(node_stack[-1], target_id, "type_ref",
+                                 node.start_position().row + 1,
+                                 target_text=type_name, provenance="heuristic")
+
+        # -- accessor_declaration (get/set property accessors) --
+        elif node_kind == "accessor_declaration":
+            text = _node_text(node, source).strip().lower()
+            if text.startswith("get"):
+                edge_kind = "reads"
+            elif text.startswith("set") or text.startswith("init"):
+                edge_kind = "writes"
+            else:
+                edge_kind = None
+
+            if edge_kind and node_stack and name_stack:
+                # Target is the property name from the current scope
+                prop_name = name_stack[-1]
+                target_qname = make_qualified(prop_name)
+                target_id = _hash_id(target_qname, file_path)
+                add_edge(node_stack[-1], target_id, edge_kind,
+                         node.start_position().row + 1,
+                         target_text=prop_name, provenance="heuristic")
+
+        # -- assignment_expression (produces writes) --
+        elif node_kind == "assignment_expression":
+            if node_stack:
+                # First named child is the l-value (left-hand side)
+                first = node.named_child(0)
+                if first is not None:
+                    lhs_text = _node_text(first, source)
+                    target_qname = f"{file_path}::{lhs_text}"
+                    target_id = _hash_id(target_qname, file_path)
+                    add_edge(node_stack[-1], target_id, "writes",
+                             node.start_position().row + 1,
+                             target_text=lhs_text, provenance="heuristic")
 
         # Recurse into children
         _walk_children(node)

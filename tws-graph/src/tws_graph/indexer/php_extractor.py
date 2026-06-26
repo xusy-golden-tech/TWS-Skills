@@ -2,7 +2,8 @@
 
 Uses tree-sitter >= 0.25 method-based API.
 Extracts class/interface/trait definitions, functions, methods, calls,
-require/include statements, namespaces, and use imports.
+require/include statements, namespaces, use imports, PHP 8 attributes,
+trait usage, and type annotations.
 """
 
 import hashlib
@@ -104,13 +105,14 @@ def visit_php(file_path: str, content: str, tree) -> ExtractionResult:
         })
         return nid
 
-    def add_edge(source_id: str, target: str, kind: str, line: int, target_text: str | None = None):
+    def add_edge(source_id: str, target: str, kind: str, line: int,
+                 target_text: str | None = None, provenance: str = "tree-sitter"):
         edge = {
             "source": source_id,
             "target": target,
             "kind": kind,
             "source_loc": f"{file_path}:{line}",
-            "provenance": "tree-sitter",
+            "provenance": provenance,
         }
         if target_text:
             edge["target_text"] = target_text
@@ -296,6 +298,67 @@ def visit_php(file_path: str, content: str, tree) -> ExtractionResult:
                         add_edge(source_id, target_id, "imports",
                                  node.start_position().row + 1,
                                  target_text=module_name)
+
+        # -- use_declaration (trait usage inside class body) --
+        elif node_kind == "use_declaration":
+            # Only handle trait use when inside a class/trait scope
+            source_id = node_stack[-1] if node_stack else (file_id or "")
+            if source_id and scope_kinds and scope_kinds[-1] in ("class", "trait"):
+                for child in _named_children(node):
+                    if child.kind() == "name":
+                        trait_name = _node_text(child, source)
+                        if trait_name:
+                            # Compute target qualified name at enclosing scope
+                            # (trait defined at same level as the class)
+                            parts = [file_path] + name_stack[:-1] + [trait_name]
+                            trait_qname = "::".join(parts)
+                            target_id = _hash_id(trait_qname, file_path)
+                            add_edge(source_id, target_id, "implements",
+                                     node.start_position().row + 1,
+                                     target_text=trait_name,
+                                     provenance="heuristic")
+            _walk_children(node)
+            return
+
+        # -- attribute_list (PHP 8 #[...] attributes) --
+        elif node_kind == "attribute_list":
+            decorated_id = node_stack[-1] if node_stack else ""
+            if decorated_id:
+                for ac in _children(node):
+                    if ac.kind() == "attribute_group":
+                        attr_node = _find_named_child(ac, "attribute")
+                        if attr_node:
+                            attr_name_node = _find_named_child(attr_node, "name")
+                            if attr_name_node:
+                                attr_name = _node_text(attr_name_node, source)
+                                if attr_name:
+                                    add_edge(decorated_id,
+                                             _hash_id(f"#{attr_name}", file_path),
+                                             "decorates",
+                                             node.start_position().row + 1,
+                                             target_text=f"#{attr_name}",
+                                             provenance="heuristic")
+            _walk_children(node)
+            return
+
+        # -- named_type (type annotations like UserRequest, Cache) --
+        elif node_kind == "named_type":
+            source_id = node_stack[-1] if node_stack else ""
+            if source_id:
+                type_name_node = _find_named_child(node, "name")
+                if not type_name_node:
+                    type_name_node = _find_named_child(node, "qualified_name")
+                if type_name_node:
+                    type_name = _node_text(type_name_node, source)
+                    if type_name:
+                        add_edge(source_id,
+                                 _hash_id(type_name, file_path),
+                                 "type_ref",
+                                 node.start_position().row + 1,
+                                 target_text=type_name,
+                                 provenance="heuristic")
+            _walk_children(node)
+            return
 
         # -- require_once_expression / require_expression / include_expression / include_once_expression --
         elif node_kind in ("require_once_expression", "require_expression",
