@@ -133,12 +133,20 @@ impl ExtractionContext {
         kind: NodeKind,
         name: &str,
         node: &tree_sitter::Node,
-        extra: HashMap<String, String>,
+        mut extra: HashMap<String, String>,
     ) -> String {
         let qualified_name = self.make_qualified(name);
         let id = hash_id(&self.file_path, &qualified_name);
         let start_pos = node.start_position();
         let end_pos = node.end_position();
+
+        // Extract known fields from extra before serialising the rest
+        let signature = extra.remove("signature");
+        let decorators_json = extra.remove("decorators");
+        let is_abstract_val = extra
+            .remove("is_abstract")
+            .map(|v| v == "true")
+            .unwrap_or(false);
 
         let properties_json = if extra.is_empty() {
             None
@@ -155,12 +163,12 @@ impl ExtractionContext {
             language: self.language.clone(),
             start_line: (start_pos.row + 1) as i64,
             end_line: (end_pos.row + 1) as i64,
-            signature: None,
+            signature,
             docstring: None,
             visibility: None,
-            is_abstract: 0,
+            is_abstract: if is_abstract_val { 1 } else { 0 },
             is_exported: 0,
-            decorators: None,
+            decorators: decorators_json,
             framework: None,
             properties: properties_json,
             body: None,
