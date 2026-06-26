@@ -323,6 +323,7 @@ pub(crate) fn node_kind_to_str(kind: NodeKind) -> &'static str {
         NodeKind::TypeDef => "type_def",
         NodeKind::Record => "record",
         NodeKind::Instance => "instance",
+        NodeKind::Signature => "signature",
 
         // --- structural / markup ---
         NodeKind::HtmlElement => "html_element",
@@ -720,6 +721,7 @@ mod tests {
             NodeKind::TypeDef,
             NodeKind::Record,
             NodeKind::Instance,
+            NodeKind::Signature,
             NodeKind::HtmlElement,
             NodeKind::CssRule,
             NodeKind::CssImport,

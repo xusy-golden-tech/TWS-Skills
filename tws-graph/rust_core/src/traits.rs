@@ -74,6 +74,7 @@ pub enum NodeKind {
     TypeDef,
     Record,
     Instance,
+    Signature,
 
     // --- structural / markup ---
     HtmlElement,

@@ -145,6 +145,302 @@ impl Database {
     }
 
     // -----------------------------------------------------------------------
+    // Query methods
+    // -----------------------------------------------------------------------
+
+    /// Escape special characters in an FTS5 query string so they are
+    /// treated as literal text rather than query operators.
+    ///
+    /// Wraps the text in double quotes (treating it as a phrase query)
+    /// and escapes any internal double quotes by doubling them.
+    pub fn fts5_escape_query(text: &str) -> String {
+        let escaped = text.replace('"', "\"\"");
+        format!("\"{}\"", escaped)
+    }
+
+    /// Get all outbound edges from a node.
+    ///
+    /// Returns `(edge_rowid, target_node_hash, kind, target_text)` rows.
+    /// `node_id` is the TEXT primary key from `nodes.id` (SHA256 hash).
+    pub fn get_outbound_edges(
+        &self,
+        node_id: &str,
+    ) -> rusqlite::Result<Vec<(i64, String, String, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, target, kind, target_text FROM edges WHERE source = ?1",
+        )?;
+        let rows = stmt.query_map([node_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Get all inbound edges to a node.
+    ///
+    /// Returns `(edge_rowid, source_node_hash, kind, target_text)` rows.
+    pub fn get_inbound_edges(
+        &self,
+        node_id: &str,
+    ) -> rusqlite::Result<Vec<(i64, String, String, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source, kind, target_text FROM edges WHERE target = ?1",
+        )?;
+        let rows = stmt.query_map([node_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Get a node by its TEXT id (SHA256 hash).
+    ///
+    /// Returns `Option<(id, kind, name, qualified_name, language, file_path)>`.
+    pub fn get_node(
+        &self,
+        node_id: &str,
+    ) -> rusqlite::Result<Option<(String, String, String, String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, name, qualified_name, language, file_path FROM nodes WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map([node_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })?;
+        match rows.next() {
+            Some(Ok(r)) => Ok(Some(r)),
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
+
+    /// Search nodes using FTS5 BM25 scoring.
+    ///
+    /// Returns `(id, kind, name, qualified_name, file_path, language, rank)` rows.
+    pub fn search_fts5(
+        &self,
+        text: &str,
+        kind: Option<&str>,
+        lang: Option<&str>,
+        path: Option<&str>,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<(String, String, String, String, String, String, Option<f64>)>> {
+        let qualified_text = Self::fts5_escape_query(text);
+        let mut sql = String::from(
+            "SELECT n.id, n.kind, n.name, n.qualified_name, n.file_path, n.language, nodes_fts.rank \
+             FROM nodes_fts \
+             JOIN nodes n ON n.rowid = nodes_fts.rowid \
+             WHERE nodes_fts MATCH ?1",
+        );
+        if kind.is_some() {
+            sql.push_str(" AND n.kind = ?2");
+        }
+        if lang.is_some() {
+            sql.push_str(" AND n.language = ?3");
+        }
+        if path.is_some() {
+            sql.push_str(" AND n.file_path LIKE ?4");
+        }
+        sql.push_str(" ORDER BY rank LIMIT ?5");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let limit_i64 = limit as i64;
+        let path_pattern = path.map(|p| format!("%{}%", p));
+
+        let rows = stmt.query_map(
+            rusqlite::params![qualified_text, kind, lang, path_pattern, limit_i64],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )?;
+        rows.collect()
+    }
+
+    /// Search nodes using LIKE (fallback when FTS5 returns no results).
+    ///
+    /// Returns `(id, kind, name, qualified_name, file_path, language, rank)` rows,
+    /// with rank always `None`.
+    pub fn search_like(
+        &self,
+        text: &str,
+        kind: Option<&str>,
+        lang: Option<&str>,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<(String, String, String, String, String, String, Option<f64>)>> {
+        let pattern = format!("%{}%", text);
+        let mut sql = String::from(
+            "SELECT id, kind, name, qualified_name, file_path, language, NULL as rank \
+             FROM nodes \
+             WHERE (name LIKE ?1 OR qualified_name LIKE ?1)",
+        );
+        if kind.is_some() {
+            sql.push_str(" AND kind = ?2");
+        }
+        if lang.is_some() {
+            sql.push_str(" AND language = ?3");
+        }
+        sql.push_str(" LIMIT ?4");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let limit_i64 = limit as i64;
+
+        let rows = stmt.query_map(
+            rusqlite::params![pattern, kind, lang, limit_i64],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    None::<f64>,
+                ))
+            },
+        )?;
+        rows.collect()
+    }
+
+    /// Search nodes using Levenshtein edit distance <= 2 on the `name` field.
+    ///
+    /// Returns `(id, kind, name, qualified_name, file_path, language, rank)` rows
+    /// with rank set to the edit distance (lower is better).
+    pub fn search_edit_distance(
+        &self,
+        text: &str,
+        kind: Option<&str>,
+        lang: Option<&str>,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<(String, String, String, String, String, String, Option<f64>)>> {
+        // Build query dynamically so we never pass unused params.
+        let mut clauses: Vec<&str> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(k) = kind {
+            clauses.push("kind = ?");
+            params.push(Box::new(k.to_string()));
+        }
+        if let Some(l) = lang {
+            clauses.push("language = ?");
+            params.push(Box::new(l.to_string()));
+        }
+
+        let mut sql = String::from(
+            "SELECT id, kind, name, qualified_name, file_path, language FROM nodes",
+        );
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+
+        let mut scored: Vec<(String, String, String, String, String, String, Option<f64>)> = rows
+            .filter_map(|r| r.ok())
+            .filter_map(|(id, k, name, qn, fp, lang_val)| {
+                let dist = levenshtein_distance(&name.to_lowercase(), &text.to_lowercase());
+                if dist <= 2 {
+                    Some((id, k, name, qn, fp, lang_val, Some(dist as f64)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        scored.sort_by(|a, b| a.6.partial_cmp(&b.6).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored)
+    }
+
+    /// Check if the nodes_fts table has any matching rows for the given text.
+    pub fn has_fts_match(&self, text: &str) -> rusqlite::Result<bool> {
+        let qualified = Self::fts5_escape_query(text);
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM nodes_fts WHERE nodes_fts MATCH ?1",
+            [&qualified],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Get unresolved references.
+    ///
+    /// Returns `(reference_name, reference_kind, file_path, from_node_id)` rows.
+    pub fn get_unresolved(
+        &self,
+    ) -> rusqlite::Result<Vec<(String, String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT reference_name, reference_kind, file_path, from_node_id FROM unresolved_refs",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Get all edges, optionally filtered by kind.
+    ///
+    /// Returns `(source, target, kind, target_text)` rows.
+    pub fn get_all_edges(
+        &self,
+        kind_filter: Option<&str>,
+    ) -> rusqlite::Result<Vec<(String, String, String, Option<String>)>> {
+        if let Some(kind) = kind_filter {
+            let mut stmt = self.conn.prepare(
+                "SELECT source, target, kind, target_text FROM edges WHERE kind = ?1",
+            )?;
+            let rows = stmt.query_map([kind], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect()
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT source, target, kind, target_text FROM edges",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect()
+        }
+    }
+
+    /// Find a node by name or qualified_name and return its TEXT id.
+    pub fn find_node_id_by_name(&self, name: &str) -> rusqlite::Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM nodes WHERE name = ?1 OR qualified_name = ?1 LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map([name], |row| row.get(0))?;
+        match rows.next() {
+            Some(Ok(r)) => Ok(Some(r)),
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Lifecycle
     // -----------------------------------------------------------------------
 
@@ -192,6 +488,43 @@ pub fn hash_id(file_path: &str, qualified_name: &str) -> String {
     let raw = format!("{}:{}", file_path, qualified_name);
     let digest = Sha256::digest(raw.as_bytes());
     hex::encode(&digest)[..32].to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Utility: Levenshtein edit distance
+// ---------------------------------------------------------------------------
+
+/// Compute the Levenshtein edit distance between two strings.
+///
+/// Uses dynamic programming with O(min(m,n)) space.
+pub fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let a_len = a_chars.len();
+    let b_len = b_chars.len();
+
+    if a_len == 0 {
+        return b_len;
+    }
+    if b_len == 0 {
+        return a_len;
+    }
+
+    let mut prev: Vec<usize> = (0..=b_len).collect();
+    let mut curr: Vec<usize> = vec![0; b_len + 1];
+
+    for i in 1..=a_len {
+        curr[0] = i;
+        for j in 1..=b_len {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[b_len]
 }
 
 // ---------------------------------------------------------------------------
