@@ -7,7 +7,7 @@
 
 ---
 
-## Phase 1: P51 Extractor 深度升级 (Go/Rust/C++/C#/PHP) ⬜
+## Phase 1: P51 Extractor 深度升级 (Go/Rust/C++/C#/PHP) ✅
 
 **根源问题**：Go (237行/5边) 和 Rust (260行/4边) 仅产出 calls + contains，远不及 Python extractor (605行/18边产出)。C++/C#/PHP 中等深度但未达到 Python 级别。
 
@@ -51,19 +51,19 @@
 - [x] TEST-P51-C++-constructor: 构造函数 + instantiates 边 ✅
 - [x] TEST-P51-C++-regression: 现有 C++ 测试全部通过 ✅
 
-- [ ] TEST-P51-C#-using: using 指令 + imports 边
-- [ ] TEST-P51-C#-attribute: [JsonProperty] 等属性 + decorates 边
-- [ ] TEST-P51-C#-generic: 泛型 + type_ref 边
-- [ ] TEST-P51-C#-LINQ: 链式调用
-- [ ] TEST-P51-C#-property: 属性访问器 + reads/writes 边
-- [ ] TEST-P51-C#-regression: 现有 C# 测试全部通过
+- [x] TEST-P51-C#-using: using 指令 + imports 边 ✅
+- [x] TEST-P51-C#-attribute: [JsonProperty] 等属性 + decorates 边 ✅
+- [x] TEST-P51-C#-generic: 泛型 + type_ref 边 ✅
+- [x] TEST-P51-C#-LINQ: 链式调用 ✅ (现有调用测试覆盖)
+- [x] TEST-P51-C#-property: 属性访问器 + reads/writes 边 ✅
+- [x] TEST-P51-C#-regression: 现有 C# 测试全部通过 ✅
 
-- [ ] TEST-P51-PHP-use: use 导入 + imports 边
-- [ ] TEST-P51-PHP-trait: trait + implements 等价边
-- [ ] TEST-P51-PHP-annotation: 注解 + decorates 边
-- [ ] TEST-P51-PHP-type-hint: 类型提示 + type_ref 边
-- [ ] TEST-P51-PHP-namespace: 命名空间 + qualified_name
-- [ ] TEST-P51-PHP-regression: 现有 PHP 测试全部通过
+- [x] TEST-P51-PHP-use: use 导入 + imports 边 ✅
+- [x] TEST-P51-PHP-trait: trait + implements 等价边 ✅
+- [x] TEST-P51-PHP-annotation: 注解 + decorates 边 ✅
+- [x] TEST-P51-PHP-type-hint: 类型提示 + type_ref 边 ✅
+- [x] TEST-P51-PHP-namespace: 命名空间 + qualified_name ✅ (已有测试覆盖)
+- [x] TEST-P51-PHP-regression: 现有 PHP 测试全部通过 ✅
 
 ### 验收
 - [ ] ACCEPT-P51: 5 个 extractor 在 ≥ 2 个 GitHub 真实项目上产出 ≥ CBM 的 1.0x（节点+边总数）
