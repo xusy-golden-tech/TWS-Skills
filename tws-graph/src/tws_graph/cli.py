@@ -2139,8 +2139,6 @@ def query(
       tws-graph query "FIND * WHERE lang = 'python' RETURN name, file_path"
       tws-graph query "IMPACT OF MyClass.my_method"
     """
-    from .gql import parse_gql, execute_gql
-
     resolved_db = os.path.abspath(db or DEFAULT_DB)
 
     # Try Rust acceleration
@@ -2150,32 +2148,9 @@ def query(
             typer.echo(rust_gql_query(resolved_db, gql_query, include_paths, exclude_paths))
             return
 
-    db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
-    if db_conn is None:
-        typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
-        raise typer.Exit(1)
-
-    queries = QueryBuilder(db_conn.conn)
-
-    try:
-        result = execute_gql(queries, gql_query)
-    except ValueError as e:
-        typer.echo(f"GQL 语法错误: {e}", err=True)
-        raise typer.Exit(1)
-
-    if not result:
-        typer.echo("(无结果)")
-        return
-
-    if json_output:
-        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        for row in result:
-            name = row.get("name", row.get("qualified_name", ""))
-            fpath = row.get("file_path", "")
-            kind = row.get("kind", "")
-            line = row.get("start_line", "")
-            typer.echo(f"{kind:<12} {name:<40} {fpath}:{line}")
+    # Fallback: Python GQL engine removed in v7.0.0.
+    typer.echo("错误: Rust 核心不可用，无法执行 GQL 查询。请重新安装 tws-graph。", err=True)
+    raise typer.Exit(1)
 
 
 # ============================================================================

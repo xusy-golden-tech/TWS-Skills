@@ -63,7 +63,7 @@ fn matches_scope(path: &str, include: &[String], exclude: &[String]) -> bool {
     if !include.is_empty() {
         let matched = include.iter().any(|p| {
             crate::indexer::ignore::compile_glob(p)
-                .map(|pat| pat.matches(&normalized))
+                .map(|pats| pats.iter().any(|pat| pat.matches(&normalized)))
                 .unwrap_or(false)
         });
         if !matched {
@@ -73,7 +73,7 @@ fn matches_scope(path: &str, include: &[String], exclude: &[String]) -> bool {
     if !exclude.is_empty() {
         let excluded = exclude.iter().any(|p| {
             crate::indexer::ignore::compile_glob(p)
-                .map(|pat| pat.matches(&normalized))
+                .map(|pats| pats.iter().any(|pat| pat.matches(&normalized)))
                 .unwrap_or(false)
         });
         if excluded {
@@ -128,11 +128,11 @@ fn cycle_in_scope(db: &db::Database, cycle: &[(String, String)], inc: &[String],
     if inc.is_empty() && exc.is_empty() {
         return true;
     }
-    cycle.iter().any(|(node_id, _)| {
+    cycle.iter().all(|(node_id, _)| {
         if let Some(fp) = get_file_path(db, node_id) {
             matches_scope(&fp, inc, exc)
         } else {
-            false
+            true
         }
     })
 }
@@ -142,11 +142,11 @@ fn path_in_scope(db: &db::Database, path: &[(String, String)], inc: &[String], e
     if inc.is_empty() && exc.is_empty() {
         return true;
     }
-    path.iter().any(|(node_id, _)| {
+    path.iter().all(|(node_id, _)| {
         if let Some(fp) = get_file_path(db, node_id) {
             matches_scope(&fp, inc, exc)
         } else {
-            false
+            true  // can't determine — allow
         }
     })
 }

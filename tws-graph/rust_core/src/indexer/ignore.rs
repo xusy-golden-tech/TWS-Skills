@@ -99,39 +99,59 @@ pub fn parse_twsignore_content(content: &str) -> Result<IgnorePatterns, anyhow::
             if rest.is_empty() {
                 continue; // lone "!" is meaningless
             }
-            let pat = compile_glob(rest)?;
-            patterns.negative.push(pat);
+            for pat in compile_glob(rest)? {
+                patterns.negative.push(pat);
+            }
         } else {
             // Positive pattern: exclude.
-            let pat = compile_glob(trimmed)?;
-            patterns.positive.push(pat);
+            for pat in compile_glob(trimmed)? {
+                patterns.positive.push(pat);
+            }
         }
     }
 
     Ok(patterns)
 }
 
-/// Compile a single raw pattern string into a `glob::Pattern`.
+/// Compile a single raw pattern string into one or more `glob::Pattern`s.
 ///
 /// Applies gitignore-style semantics:
 /// - Trailing `/`  → directory pattern: match everything inside that
-///   directory (append `**`).
-/// - No `/` inside → bare filename pattern: match at any depth by
-///   prepending `**/`.
-/// - Contains `/` → full-path pattern: use as-is (match from root).
-pub(crate) fn compile_glob(raw: &str) -> Result<glob::Pattern, anyhow::Error> {
+///   directory (`dir/**`).
+/// - No `/` inside → bare filename pattern: match the entry itself at
+///   any depth (`**/pattern`) AND match directory contents if it names
+///   a directory (`**/pattern/**`).  This ensures `g_assistant*`
+///   excludes both the top-level item *and* everything inside it.
+/// - Contains `/` → full-path pattern: use as-is + a directory-contents
+///   variant (`pattern/**`) in case the path names a directory.
+pub(crate) fn compile_glob(raw: &str) -> Result<Vec<glob::Pattern>, anyhow::Error> {
     let s = raw.trim();
 
     if s.ends_with('/') {
-        // Directory pattern: "tests/" → match "tests/**"
+        // Directory pattern: strip trailing /, then apply anchoring rules.
         let dir = &s[..s.len() - 1];
-        Ok(glob::Pattern::new(&format!("{}/**", dir))?)
+        if dir.contains('/') {
+            // Anchored: "src/tests/" → "src/tests/**"
+            Ok(vec![glob::Pattern::new(&format!("{}/**", dir))?])
+        } else {
+            // Bare directory name: "tests/" → matches at any depth.
+            // Generate both the dir entry and its contents.
+            let entry = glob::Pattern::new(&format!("**/{}", dir))?;
+            let contents = glob::Pattern::new(&format!("**/{}/**", dir))?;
+            Ok(vec![entry, contents])
+        }
     } else if !s.contains('/') {
-        // Bare pattern: "*.pyc" → match at any depth "**/*.pyc"
-        Ok(glob::Pattern::new(&format!("**/{}", s))?)
+        // Bare pattern: matches the entry itself at any depth, AND
+        // matches everything inside a directory with that name.
+        let entry = glob::Pattern::new(&format!("**/{}", s))?;
+        let contents = glob::Pattern::new(&format!("**/{}/**", s))?;
+        Ok(vec![entry, contents])
     } else {
-        // Full-path pattern: use as-is.
-        Ok(glob::Pattern::new(s)?)
+        // Full-path pattern: use as-is, plus a directory-contents
+        // variant so that "src/foo" also matches "src/foo/bar/baz.py".
+        let exact = glob::Pattern::new(s)?;
+        let contents = glob::Pattern::new(&format!("{}/**", s))?;
+        Ok(vec![exact, contents])
     }
 }
 
