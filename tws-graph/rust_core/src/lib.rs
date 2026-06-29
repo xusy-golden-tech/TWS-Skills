@@ -31,7 +31,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 // ============================================================================
@@ -77,6 +77,74 @@ fn matches_scope(path: &str, include: &[String], exclude: &[String]) -> bool {
         }
     }
     true
+}
+
+/// Check whether scope filtering is active (at least one include or exclude pattern).
+fn has_scope(include: Option<&Vec<String>>, exclude: Option<&Vec<String>>) -> bool {
+    include.map_or(false, |v| !v.is_empty()) || exclude.map_or(false, |v| !v.is_empty())
+}
+
+/// Resolve include/exclude to slices for convenience.
+fn resolve_scope<'a>(
+    include: &'a Option<Vec<String>>,
+    exclude: &'a Option<Vec<String>>,
+) -> (&'a [String], &'a [String]) {
+    let inc = include.as_deref().unwrap_or(&[]);
+    let exc = exclude.as_deref().unwrap_or(&[]);
+    (inc, exc)
+}
+
+/// Look up a node's file_path by its ID. Returns None if not found.
+fn get_file_path(db: &db::Database, node_id: &str) -> Option<String> {
+    db.get_node(node_id).ok()?.map(|(_, _, _, _, _, fp)| fp)
+}
+
+/// Build a set of node IDs whose file_path matches the scope filters.
+/// Used by export functions to pre-filter which nodes are included in the output.
+fn build_allowed_nodes(db: &db::Database, inc: &[String], exc: &[String]) -> HashSet<String> {
+    let conn = db.connection();
+    let mut nodes = HashSet::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT id, file_path FROM nodes") {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            for row in rows.flatten() {
+                if matches_scope(&row.1, inc, exc) {
+                    nodes.insert(row.0);
+                }
+            }
+        }
+    }
+    nodes
+}
+
+/// Check if any node in a cycle matches the scope. For cycles, we keep the cycle
+/// if at least one node passes the scope filter (i.e., not all nodes are excluded).
+fn cycle_in_scope(db: &db::Database, cycle: &[(String, String)], inc: &[String], exc: &[String]) -> bool {
+    if inc.is_empty() && exc.is_empty() {
+        return true;
+    }
+    cycle.iter().any(|(node_id, _)| {
+        if let Some(fp) = get_file_path(db, node_id) {
+            matches_scope(&fp, inc, exc)
+        } else {
+            false
+        }
+    })
+}
+
+/// Check if any node in a taint/dataflow path matches the scope.
+fn path_in_scope(db: &db::Database, path: &[(String, String)], inc: &[String], exc: &[String]) -> bool {
+    if inc.is_empty() && exc.is_empty() {
+        return true;
+    }
+    path.iter().any(|(node_id, _)| {
+        if let Some(fp) = get_file_path(db, node_id) {
+            matches_scope(&fp, inc, exc)
+        } else {
+            false
+        }
+    })
 }
 
 // ============================================================================
@@ -690,10 +758,17 @@ fn trace(db_path: &str, src: &str, tgt: &str, include_paths: Option<Vec<String>>
 
 /// List unresolved references with internal/external classification.
 #[pyfunction]
-fn unresolved(db_path: &str) -> PyResult<String> {
+#[pyo3(signature = (db_path, include_paths=None, exclude_paths=None))]
+fn unresolved(db_path: &str, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    let results = query::run_unresolved(&db)
+    let mut results = query::run_unresolved(&db)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    // Apply --include / --exclude scope filtering
+    if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        results.retain(|r| matches_scope(&r.file_path, inc, exc));
+    }
 
     if results.is_empty() {
         return Ok("No unresolved references found.".to_string());
@@ -713,23 +788,44 @@ fn unresolved(db_path: &str) -> PyResult<String> {
 
 /// Export a subgraph in Graphviz DOT format.
 #[pyfunction]
-fn export_dot(db_path: &str, from_node: &str, depth: Option<usize>, kind: Option<&str>) -> PyResult<String> {
+#[pyo3(signature = (db_path, from_node, depth=None, kind=None, include_paths=None, exclude_paths=None))]
+fn export_dot(db_path: &str, from_node: &str, depth: Option<usize>, kind: Option<&str>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    Ok(export::export_dot(&db, from_node, depth.unwrap_or(2), kind))
+    let allowed_nodes = if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        Some(build_allowed_nodes(&db, inc, exc))
+    } else {
+        None
+    };
+    Ok(export::export_dot(&db, from_node, depth.unwrap_or(2), kind, allowed_nodes.as_ref()))
 }
 
 /// Export a subgraph in Mermaid format.
 #[pyfunction]
-fn export_mermaid(db_path: &str, from_node: &str, depth: Option<usize>, kind: Option<&str>) -> PyResult<String> {
+#[pyo3(signature = (db_path, from_node, depth=None, kind=None, include_paths=None, exclude_paths=None))]
+fn export_mermaid(db_path: &str, from_node: &str, depth: Option<usize>, kind: Option<&str>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    Ok(export::export_mermaid(&db, from_node, depth.unwrap_or(2), kind))
+    let allowed_nodes = if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        Some(build_allowed_nodes(&db, inc, exc))
+    } else {
+        None
+    };
+    Ok(export::export_mermaid(&db, from_node, depth.unwrap_or(2), kind, allowed_nodes.as_ref()))
 }
 
 /// Export nodes and edges as JSON string.
 #[pyfunction]
-fn export_json(db_path: &str, kind: Option<&str>, limit: Option<usize>) -> PyResult<String> {
+#[pyo3(signature = (db_path, kind=None, limit=None, include_paths=None, exclude_paths=None))]
+fn export_json(db_path: &str, kind: Option<&str>, limit: Option<usize>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    let value = export::export_json(&db, kind, limit.unwrap_or(0));
+    let allowed_nodes = if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        Some(build_allowed_nodes(&db, inc, exc))
+    } else {
+        None
+    };
+    let value = export::export_json(&db, kind, limit.unwrap_or(0), allowed_nodes.as_ref());
     serde_json::to_string_pretty(&value)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
@@ -740,9 +836,19 @@ fn export_json(db_path: &str, kind: Option<&str>, limit: Option<usize>) -> PyRes
 
 /// Detect cycles in the call graph.
 #[pyfunction]
-fn cycles(db_path: &str) -> PyResult<String> {
+#[pyo3(signature = (db_path, include_paths=None, exclude_paths=None))]
+fn cycles(db_path: &str, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    let cycles = analysis::detect_cycles(&db);
+    let cycles_data = analysis::detect_cycles(&db);
+
+    // Apply scope filtering: keep cycles where at least one node passes the scope check
+    let cycles: Vec<_> = if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        cycles_data.into_iter().filter(|cycle| cycle_in_scope(&db, cycle, inc, exc)).collect()
+    } else {
+        cycles_data
+    };
+
     if cycles.is_empty() {
         return Ok("No cycles detected.".to_string());
     }
@@ -759,11 +865,23 @@ fn cycles(db_path: &str) -> PyResult<String> {
 /// Detect architectural layer violations.
 /// Auto-infers layers from directory structure (depth 1).
 #[pyfunction]
-fn layers(db_path: &str) -> PyResult<String> {
+#[pyo3(signature = (db_path, include_paths=None, exclude_paths=None))]
+fn layers(db_path: &str, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
     // Auto-infer layers from directory structure
     let layer_map = infer_layers(&db);
-    let violations = analysis::detect_layer_violations(&db, &layer_map);
+    let mut violations = analysis::detect_layer_violations(&db, &layer_map);
+
+    // Apply scope filtering: keep violations where either source or target file matches
+    if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        violations.retain(|(src_id, _, _, tgt_id, _, _)| {
+            let src_fp = get_file_path(&db, src_id).unwrap_or_default();
+            let tgt_fp = get_file_path(&db, tgt_id).unwrap_or_default();
+            matches_scope(&src_fp, inc, exc) || matches_scope(&tgt_fp, inc, exc)
+        });
+    }
+
     if violations.is_empty() {
         return Ok("No layer violations detected.".to_string());
     }
@@ -808,9 +926,17 @@ fn infer_layers(db: &db::Database) -> HashMap<String, usize> {
 
 /// Compute module-level metrics (cohesion, coupling, instability).
 #[pyfunction]
-fn metrics(db_path: &str) -> PyResult<String> {
+#[pyo3(signature = (db_path, include_paths=None, exclude_paths=None))]
+fn metrics(db_path: &str, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    let m = analysis::compute_metrics(&db);
+    let mut m = analysis::compute_metrics(&db);
+
+    // Apply scope filtering: filter by module name (= file_path prefix)
+    if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        m.retain(|name, _| matches_scope(name, inc, exc));
+    }
+
     if m.is_empty() {
         return Ok("No metrics computed (empty graph).".to_string());
     }
@@ -827,11 +953,21 @@ fn metrics(db_path: &str) -> PyResult<String> {
 
 /// Taint analysis: find paths from source nodes to sink nodes.
 #[pyfunction]
-fn taint(db_path: &str) -> PyResult<String> {
+#[pyo3(signature = (db_path, include_paths=None, exclude_paths=None))]
+fn taint(db_path: &str, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
     let sources = &["ENV_ACCESSES", "READS", "HTTP_CALLS"];
     let sinks = &["HTTP_CALLS", "GRPC_CLIENT", "WRITES"];
-    let paths = analysis::taint_analysis(&db, sources, sinks);
+    let paths_data = analysis::taint_analysis(&db, sources, sinks);
+
+    // Apply scope filtering: keep paths where at least one node passes the scope check
+    let paths: Vec<_> = if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        paths_data.into_iter().filter(|path| path_in_scope(&db, path, inc, exc)).collect()
+    } else {
+        paths_data
+    };
+
     if paths.is_empty() {
         return Ok("No taint paths found.".to_string());
     }
@@ -847,9 +983,17 @@ fn taint(db_path: &str) -> PyResult<String> {
 
 /// Code health scoring per file.
 #[pyfunction]
-fn health(db_path: &str, worst: Option<usize>) -> PyResult<String> {
+#[pyo3(signature = (db_path, worst=None, include_paths=None, exclude_paths=None))]
+fn health(db_path: &str, worst: Option<usize>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
     let mut scores = analysis::compute_health(&db);
+
+    // Apply scope filtering: filter by file_path (first element of tuple)
+    if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        scores.retain(|(fp, _, _, _, _, _)| matches_scope(fp, inc, exc));
+    }
+
     if scores.is_empty() {
         return Ok("No health data available.".to_string());
     }
@@ -869,9 +1013,17 @@ fn health(db_path: &str, worst: Option<usize>) -> PyResult<String> {
 
 /// Predict the impact of changing a symbol.
 #[pyfunction]
-fn predict_impact(db_path: &str, name: &str) -> PyResult<String> {
+#[pyo3(signature = (db_path, name, include_paths=None, exclude_paths=None))]
+fn predict_impact(db_path: &str, name: &str, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    let pred = analysis::predict_impact(&db, name);
+    let mut pred = analysis::predict_impact(&db, name);
+
+    // Apply scope filtering: filter affected_files
+    if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        pred.affected_files.retain(|f| matches_scope(f, inc, exc));
+    }
+
     let mut out = format!("Impact prediction for '{}':\n", name);
     out.push_str(&format!("  Risk level: {}\n", pred.risk_level));
     out.push_str(&format!("  Blast radius: {} hops\n", pred.radius));
@@ -889,9 +1041,17 @@ fn predict_impact(db_path: &str, name: &str) -> PyResult<String> {
 
 /// Detect potentially dead (unused) code.
 #[pyfunction]
-fn dead_code(db_path: &str) -> PyResult<String> {
+#[pyo3(signature = (db_path, include_paths=None, exclude_paths=None))]
+fn dead_code(db_path: &str, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    let dead = analysis::find_dead_code(&db);
+    let mut dead = analysis::find_dead_code(&db);
+
+    // Apply scope filtering: filter by file_path (4th element of tuple)
+    if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        dead.retain(|(_, _, _, fp)| matches_scope(fp, inc, exc));
+    }
+
     if dead.is_empty() {
         return Ok("No dead code detected.".to_string());
     }
@@ -904,9 +1064,23 @@ fn dead_code(db_path: &str) -> PyResult<String> {
 
 /// Find entry points in the codebase.
 #[pyfunction]
-fn entry_points(db_path: &str) -> PyResult<String> {
+#[pyo3(signature = (db_path, include_paths=None, exclude_paths=None))]
+fn entry_points(db_path: &str, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    let entries = analysis::find_entry_points(&db);
+    let mut entries = analysis::find_entry_points(&db);
+
+    // Apply scope filtering: lookup file_path by node_id
+    if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        entries.retain(|(id, _, _, _)| {
+            if let Some(fp) = get_file_path(&db, id) {
+                matches_scope(&fp, inc, exc)
+            } else {
+                false
+            }
+        });
+    }
+
     if entries.is_empty() {
         return Ok("No entry points found.".to_string());
     }
@@ -919,10 +1093,22 @@ fn entry_points(db_path: &str) -> PyResult<String> {
 
 /// Detect code clones above a similarity threshold.
 #[pyfunction]
-fn clones(db_path: &str, threshold: Option<f64>) -> PyResult<String> {
+#[pyo3(signature = (db_path, threshold=None, include_paths=None, exclude_paths=None))]
+fn clones(db_path: &str, threshold: Option<f64>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
     let t = threshold.unwrap_or(0.8);
-    let results = analysis::find_clones(&db, t);
+    let mut results = analysis::find_clones(&db, t);
+
+    // Apply scope filtering: lookup file_path by node_id, keep if either file matches
+    if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        results.retain(|(id1, _, id2, _, _)| {
+            let fp1 = get_file_path(&db, id1).unwrap_or_default();
+            let fp2 = get_file_path(&db, id2).unwrap_or_default();
+            matches_scope(&fp1, inc, exc) || matches_scope(&fp2, inc, exc)
+        });
+    }
+
     if results.is_empty() {
         return Ok(format!("No clones detected above threshold {:.2}.", t));
     }
@@ -935,9 +1121,23 @@ fn clones(db_path: &str, threshold: Option<f64>) -> PyResult<String> {
 
 /// Detect communities in the code graph using Louvain algorithm.
 #[pyfunction]
-fn community(db_path: &str) -> PyResult<String> {
+#[pyo3(signature = (db_path, include_paths=None, exclude_paths=None))]
+fn community(db_path: &str, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    let results = analysis::detect_communities(&db);
+    let mut results = analysis::detect_communities(&db);
+
+    // Apply scope filtering: lookup file_path by node_id
+    if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        results.retain(|(id, _, _)| {
+            if let Some(fp) = get_file_path(&db, id) {
+                matches_scope(&fp, inc, exc)
+            } else {
+                false
+            }
+        });
+    }
+
     if results.is_empty() {
         return Ok("No communities detected (empty graph).".to_string());
     }
@@ -965,10 +1165,23 @@ fn community(db_path: &str) -> PyResult<String> {
 
 /// Compute centrality metrics (PageRank + Betweenness) for all nodes.
 #[pyfunction]
-fn centrality(db_path: &str) -> PyResult<String> {
+#[pyo3(signature = (db_path, include_paths=None, exclude_paths=None))]
+fn centrality(db_path: &str, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    let pagerank = analysis::compute_pagerank(&db, 0.85, 50);
+    let mut pagerank = analysis::compute_pagerank(&db, 0.85, 50);
     let betweenness = analysis::compute_betweenness(&db);
+
+    // Apply scope filtering: filter PageRank results by node's file_path
+    if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        pagerank.retain(|id, _| {
+            if let Some(fp) = get_file_path(&db, id) {
+                matches_scope(&fp, inc, exc)
+            } else {
+                false
+            }
+        });
+    }
 
     if pagerank.is_empty() {
         return Ok("No centrality data (empty graph).".to_string());
@@ -1011,10 +1224,24 @@ fn centrality(db_path: &str) -> PyResult<String> {
 
 /// Execute a GQL query and return results as JSON string.
 #[pyfunction]
-fn gql_query(db_path: &str, query: &str) -> PyResult<String> {
+#[pyo3(signature = (db_path, query, include_paths=None, exclude_paths=None))]
+fn gql_query(db_path: &str, query: &str, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    let results = gql::execute_gql(&db, query)
+    let mut results = gql::execute_gql(&db, query)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    // Apply scope filtering: filter results by file_path field if present
+    if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
+        let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
+        results.retain(|row| {
+            if let Some(serde_json::Value::String(fp)) = row.get("file_path") {
+                matches_scope(fp, inc, exc)
+            } else {
+                true // keep rows without file_path (e.g. aggregate results)
+            }
+        });
+    }
+
     serde_json::to_string_pretty(&results)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
