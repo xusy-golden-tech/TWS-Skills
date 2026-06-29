@@ -12,11 +12,11 @@ use serde::{Deserialize, Serialize};
 
 /// A node (symbol) in the code graph.
 ///
-/// Maps to the `nodes` table.  The `id` is a SHA256 hash truncated to
-/// 32 hex chars, computed as `SHA256("{file_path}:{qualified_name}")[:32]`.
+/// Maps to the `nodes` table. The `id` is an XXH3_64 hash encoded as
+/// 16 hex chars, computed as `XXH3_64("{file_path}:{qualified_name}")`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeRecord {
-    /// SHA256(file_path:qualified_name) first 32 hex chars.
+    /// XXH3_64(file_path:qualified_name) encoded as 16 hex chars.
     pub id: String,
     /// Symbol kind — function, class, method, interface, variable, etc.
     pub kind: String,
