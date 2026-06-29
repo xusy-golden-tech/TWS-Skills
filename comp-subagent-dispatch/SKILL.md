@@ -53,8 +53,17 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
 1. 通过 Skill 工具加载 found-tws-graph-usage（Skill(skill: "found-tws-graph-usage")）和 {comp-skill-name}（Skill(skill: "{comp-skill-name}")）
 2. 按 skill 中的指引执行任务。涉及代码调查时，优先使用 tws-graph 命令（search/calls/impact/trace），Grep 仅作回退手段
 3. 完成后汇报：做了什么、改了哪些文件、发现了什么
+4. 如果提供了 goal-spec 文件路径，在任务完成后立即用 Edit 更新该文件：
+   a. 先 Read goal-spec 文件，找到当前阶段
+   b. 勾选已完成的门禁条件（- [x]）
+   c. 勾选已通过的测试用例（- [x]）
+   d. 勾选已满足的验收标准（- [x]）
+   e. 将阶段状态更新为 ✅ 已完成（如全部验收通过）
+   f. 在执行日志区追加一条记录
+   g. 如果发现阻塞 Bug，追加到「阻塞级 Bug」区
 
 任务背景：{简要描述任务上下文}
+{goal-spec 文件路径（如有）：.tws/goal-specs/xxx.md}
 ```
 
 **强制规则：所有子 agent dispatch prompt 必须同时包含 found-tws-graph-usage + comp skill，缺一不可。**
@@ -66,6 +75,7 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
 ❌ 主 agent 自己写调查 prompt 替代 comp skill 的工作
 ❌ 在 prompt 中写"读 xxx skill"——必须是"通过 Skill 工具加载 xxx skill"
 ❌ dispatch prompt 中遗漏 found-tws-graph-usage —— 这是子 agent 默认 grep 的根因
+❌ Goal Mode 下收子 agent 报告后跳过 goal-spec 更新 —— spec 过期 = 后续子 agent 拿到错误前置状态，导致任务错乱
 
 ### 代码图查询任务补充
 
@@ -211,7 +221,18 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
    d. 版本号 +1
    e. Edit 写回
 
-0a. git commit 保存进度（主 agent 执行）：
+0b. 更新 goal-spec 文件（Goal Mode 专用，主 agent 执行）：
+   a. 读取 .tws/goal-specs/{name}.md
+   b. 根据子 agent 汇报，勾选对应阶段的：
+      - 已完成的门禁条件
+      - 已通过的测试用例
+      - 已满足的验收标准
+   c. 如全部验收通过 → 阶段状态改为 ✅ 已完成，追加执行日志
+   d. 如发现阻塞 Bug → 追加到「阻塞级 Bug」区
+   e. Edit 写回
+   f. ⚠️ 此步骤不可跳过。spec 文件是 goal mode 的外脑，过期 = 迷路。必须在收报告后立即更新，不攒到阶段结束
+
+0c. git commit 保存进度（主 agent 执行）：
    a. git add 子 agent 改动的文件
    b. git commit -m "step: {步骤名}"（不 push）
    c. 目的：防止后续子 agent 误操作回滚已验收的改动
@@ -225,7 +246,8 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
 1. 检查各子任务的完成标准是否都满足
 2. 检查是否有文件冲突（两个子 agent 改了一个文件）
 3. 跑集成测试（验证各部分的接口是否对齐）
-4. 汇总报告
+4. 验证 goal-spec 文件中所有阶段的验收标准均已勾选（Goal Mode）
+5. 汇总报告
 ```
 
 ### commit 粒度
@@ -255,4 +277,5 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
 | 「这个任务太大，拆成子 agent 吧」 | 先确认是不是真的可以独立拆。强依赖的任务拆了反而慢 |
 | 「多开几个子 agent 更快」 | 并发高不等于完成快。合并冲突的时间往往超过节省的时间 |
 | 「子 agent 自己做自己的就行」 | 必须在开始时明确边界和接口，否则合不回来 |
+| 「子 agent 做完了一起更新 spec」 | 子 agent 上下文每次释放，攒到后面 = 靠记忆更新 = 漏项 + 错乱。收一个报告更新一次 |
 | 「先拆开做，后面再对接口」 | 接口必须提前定。不对齐接口 = 白做 |
