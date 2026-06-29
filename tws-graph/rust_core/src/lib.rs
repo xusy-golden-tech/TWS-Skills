@@ -29,6 +29,7 @@ mod federate;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use rayon::prelude::*;
 use std::path::Path;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -174,65 +175,169 @@ fn index(db_path: &str, root: &str) -> PyResult<String> {
     let files = indexer::scanner::scan_directory(root_path)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-    // Build registry with all available extractors
-    let mut registry = indexer::registry::Registry::new();
-    register_all_extractors(&mut registry);
-
     let conn = db.connection();
-    let mut total_nodes: usize = 0;
-    let mut total_edges: usize = 0;
-    let mut file_count: usize = 0;
-    let batch_size: usize = 100;
 
-    // Pre-compile prepared statements (cached, reused across all files)
-    let mut insert_node = conn.prepare_cached(
-        "INSERT OR REPLACE INTO nodes (id, kind, name, qualified_name, file_path, language, \
-         start_line, end_line, signature, docstring, visibility, is_abstract, \
-         is_exported, decorators, framework, properties, body, body_hash, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-    let mut insert_edge = conn.prepare_cached(
-        "INSERT OR REPLACE INTO edges (source, target, target_text, kind, source_loc, provenance, properties) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    // Check if parallel extraction is enabled (default: on).
+    // Set TWS_USE_PARALLEL=0 to force the serial fallback path.
+    let use_parallel = std::env::var("TWS_USE_PARALLEL")
+        .map(|v| v != "0")
+        .unwrap_or(true);
 
-    // Parser pool — reuses tree-sitter Parsers by language
-    let mut parser_pool = indexer::parser_pool::ParserPool::new();
+    // Parallel path: files > 10 to avoid overhead on tiny repos
+    if use_parallel && files.len() > 10 {
+        // ================================================================
+        // Parallel extraction (rayon) + single-threaded DB writes
+        // ================================================================
 
-    // Start outer batch transaction
-    let _ = conn.execute_batch("BEGIN TRANSACTION");
+        // Each worker thread calls this to register all extractors locally.
+        let setup_fn: &(dyn Fn(&mut indexer::registry::Registry) + Send + Sync) =
+            &|reg| {
+                register_all_extractors(reg);
+            };
 
-    for (i, file_path) in files.iter().enumerate() {
-        if let Some((nodes, edges)) = index_one_file(
-            &conn, &root_path, file_path, &registry,
-            &mut insert_node, &mut insert_edge,
-            &mut parser_pool, false,
-        ) {
-            total_nodes += nodes;
-            total_edges += edges;
-            file_count += 1;
+        // Chunk size: split files evenly across threads, minimum 10 per chunk
+        let num_threads = rayon::current_num_threads().max(1);
+        let chunk_size = (files.len() / num_threads).max(10);
+
+        let all_results: Vec<indexer::parallel::FileResult> = files
+            .par_chunks(chunk_size)
+            .flat_map(|chunk| {
+                indexer::parallel::process_chunk(root_path, chunk, setup_fn)
+            })
+            .collect();
+
+        // Pre-compile prepared statements for batch INSERT (main thread only)
+        let mut insert_node = conn.prepare_cached(
+            "INSERT OR REPLACE INTO nodes (id, kind, name, qualified_name, file_path, language, \
+             start_line, end_line, signature, docstring, visibility, is_abstract, \
+             is_exported, decorators, framework, properties, body, body_hash, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"
+        ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let mut insert_edge = conn.prepare_cached(
+            "INSERT OR REPLACE INTO edges (source, target, target_text, kind, source_loc, provenance, properties) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+        ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let mut total_nodes: usize = 0;
+        let mut total_edges: usize = 0;
+        let mut file_count: usize = 0;
+
+        const BATCH_SIZE: usize = 100;
+        let _ = conn.execute_batch("BEGIN TRANSACTION");
+
+        for (i, result) in all_results.iter().enumerate() {
+            if !result.nodes.is_empty() {
+                file_count += 1;
+            }
+            for node in &result.nodes {
+                let _ = insert_node.execute(
+                    rusqlite::params![
+                        node.id, node.kind, node.name, node.qualified_name,
+                        node.file_path, node.language,
+                        node.start_line, node.end_line,
+                        node.signature, node.docstring, node.visibility,
+                        node.is_abstract,
+                        node.is_exported, node.decorators, node.framework,
+                        node.properties,
+                        node.body, node.body_hash, node.updated_at,
+                    ],
+                );
+                total_nodes += 1;
+            }
+            for edge in &result.edges {
+                let _ = insert_edge.execute(
+                    rusqlite::params![
+                        edge.source, edge.target, edge.target_text, edge.kind,
+                        edge.source_loc, edge.provenance, edge.properties,
+                    ],
+                );
+                total_edges += 1;
+            }
+
+            // Batch commit every 100 files (matching serial-path logic)
+            if (i + 1) % BATCH_SIZE == 0 && i + 1 < all_results.len() {
+                conn.execute_batch("COMMIT")
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                conn.execute_batch("BEGIN TRANSACTION")
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            }
         }
 
-        // Batch commit every 100 files (except last batch)
-        if (i + 1) % batch_size == 0 && i + 1 < files.len() {
-            conn.execute_batch("COMMIT")
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-            conn.execute_batch("BEGIN TRANSACTION")
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        // Final commit
+        conn.execute_batch("COMMIT")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        db.optimize()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        Ok(format!(
+            "Index complete: {} files, {} nodes, {} edges (parallel)",
+            file_count, total_nodes, total_edges
+        ))
+    } else {
+        // ================================================================
+        // Serial path (fallback) — original single-threaded indexing
+        // ================================================================
+
+        // Build registry with all available extractors
+        let mut registry = indexer::registry::Registry::new();
+        register_all_extractors(&mut registry);
+
+        let mut total_nodes: usize = 0;
+        let mut total_edges: usize = 0;
+        let mut file_count: usize = 0;
+        let batch_size: usize = 100;
+
+        // Pre-compile prepared statements (cached, reused across all files)
+        let mut insert_node = conn.prepare_cached(
+            "INSERT OR REPLACE INTO nodes (id, kind, name, qualified_name, file_path, language, \
+             start_line, end_line, signature, docstring, visibility, is_abstract, \
+             is_exported, decorators, framework, properties, body, body_hash, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"
+        ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let mut insert_edge = conn.prepare_cached(
+            "INSERT OR REPLACE INTO edges (source, target, target_text, kind, source_loc, provenance, properties) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+        ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        // Parser pool — reuses tree-sitter Parsers by language
+        let mut parser_pool = indexer::parser_pool::ParserPool::new();
+
+        // Start outer batch transaction
+        let _ = conn.execute_batch("BEGIN TRANSACTION");
+
+        for (i, file_path) in files.iter().enumerate() {
+            if let Some((nodes, edges)) = index_one_file(
+                &conn, &root_path, file_path, &registry,
+                &mut insert_node, &mut insert_edge,
+                &mut parser_pool, false,
+            ) {
+                total_nodes += nodes;
+                total_edges += edges;
+                file_count += 1;
+            }
+
+            // Batch commit every 100 files (except last batch)
+            if (i + 1) % batch_size == 0 && i + 1 < files.len() {
+                conn.execute_batch("COMMIT")
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                conn.execute_batch("BEGIN TRANSACTION")
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            }
         }
+
+        // Final commit
+        conn.execute_batch("COMMIT")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        db.optimize()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        Ok(format!(
+            "Index complete: {} files, {} nodes, {} edges",
+            file_count, total_nodes, total_edges
+        ))
     }
-
-    // Final commit
-    conn.execute_batch("COMMIT")
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-    db.optimize()
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-    Ok(format!(
-        "Index complete: {} files, {} nodes, {} edges",
-        file_count, total_nodes, total_edges
-    ))
 }
 
 /// Register all available language extractors in the registry.
