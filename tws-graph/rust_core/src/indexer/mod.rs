@@ -21,6 +21,7 @@
 //! | [`extractors`] | Language-specific tree-sitter extractors (28+) |
 
 pub mod context;
+pub mod ignore;
 pub mod language;
 pub mod registry;
 pub mod scanner;
@@ -31,6 +32,7 @@ pub mod parser_pool;
 
 // Re-export key types for convenience
 pub use context::{ExtractionContext, ExtractionResult, ScopeInfo};
+pub use ignore::{IgnorePatterns, parse_twsignore};
 pub use language::{detect, detect_by_extension, detect_language};
 pub use registry::Registry;
-pub use scanner::scan_directory;
+pub use scanner::{scan_directory, scan_directory_with_ignore};

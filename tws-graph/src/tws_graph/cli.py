@@ -156,8 +156,18 @@ def index(
     force: bool = typer.Option(False, "--force", help="强制全量重建索引（跳过 content-hash 检查）"),
     deep: bool = typer.Option(False, "--deep", help="启用深度分析（代码克隆检测 similar_to 边，耗时较长）"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径（默认: 项目目录/.tws/codegraph/index.db）"),
+    twsignore: Optional[str] = typer.Option(None, "--twsignore", help=".twsignore 文件路径（默认: 项目根/.twsignore；传空串禁用忽略规则）"),
+    include_patterns: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_patterns: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
-    """索引项目的所有源文件，构建代码关系图。"""
+    """索引项目的所有源文件，构建代码关系图。
+
+    默认自动读取项目根目录的 .twsignore 文件来排除文件。
+    使用 --twsignore 可指定自定义文件路径；使用 --twsignore '' 可禁用忽略规则。
+
+    --include / --exclude 支持 glob 模式，可重复指定。
+    例: tws-graph index --include "src/" --exclude "tests/"
+    """
     root_dir = os.path.abspath(project_path)
     default_db = os.path.join(root_dir, DEFAULT_DB)
     db_path_resolved = db_path or default_db
@@ -168,10 +178,13 @@ def index(
         typer.echo("错误: Rust 核心库不可用。请重新安装 tws-graph。", err=True)
         raise typer.Exit(1)
 
+    # Resolve twsignore path
+    twsignore_resolved: str | None = twsignore
     import time as _time
     typer.echo(f"正在索引: {root_dir}")
     _t0 = _time.time()
-    result = rust_index(str(db_path_resolved), str(root_dir))
+    result = rust_index(str(db_path_resolved), str(root_dir), twsignore_resolved,
+                        include_patterns, exclude_patterns)
     _duration_ms = int((_time.time() - _t0) * 1000)
     # Populate files table from nodes (Rust index fills nodes but not files)
     store = _get_store(db_path_resolved)
@@ -249,6 +262,8 @@ def calls(
     depth: int = typer.Option(1, "--depth", "-d", help="追溯深度"),
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """查询调用关系：谁调用了这个符号，或这个符号调了谁。
 
@@ -270,10 +285,7 @@ def calls(
         typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
 
-    typer.echo(rust_calls(resolved_db, symbol, inbound, depth))
-
-    if queries:
-        _show_unresolved_hint_in_calls(queries, focal_node, direction)
+    typer.echo(rust_calls(resolved_db, symbol, inbound, depth, include_paths, exclude_paths))
 
 
 # ============================================================================
@@ -286,6 +298,8 @@ def impact(
     depth: int = typer.Option(2, "--depth", "-d", help="影响传播深度 (默认 2)"),
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """分析修改一个符号的影响范围。"""
     resolved_db = os.path.abspath(db_path or DEFAULT_DB)
@@ -296,7 +310,7 @@ def impact(
     if not _rust_available():
         typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
-    typer.echo(rust_impact(resolved_db, symbol, depth))
+    typer.echo(rust_impact(resolved_db, symbol, depth, include_paths, exclude_paths))
 
 
 # ============================================================================
@@ -309,6 +323,8 @@ def trace(
     to_symbol: str = typer.Argument(..., help="目标符号（报错点）"),
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """查找两个符号之间的完整调用链。"""
     resolved_db = os.path.abspath(db_path or DEFAULT_DB)
@@ -319,7 +335,7 @@ def trace(
     if not _rust_available():
         typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
-    typer.echo(rust_trace(resolved_db, from_symbol, to_symbol))
+    typer.echo(rust_trace(resolved_db, from_symbol, to_symbol, include_paths, exclude_paths))
 
 
 # ============================================================================
@@ -386,8 +402,15 @@ def diff(
 def sync(
     project_path: str = typer.Argument(".", help="项目根目录"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+    twsignore: Optional[str] = typer.Option(None, "--twsignore", help=".twsignore 文件路径（默认: 项目根/.twsignore；传空串禁用忽略规则）"),
+    include_patterns: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_patterns: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
-    """增量同步。v7.0.0: 调用 Rust index（Rust 核心内置增量逻辑）。"""
+    """增量同步。v7.0.0: 调用 Rust index（Rust 核心内置增量逻辑）。
+
+    默认自动读取项目根目录的 .twsignore 文件来排除文件。
+    使用 --twsignore 可指定自定义文件路径；使用 --twsignore '' 可禁用忽略规则。
+    """
     root_dir = os.path.abspath(project_path)
     default_db = os.path.join(root_dir, DEFAULT_DB)
     db_path_resolved = db_path or default_db
@@ -397,10 +420,13 @@ def sync(
         typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
 
+    # Resolve twsignore path
+    twsignore_resolved: str | None = twsignore
     import time as _time
     typer.echo(f"正在同步: {root_dir}")
     _t0 = _time.time()
-    result = rust_index(str(db_path_resolved), str(root_dir))
+    result = rust_index(str(db_path_resolved), str(root_dir), twsignore_resolved,
+                        include_patterns, exclude_patterns)
     _duration_ms = int((_time.time() - _t0) * 1000)
     store = _get_store(db_path_resolved)
     _sync_files_from_nodes(store, root_dir)
@@ -514,6 +540,8 @@ def search(
     semantic: bool = typer.Option(False, "--semantic", help="启用 11-signal 语义搜索"),
     signal_weights: Optional[str] = typer.Option(None, "--weights", help="JSON 格式信号权重覆盖"),
     embeddings: bool = typer.Option(False, "--embeddings", help="启用向量增强"),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """全文搜索代码符号。
 
@@ -598,7 +626,7 @@ def search(
     if os.path.exists(resolved_db):
         from .rust_bridge import rust_search, _rust_available
         if _rust_available():
-            results = rust_search(resolved_db, query_str, limit)
+            results = rust_search(resolved_db, query_str, limit, include_paths, exclude_paths)
             if not results:
                 typer.echo(f"未找到匹配: {query_str}")
                 return
@@ -685,6 +713,8 @@ def search(
 def unresolved(
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """列出所有未解析的引用。
 
@@ -697,7 +727,7 @@ def unresolved(
     if os.path.exists(resolved_db):
         from .rust_bridge import rust_unresolved, _rust_available
         if _rust_available():
-            typer.echo(rust_unresolved(resolved_db))
+            typer.echo(rust_unresolved(resolved_db, include_paths, exclude_paths))
             return
 
     db = _get_db(db_path) if os.path.exists(db_path or DEFAULT_DB) else None
@@ -873,6 +903,8 @@ def analyze(
         None, "--run",
         help="运行 P9 分析器: entry-point, dead-code, complexity, test-edges, config-links, git-diff, all",
     ),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """Run graph analysis algorithms on the indexed code graph.
 
@@ -882,12 +914,13 @@ def analyze(
       tws-graph analyze --algorithm all --json
       tws-graph analyze --run entry-point
       tws-graph analyze --run all
+      tws-graph analyze --run dead-code --exclude "tests/"
     """
     # ------------------------------------------------------------------
     # P9 Analysis Suite path (--run)
     # ------------------------------------------------------------------
     if run_analyzer is not None:
-        _run_p9_analyzer(run_analyzer, db_path)
+        _run_p9_analyzer(run_analyzer, db_path, include_paths, exclude_paths)
         return
 
     # ------------------------------------------------------------------
@@ -947,7 +980,8 @@ def analyze(
         store.close()
 
 
-def _run_p9_analyzer(analyzer_name: str, db_path: Optional[str]) -> None:
+def _run_p9_analyzer(analyzer_name: str, db_path: Optional[str],
+                     include_paths=None, exclude_paths=None) -> None:
     """Dispatch --run requests to P9 analysis modules with invalidation tracking.
 
     Supports: entry-point, dead-code, complexity, test-edges, config-links,
@@ -1662,6 +1696,8 @@ def cycles(
         None, "--db", "-d",
         help="数据库路径 (默认: .tws/codegraph/index.db)",
     ),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """检测调用图中的循环依赖。
 
@@ -1669,6 +1705,7 @@ def cycles(
     例：
       tws-graph cycles
       tws-graph cycles --max 10
+      tws-graph cycles --exclude "tests/"
     """
     resolved_db = os.path.abspath(db or DEFAULT_DB)
 
@@ -1676,7 +1713,7 @@ def cycles(
     if os.path.exists(resolved_db):
         from .rust_bridge import rust_cycles, _rust_available
         if _rust_available():
-            typer.echo(rust_cycles(resolved_db))
+            typer.echo(rust_cycles(resolved_db, include_paths, exclude_paths))
             return
 
     db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
@@ -1714,6 +1751,8 @@ def layers(
         None, "--db", "-d",
         help="数据库路径 (默认: .tws/codegraph/index.db)",
     ),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """检测架构层次违规。
 
@@ -1722,6 +1761,7 @@ def layers(
 
     例：
       tws-graph layers --layers '{"ui": {"pattern": "src/ui/**", "level": 1}, "data": {"pattern": "src/data/**", "level": 3}}'
+      tws-graph layers --exclude "tests/"
     """
     resolved_db = os.path.abspath(db or DEFAULT_DB)
 
@@ -1729,7 +1769,7 @@ def layers(
     if os.path.exists(resolved_db):
         from .rust_bridge import rust_layers, _rust_available
         if _rust_available():
-            typer.echo(rust_layers(resolved_db))
+            typer.echo(rust_layers(resolved_db, include_paths, exclude_paths))
             return
 
     db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
@@ -1784,6 +1824,8 @@ def metrics(
         None, "--db", "-d",
         help="数据库路径 (默认: .tws/codegraph/index.db)",
     ),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """计算模块内聚/耦合/不稳定性度量。
 
@@ -1793,6 +1835,7 @@ def metrics(
     例：
       tws-graph metrics
       tws-graph metrics --module src/tws_graph --sort cohesion -n 20
+      tws-graph metrics --exclude "tests/"
     """
     resolved_db = os.path.abspath(db or DEFAULT_DB)
 
@@ -1800,7 +1843,7 @@ def metrics(
     if os.path.exists(resolved_db):
         from .rust_bridge import rust_metrics, _rust_available
         if _rust_available():
-            typer.echo(rust_metrics(resolved_db))
+            typer.echo(rust_metrics(resolved_db, include_paths, exclude_paths))
             return
 
     db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
@@ -1869,6 +1912,8 @@ def taint(
         None, "--db",
         help="数据库路径 (默认: .tws/codegraph/index.db)",
     ),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """安全污点分析：追踪敏感数据从来源到危险操作的完整路径。
 
@@ -1886,7 +1931,7 @@ def taint(
     if os.path.exists(resolved_db):
         from .rust_bridge import rust_taint, _rust_available
         if _rust_available():
-            typer.echo(rust_taint(resolved_db))
+            typer.echo(rust_taint(resolved_db, include_paths, exclude_paths))
             return
 
     db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
@@ -1954,14 +1999,17 @@ def export_dot_cmd(
     from_node: str | None = _export_from_opt,
     limit: int = _export_limit_opt,
     output: str | None = typer.Option(None, "--output", "-o", help="输出文件路径 (默认: stdout)"),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """导出为 Graphviz DOT 格式。
 
     例：
       tws-graph export dot --kind calls --depth 3 > graph.dot
       tws-graph export dot --from NODE_ID --depth 2 -o subgraph.dot
+      tws-graph export dot --exclude "tests/"
     """
-    _run_export("dot", db, depth, kind, from_node, limit, output)
+    _run_export("dot", db, depth, kind, from_node, limit, output, include_paths, exclude_paths)
 
 
 @export_app.command("mermaid")
@@ -1972,6 +2020,8 @@ def export_mermaid_cmd(
     from_node: str | None = _export_from_opt,
     limit: int = _export_limit_opt,
     output: str | None = typer.Option(None, "--output", "-o", help="输出文件路径 (默认: stdout)"),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """导出为 Mermaid 格式（可嵌入 Markdown）。
 
@@ -1979,7 +2029,7 @@ def export_mermaid_cmd(
       tws-graph export mermaid --kind imports > deps.md
       tws-graph export mermaid --from NODE_ID -o arch.mermaid
     """
-    _run_export("mermaid", db, depth, kind, from_node, limit, output)
+    _run_export("mermaid", db, depth, kind, from_node, limit, output, include_paths, exclude_paths)
 
 
 @export_app.command("json")
@@ -1990,6 +2040,8 @@ def export_json_cmd(
     from_node: str | None = _export_from_opt,
     limit: int = _export_limit_opt,
     output: str | None = typer.Option(None, "--output", "-o", help="输出文件路径 (默认: stdout)"),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """导出为 JSON 格式。
 
@@ -1997,10 +2049,11 @@ def export_json_cmd(
       tws-graph export json --kind calls > calls.json
       tws-graph export json -o graph.json
     """
-    _run_export("json", db, depth, kind, from_node, limit, output)
+    _run_export("json", db, depth, kind, from_node, limit, output, include_paths, exclude_paths)
 
 
-def _run_export(fmt: str, db, depth, kind, from_node, limit, output):
+def _run_export(fmt: str, db, depth, kind, from_node, limit, output,
+                include_paths=None, exclude_paths=None):
     """Common export logic."""
     resolved_db = os.path.abspath(db or DEFAULT_DB)
 
@@ -2011,13 +2064,16 @@ def _run_export(fmt: str, db, depth, kind, from_node, limit, output):
             result = None
             if fmt == "dot":
                 from .rust_bridge import rust_export_dot
-                result = rust_export_dot(resolved_db, from_node or "", depth, kind)
+                result = rust_export_dot(resolved_db, from_node or "", depth, kind,
+                                        include_paths, exclude_paths)
             elif fmt == "mermaid":
                 from .rust_bridge import rust_export_mermaid
-                result = rust_export_mermaid(resolved_db, from_node or "", depth, kind)
+                result = rust_export_mermaid(resolved_db, from_node or "", depth, kind,
+                                            include_paths, exclude_paths)
             elif fmt == "json":
                 from .rust_bridge import rust_export_json
-                result = rust_export_json(resolved_db, kind, limit)
+                result = rust_export_json(resolved_db, kind, limit,
+                                         include_paths, exclude_paths)
             if result is not None:
                 if output:
                     with open(output, "w", encoding="utf-8") as f:
@@ -2070,6 +2126,8 @@ def query(
         None, "--db",
         help="数据库路径 (默认: .tws/codegraph/index.db)",
     ),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """图查询语言 (GQL) —— 人性化的代码图查询。
 
@@ -2081,43 +2139,18 @@ def query(
       tws-graph query "FIND * WHERE lang = 'python' RETURN name, file_path"
       tws-graph query "IMPACT OF MyClass.my_method"
     """
-    from .gql import parse_gql, execute_gql
-
     resolved_db = os.path.abspath(db or DEFAULT_DB)
 
     # Try Rust acceleration
     if os.path.exists(resolved_db):
         from .rust_bridge import rust_gql_query, _rust_available
         if _rust_available():
-            typer.echo(rust_gql_query(resolved_db, gql_query))
+            typer.echo(rust_gql_query(resolved_db, gql_query, include_paths, exclude_paths))
             return
 
-    db_conn = _get_db(db) if os.path.exists(db or DEFAULT_DB) else None
-    if db_conn is None:
-        typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
-        raise typer.Exit(1)
-
-    queries = QueryBuilder(db_conn.conn)
-
-    try:
-        result = execute_gql(queries, gql_query)
-    except ValueError as e:
-        typer.echo(f"GQL 语法错误: {e}", err=True)
-        raise typer.Exit(1)
-
-    if not result:
-        typer.echo("(无结果)")
-        return
-
-    if json_output:
-        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        for row in result:
-            name = row.get("name", row.get("qualified_name", ""))
-            fpath = row.get("file_path", "")
-            kind = row.get("kind", "")
-            line = row.get("start_line", "")
-            typer.echo(f"{kind:<12} {name:<40} {fpath}:{line}")
+    # Fallback: Python GQL engine removed in v7.0.0.
+    typer.echo("错误: Rust 核心不可用，无法执行 GQL 查询。请重新安装 tws-graph。", err=True)
+    raise typer.Exit(1)
 
 
 # ============================================================================
@@ -2133,6 +2166,8 @@ def predict_impact(
         None, "--db",
         help="数据库路径 (默认: .tws/codegraph/index.db)",
     ),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """预测修改某符号的影响范围与风险。
 
@@ -2148,7 +2183,7 @@ def predict_impact(
     if os.path.exists(resolved_db):
         from .rust_bridge import rust_predict_impact, _rust_available
         if _rust_available():
-            typer.echo(rust_predict_impact(resolved_db, symbol))
+            typer.echo(rust_predict_impact(resolved_db, symbol, include_paths, exclude_paths))
             return
 
     from .analysis.impact_prediction import predict_impact as do_predict
@@ -2415,6 +2450,8 @@ def health(
         None, "--db",
         help="数据库路径 (默认: .tws/codegraph/index.db)",
     ),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """代码健康度评分 —— 综合测试覆盖、死代码、耦合度评估每个文件。
 
@@ -2424,6 +2461,7 @@ def health(
     例：
       tws-graph health
       tws-graph health --worst 10
+      tws-graph health --worst 10 --exclude "tests/"
       tws-graph health --top 5 --json
     """
     resolved_db = os.path.abspath(db or DEFAULT_DB)
@@ -2432,7 +2470,7 @@ def health(
     if os.path.exists(resolved_db):
         from .rust_bridge import rust_health, _rust_available
         if _rust_available():
-            typer.echo(rust_health(resolved_db, worst if worst > 0 else 10))
+            typer.echo(rust_health(resolved_db, worst if worst > 0 else 10, include_paths, exclude_paths))
             return
 
     from .analysis.code_health import compute_health_scores

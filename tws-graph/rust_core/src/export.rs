@@ -13,11 +13,14 @@ use std::collections::HashSet;
 /// Traverses `depth` hops outbound from the named node, then renders the
 /// reachable nodes and edges as a directed graph. If `kind` is provided,
 /// only edges of that kind are included in the traversal.
+///
+/// If `allowed_nodes` is provided, only nodes in the set are included in the output.
 pub fn export_dot(
     db: &Database,
     from_node: &str,
     depth: usize,
     kind: Option<&str>,
+    allowed_nodes: Option<&HashSet<String>>,
 ) -> String {
     let node_id = match db.find_node_id_by_name(from_node).unwrap_or(None) {
         Some(id) => id,
@@ -39,6 +42,11 @@ pub fn export_dot(
     all_nodes.insert(node_id.clone());
     for nid in &reachable {
         all_nodes.insert(nid.clone());
+    }
+
+    // Apply node-level scope filtering if allowed_nodes is specified
+    if let Some(ref allowed) = allowed_nodes {
+        all_nodes.retain(|nid| allowed.contains(nid));
     }
 
     // Collect edges between the nodes in the set
@@ -90,11 +98,14 @@ pub fn export_dot(
 ///
 /// Traverses `depth` hops outbound from the named node and renders as a
 /// Mermaid flowchart (graph TD), suitable for embedding in Markdown.
+///
+/// If `allowed_nodes` is provided, only nodes in the set are included in the output.
 pub fn export_mermaid(
     db: &Database,
     from_node: &str,
     depth: usize,
     kind: Option<&str>,
+    allowed_nodes: Option<&HashSet<String>>,
 ) -> String {
     let node_id = match db.find_node_id_by_name(from_node).unwrap_or(None) {
         Some(id) => id,
@@ -115,6 +126,11 @@ pub fn export_mermaid(
     all_nodes.insert(node_id.clone());
     for nid in &reachable {
         all_nodes.insert(nid.clone());
+    }
+
+    // Apply node-level scope filtering if allowed_nodes is specified
+    if let Some(ref allowed) = allowed_nodes {
+        all_nodes.retain(|nid| allowed.contains(nid));
     }
 
     let edges = match db.get_all_edges(kind) {
@@ -167,10 +183,12 @@ pub fn export_mermaid(
 ///
 /// If `kind` is provided, only edges of that kind are included.
 /// If `limit` is > 0, at most `limit` nodes are returned.
+/// If `allowed_nodes` is provided, only nodes in the set are included in the output.
 pub fn export_json(
     db: &Database,
     kind: Option<&str>,
     limit: usize,
+    allowed_nodes: Option<&HashSet<String>>,
 ) -> serde_json::Value {
     let edges = db.get_all_edges(kind).unwrap_or_default();
 
@@ -187,6 +205,12 @@ pub fn export_json(
     for nid in &node_ids {
         if limit > 0 && count >= limit {
             break;
+        }
+        // Apply node-level scope filtering if allowed_nodes is specified
+        if let Some(ref allowed) = allowed_nodes {
+            if !allowed.contains(nid) {
+                continue;
+            }
         }
         if let Ok(Some((_, node_kind, name, qualified_name, language, file_path))) =
             db.get_node(nid)
@@ -338,7 +362,7 @@ mod tests {
     #[test]
     fn test_export_dot_not_found() {
         let (db, path) = setup_db("dot_not_found");
-        let result = export_dot(&db, "nonexistent", 2, None);
+        let result = export_dot(&db, "nonexistent", 2, None, None);
         assert!(result.contains("node not found"));
         cleanup(&path);
     }
@@ -349,7 +373,7 @@ mod tests {
         let conn = db.connection();
         let nid = insert_node(conn, "main_func", "src/main.py", "function");
 
-        let result = export_dot(&db, "main_func", 1, None);
+        let result = export_dot(&db, "main_func", 1, None, None);
         assert!(result.contains("digraph G"));
         assert!(result.contains(&nid));
         assert!(result.contains("main_func"));
@@ -365,7 +389,7 @@ mod tests {
         let b = insert_node(conn, "func_b", "src/b.py", "function");
         insert_edge(conn, &a, &b, "CALLS");
 
-        let result = export_dot(&db, "func_a", 2, None);
+        let result = export_dot(&db, "func_a", 2, None, None);
         assert!(result.contains("CALLS"));
         assert!(result.contains("func_b"));
         cleanup(&path);
@@ -382,12 +406,12 @@ mod tests {
         insert_edge(conn, &b, &c, "CALLS");
 
         // depth=1 should only reach beta, not gamma
-        let result = export_dot(&db, "alpha_func", 1, None);
+        let result = export_dot(&db, "alpha_func", 1, None, None);
         assert!(result.contains("beta_func"));
         assert!(!result.contains("gamma_func")); // gamma is at depth 2
 
         // depth=2 should reach both
-        let result2 = export_dot(&db, "alpha_func", 2, None);
+        let result2 = export_dot(&db, "alpha_func", 2, None, None);
         assert!(result2.contains("beta_func"));
         assert!(result2.contains("gamma_func"));
         cleanup(&path);
@@ -403,7 +427,7 @@ mod tests {
         insert_edge(conn, &a, &b, "CALLS");
         insert_edge(conn, &a, &c, "IMPORTS");
 
-        let result = export_dot(&db, "alpha", 2, Some("CALLS"));
+        let result = export_dot(&db, "alpha", 2, Some("CALLS"), None);
         assert!(result.contains("beta"));
         assert!(!result.contains("gamma")); // Only CALLS edges traversed
         cleanup(&path);
@@ -416,7 +440,7 @@ mod tests {
     #[test]
     fn test_export_mermaid_not_found() {
         let (db, path) = setup_db("mmd_not_found");
-        let result = export_mermaid(&db, "nonexistent", 2, None);
+        let result = export_mermaid(&db, "nonexistent", 2, None, None);
         assert!(result.contains("node not found"));
         cleanup(&path);
     }
@@ -427,7 +451,7 @@ mod tests {
         let conn = db.connection();
         insert_node(conn, "main_func", "src/main.py", "function");
 
-        let result = export_mermaid(&db, "main_func", 1, None);
+        let result = export_mermaid(&db, "main_func", 1, None, None);
         assert!(result.contains("graph TD"));
         assert!(result.contains("main_func"));
         cleanup(&path);
@@ -441,7 +465,7 @@ mod tests {
         let b = insert_node(conn, "func_b", "src/b.py", "function");
         insert_edge(conn, &a, &b, "CALLS");
 
-        let result = export_mermaid(&db, "func_a", 2, None);
+        let result = export_mermaid(&db, "func_a", 2, None, None);
         assert!(result.contains("graph TD"));
         assert!(result.contains("CALLS"));
         cleanup(&path);
@@ -457,7 +481,7 @@ mod tests {
         insert_edge(conn, &a, &b, "CALLS");
         insert_edge(conn, &b, &c, "CALLS");
 
-        let result = export_mermaid(&db, "first", 1, None);
+        let result = export_mermaid(&db, "first", 1, None, None);
         assert!(result.contains("second"));
         assert!(!result.contains("third"));
         cleanup(&path);
@@ -470,7 +494,7 @@ mod tests {
     #[test]
     fn test_export_json_empty() {
         let (db, path) = setup_db("json_empty");
-        let result = export_json(&db, None, 100);
+        let result = export_json(&db, None, 100, None);
         let nodes = result["nodes"].as_array().unwrap();
         assert!(nodes.is_empty());
         cleanup(&path);
@@ -484,7 +508,7 @@ mod tests {
         let b = insert_node(conn, "func_b", "src/b.py", "function");
         insert_edge(conn, &a, &b, "CALLS");
 
-        let result = export_json(&db, None, 100);
+        let result = export_json(&db, None, 100, None);
         let nodes = result["nodes"].as_array().unwrap();
         let edges = result["edges"].as_array().unwrap();
         assert!(!nodes.is_empty());
@@ -504,7 +528,7 @@ mod tests {
         insert_edge(conn, &a, &b, "CALLS");
         insert_edge(conn, &a, &c, "IMPORTS");
 
-        let result = export_json(&db, Some("CALLS"), 100);
+        let result = export_json(&db, Some("CALLS"), 100, None);
         let edges = result["edges"].as_array().unwrap();
         // All edges should be CALLS
         for edge in edges {
@@ -521,7 +545,7 @@ mod tests {
             insert_node(conn, &format!("func_{}", i), &format!("src/f{}.py", i), "function");
         }
 
-        let result = export_json(&db, None, 2);
+        let result = export_json(&db, None, 2, None);
         let nodes = result["nodes"].as_array().unwrap();
         assert!(nodes.len() <= 2, "Should limit to 2 nodes, got {}", nodes.len());
         cleanup(&path);
