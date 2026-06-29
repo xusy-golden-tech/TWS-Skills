@@ -29,6 +29,57 @@ v7.1.0 目标：将 Rust vs CBM 的差距从 **11x 缩小到 <2x**，同时修�
 - 不改变提取器行为（节点/边输出不变）
 - 版本号 → 7.1.0
 
+## ⚠️ 全局铁律：功能零退化
+
+**任何阶段完成后，必须通过以下功能对照验证，否则禁止进入下一阶段：**
+
+```
+每个阶段的对照基线（优化前快照）：
+  ├── 节点总数         → 必须完全相等
+  ├── 边总数           → 必须完全相等
+  ├── 各 kind 节点分布  → 必须完全相等
+  ├── 各 kind 边分布    → 必须完全相等
+  ├── FTS5 搜索结果     → 10 个抽样查询，结果集必须完全一致
+  ├── calls/impact/trace → 5 个抽样查询，输出必须完全一致
+  └── 5 项目 × 3 命令   → 全矩阵对比，零差异
+```
+
+**验证流程（每个阶段结束时强制执行）：**
+
+```
+1. tws-graph snapshot before-{phase}
+2. 执行优化改动
+3. tws-graph index --force (重建索引)
+4. tws-graph snapshot after-{phase}
+5. tws-graph diff before-{phase} after-{phase} --json
+6. 检查 diff 报告: added/removed 必须为 0
+7. 抽样验证:
+   - search kind:function index --limit 50 (before vs after)
+   - search kind:class --limit 50 (before vs after)
+   - calls <选取符号> (before vs after)
+   - impact <选取符号> (before vs after)
+   - trace <符号A> <符号B> (before vs after)
+8. 全部通过 → 可进入下一阶段
+9. 有差异 → 定位根因，修复后重新验证
+```
+
+**对照测试项目矩阵（5 个项目，覆盖主要语言）：**
+
+| 项目 | 路径 | 主要语言 | 验证重点 |
+|------|------|----------|----------|
+| TWS-Skills | `D:/TWS-Skills` | Python + Markdown + YAML | 多语言混合 |
+| ripgrep | `E:/ripgrep` | Rust | 系统级语言 |
+| docker-py | `E:/docker-py` | Python | 纯 Python 验证 |
+| evolver | `E:/evolver` | TypeScript | 前端语言 |
+| get-shit-done | `E:/get-shit-done` | TypeScript + 多语言 | 大规模 + Unicode |
+
+**退化判定标准（任一触发即阻塞）：**
+- 任一类节点数变化 > 0
+- 任一类边数变化 > 0  
+- 任一搜索查询结果集不同（相同查询，相同 limit，结果 ID 集合不同）
+- calls/impact/trace 输出不同
+- 1025 Rust tests 任一失败
+
 ## 热路径分析（v7.0.0 基准：428 files / 11.2s）
 
 ```
@@ -333,9 +384,19 @@ CBM v5 (基线):    1.02s  █
 Rust v7.0 (当前):  11.2s  ███████████ (11x 慢)
 
 Phase 2 后 (预估): 6-7s   ███████ (7x 慢)
-Phase 3 后 (预估): 2-3s   ███ (3x 慢)
+Phase 3 后 (预估): 2-3s   ███ (3x 慢)  
 Phase 4 后 (预估): 1.5-2s ██ (2x 慢)
 ```
+
+**前提条件：每个阶段的性能数字仅在功能对照验证 100% 通过后才有效。** 速度提升不能以任何功能退化为代价。如果优化导致节点/边/查询结果差异，必须回退该优化或修复差异后再测速。
+
+## 全局执行规则
+
+1. **每个阶段 = 一个独立的新分支** (从上一阶段分支切出)，完成后 merge 回 `refactor/tws-graph-rust-v7.1`
+2. **每阶段结束后 git commit**，commit message 附带对照测试结果摘要
+3. **遇到阻塞 bug** → 追加到 spec，TDD 修复后继续
+4. **遇到非阻塞问题** → 记入 `KNOWN_ISSUES.md`
+5. **子 agent 执行编码/测试**，主 agent 验收功能对照和性能数字
 
 ## 执行日志
 - 2026-06-29 — 🎯 目标接收，spec 创建
