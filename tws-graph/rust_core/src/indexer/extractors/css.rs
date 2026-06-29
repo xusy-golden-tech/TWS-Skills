@@ -137,7 +137,7 @@ fn extract_import(
 ) -> anyhow::Result<()> {
     let import_text = get_text(source, Some(node));
     let name = if import_text.len() > 60 {
-        format!("{}...", &import_text[..60])
+        format!("{}...", import_text.chars().take(60).collect::<String>())
     } else {
         import_text.clone()
     };
@@ -192,7 +192,7 @@ fn extract_media(
     let query = if query_parts.is_empty() {
         let full = get_text(source, Some(node));
         if full.len() > 60 {
-            format!("{}...", &full[..60])
+            format!("{}...", full.chars().take(60).collect::<String>())
         } else {
             full
         }

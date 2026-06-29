@@ -26,6 +26,7 @@ use crate::traits::{EdgeKind, Extractor, NodeKind};
 use std::collections::HashMap;
 use tree_sitter::Node;
 use tree_sitter::Tree;
+use tree_sitter::TreeCursor;
 
 // ---------------------------------------------------------------------------
 // Python built-in names -- filtered from type annotations and edges
@@ -123,48 +124,38 @@ impl Walker {
         ctx: &mut ExtractionContext,
         parent_id: &str,
     ) -> anyhow::Result<()> {
-        for i in 0..body.named_child_count() {
-            if let Some(child) = body.named_child(i) {
-                self.walk_statement(source, child, ctx, parent_id)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn walk_statement(
-        &mut self,
-        source: &[u8],
-        node: Node,
-        ctx: &mut ExtractionContext,
-        parent_id: &str,
-    ) -> anyhow::Result<()> {
-        match node.kind() {
-            "class_definition" => {
-                self.extract_class(source, node, ctx, parent_id)?;
-            }
-            "function_definition" => {
-                self.extract_function(source, node, ctx, parent_id, NodeKind::Function)?;
-            }
-            "decorated_definition" => {
-                self.extract_decorated(source, node, ctx, parent_id)?;
-            }
-            "import_statement" => {
-                self.extract_import_stmt(source, node, ctx, parent_id)?;
-            }
-            "import_from_statement" => {
-                self.extract_import_from(source, node, ctx, parent_id)?;
-            }
-            "expression_statement" => {
-                self.walk_expression_stmt(source, node, ctx, parent_id)?;
-            }
-            "assignment" => {
-                self.extract_module_assignment(source, node, ctx, parent_id)?;
-            }
-            _ => {
-                for i in 0..node.named_child_count() {
-                    if let Some(child) = node.named_child(i) {
-                        self.walk_statement(source, child, ctx, parent_id)?;
+        let mut cursor: TreeCursor = body.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let node = cursor.node();
+                if node.is_named() {
+                    match node.kind() {
+                        "class_definition" => {
+                            self.extract_class(source, node, ctx, parent_id)?;
+                        }
+                        "function_definition" => {
+                            self.extract_function(source, node, ctx, parent_id, NodeKind::Function)?;
+                        }
+                        "decorated_definition" => {
+                            self.extract_decorated(source, node, ctx, parent_id)?;
+                        }
+                        "import_statement" => {
+                            self.extract_import_stmt(source, node, ctx, parent_id)?;
+                        }
+                        "import_from_statement" => {
+                            self.extract_import_from(source, node, ctx, parent_id)?;
+                        }
+                        "expression_statement" => {
+                            self.walk_expression_stmt(source, node, ctx, parent_id)?;
+                        }
+                        "assignment" => {
+                            self.extract_module_assignment(source, node, ctx, parent_id)?;
+                        }
+                        _ => {}
                     }
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
                 }
             }
         }

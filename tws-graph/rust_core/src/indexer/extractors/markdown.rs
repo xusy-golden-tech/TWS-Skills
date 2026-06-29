@@ -170,7 +170,7 @@ fn extract_inline_nodes(
             if text.starts_with("![") {
                 // Image
                 if let Some(url) = extract_image_url(&text) {
-                    let name = format!("image:{}", if url.len() > 40 { &url[..40] } else { &url });
+                    let name = format!("image:{}", if url.len() > 40 { url.chars().take(40).collect::<String>() } else { url.to_string() });
                     let line = node.start_position().row as u32 + 1;
                     let img_id = ctx.add_node(NodeKind::MdImage, &name, &node, HashMap::new());
                     ctx.add_edge(parent_id, &img_id, EdgeKind::Contains, line, None);
@@ -180,7 +180,7 @@ fn extract_inline_nodes(
             } else {
                 // Could contain one or more links
                 for url in extract_all_link_urls(&text) {
-                    let name = format!("link:{}", if url.len() > 40 { &url[..40] } else { &url });
+                    let name = format!("link:{}", if url.len() > 40 { url.chars().take(40).collect::<String>() } else { url.to_string() });
                     let line = node.start_position().row as u32 + 1;
                     let link_id = ctx.add_node(NodeKind::MdLink, &name, &node, HashMap::new());
                     ctx.add_edge(parent_id, &link_id, EdgeKind::Contains, line, None);
@@ -202,7 +202,7 @@ fn extract_refdef(
 ) -> anyhow::Result<()> {
     let text = get_text(source, Some(node));
     let name = if text.len() > 60 {
-        format!("refdef:{}...", &text[..60])
+        format!("refdef:{}...", text.chars().take(60).collect::<String>())
     } else {
         format!("refdef:{}", text)
     };

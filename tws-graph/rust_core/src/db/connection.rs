@@ -541,15 +541,15 @@ impl Database {
 
 /// Compute a deterministic node ID.
 ///
-/// Returns the first 32 hex characters of
-/// ``SHA256("{file_path}:{qualified_name}")``.
+/// Returns a 16-char hex string from
+/// ``XXH3_64("{file_path}:{qualified_name}")``.
 ///
 /// This matches the Python ``_hash_id()`` function in
 /// ``tws_graph/store/query_builder.py``.
 pub fn hash_id(file_path: &str, qualified_name: &str) -> String {
     let raw = format!("{}:{}", file_path, qualified_name);
-    let digest = Sha256::digest(raw.as_bytes());
-    hex::encode(&digest)[..32].to_string()
+    let digest = xxhash_rust::xxh3::xxh3_64(raw.as_bytes());
+    format!("{:016x}", digest)
 }
 
 // ---------------------------------------------------------------------------
@@ -1097,7 +1097,7 @@ mod tests {
         let a = hash_id("src/main.py", "src.main::MyClass");
         let b = hash_id("src/main.py", "src.main::MyClass");
         assert_eq!(a, b);
-        assert_eq!(a.len(), 32);
+        assert_eq!(a.len(), 16);
 
         // Different inputs produce different hashes
         let c = hash_id("src/main.py", "src.main::OtherClass");

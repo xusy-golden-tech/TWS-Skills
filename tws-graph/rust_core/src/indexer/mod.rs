@@ -26,6 +26,8 @@ pub mod registry;
 pub mod scanner;
 
 pub mod extractors;
+pub mod parallel;
+pub mod parser_pool;
 
 // Re-export key types for convenience
 pub use context::{ExtractionContext, ExtractionResult, ScopeInfo};

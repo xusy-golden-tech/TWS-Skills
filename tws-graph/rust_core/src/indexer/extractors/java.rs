@@ -118,10 +118,17 @@ impl Walker {
     ) -> anyhow::Result<()> {
         // First pass: find package_declaration to set scope
         let mut package_name = String::new();
-        for i in 0..program.named_child_count() {
-            if let Some(child) = program.named_child(i) {
-                if child.kind() == "package_declaration" {
-                    package_name = self.resolve_package_source(source, child);
+        {
+            let mut cursor = program.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    if child.is_named() && child.kind() == "package_declaration" {
+                        package_name = self.resolve_package_source(source, child);
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
                 }
             }
         }
@@ -147,9 +154,18 @@ impl Walker {
         }
 
         // Second pass: walk all declarations
-        for i in 0..program.named_child_count() {
-            if let Some(child) = program.named_child(i) {
-                self.walk_declaration(source, child, ctx, parent_id)?;
+        {
+            let mut cursor = program.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    if child.is_named() {
+                        self.walk_declaration(source, child, ctx, parent_id)?;
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
             }
         }
 

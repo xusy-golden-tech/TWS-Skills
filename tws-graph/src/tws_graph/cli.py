@@ -154,7 +154,6 @@ def _sync_files_from_nodes(store: SqliteStore, root_dir: str = "") -> None:
 def index(
     project_path: str = typer.Argument(".", help="项目根目录"),
     force: bool = typer.Option(False, "--force", help="强制全量重建索引（跳过 content-hash 检查）"),
-    serial: bool = typer.Option(False, "--serial", help="强制串行提取（调试/对比用，默认并行）"),
     deep: bool = typer.Option(False, "--deep", help="启用深度分析（代码克隆检测 similar_to 边，耗时较长）"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径（默认: 项目目录/.tws/codegraph/index.db）"),
 ):
@@ -162,9 +161,6 @@ def index(
     root_dir = os.path.abspath(project_path)
     default_db = os.path.join(root_dir, DEFAULT_DB)
     db_path_resolved = db_path or default_db
-
-    if serial:
-        typer.echo("提示: --serial 已废弃，Rust 核心是唯一后端。使用默认路径。", err=True)
 
     # Rust core is the only backend
     from .rust_bridge import rust_index, _rust_available
