@@ -8,3 +8,11 @@ tws-graph/htmlcov/
 tws-graph/.coverage
 *.pyc
 *.bak
+
+# Rust/PyO3 build artifacts
+tws-graph/rust_core/target/
+tws-graph/src/tws_graph/_core/_core.pyd
+tws-graph/src/tws_graph/_core/__pycache__/
+*.db
+*.db-shm
+*.db-wal
