@@ -131,9 +131,16 @@ impl TsWalker {
         ctx: &mut ExtractionContext,
         parent_id: &str,
     ) -> anyhow::Result<()> {
-        for i in 0..node.named_child_count() {
-            if let Some(child) = node.named_child(i) {
-                self.walk_top_level(source, child, ctx, parent_id)?;
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                if child.is_named() {
+                    self.walk_top_level(source, child, ctx, parent_id)?;
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
             }
         }
         Ok(())
