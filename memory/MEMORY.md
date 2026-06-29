@@ -1,0 +1,1 @@
+- [Skill source location](feedback_skill_source_location.md) — SKILL.md 源码在根目录，`.claude/skills/` 是部署产物，不可手动修改
