@@ -156,8 +156,13 @@ def index(
     force: bool = typer.Option(False, "--force", help="强制全量重建索引（跳过 content-hash 检查）"),
     deep: bool = typer.Option(False, "--deep", help="启用深度分析（代码克隆检测 similar_to 边，耗时较长）"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径（默认: 项目目录/.tws/codegraph/index.db）"),
+    twsignore: Optional[str] = typer.Option(None, "--twsignore", help=".twsignore 文件路径（默认: 项目根/.twsignore；传空串禁用忽略规则）"),
 ):
-    """索引项目的所有源文件，构建代码关系图。"""
+    """索引项目的所有源文件，构建代码关系图。
+
+    默认自动读取项目根目录的 .twsignore 文件来排除文件。
+    使用 --twsignore 可指定自定义文件路径；使用 --twsignore '' 可禁用忽略规则。
+    """
     root_dir = os.path.abspath(project_path)
     default_db = os.path.join(root_dir, DEFAULT_DB)
     db_path_resolved = db_path or default_db
@@ -168,10 +173,12 @@ def index(
         typer.echo("错误: Rust 核心库不可用。请重新安装 tws-graph。", err=True)
         raise typer.Exit(1)
 
+    # Resolve twsignore path
+    twsignore_resolved: str | None = twsignore
     import time as _time
     typer.echo(f"正在索引: {root_dir}")
     _t0 = _time.time()
-    result = rust_index(str(db_path_resolved), str(root_dir))
+    result = rust_index(str(db_path_resolved), str(root_dir), twsignore_resolved)
     _duration_ms = int((_time.time() - _t0) * 1000)
     # Populate files table from nodes (Rust index fills nodes but not files)
     store = _get_store(db_path_resolved)
@@ -386,8 +393,13 @@ def diff(
 def sync(
     project_path: str = typer.Argument(".", help="项目根目录"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+    twsignore: Optional[str] = typer.Option(None, "--twsignore", help=".twsignore 文件路径（默认: 项目根/.twsignore；传空串禁用忽略规则）"),
 ):
-    """增量同步。v7.0.0: 调用 Rust index（Rust 核心内置增量逻辑）。"""
+    """增量同步。v7.0.0: 调用 Rust index（Rust 核心内置增量逻辑）。
+
+    默认自动读取项目根目录的 .twsignore 文件来排除文件。
+    使用 --twsignore 可指定自定义文件路径；使用 --twsignore '' 可禁用忽略规则。
+    """
     root_dir = os.path.abspath(project_path)
     default_db = os.path.join(root_dir, DEFAULT_DB)
     db_path_resolved = db_path or default_db
@@ -397,10 +409,12 @@ def sync(
         typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
 
+    # Resolve twsignore path
+    twsignore_resolved: str | None = twsignore
     import time as _time
     typer.echo(f"正在同步: {root_dir}")
     _t0 = _time.time()
-    result = rust_index(str(db_path_resolved), str(root_dir))
+    result = rust_index(str(db_path_resolved), str(root_dir), twsignore_resolved)
     _duration_ms = int((_time.time() - _t0) * 1000)
     store = _get_store(db_path_resolved)
     _sync_files_from_nodes(store, root_dir)

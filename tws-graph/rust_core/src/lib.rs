@@ -30,7 +30,7 @@ mod federate;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -166,13 +166,33 @@ fn index_one_file<'conn>(
 /// Transactions are batched every 100 files for performance.
 /// Prepared statements are pre-compiled once and reused across all files.
 /// tree-sitter Parsers are pooled by language via `ParserPool`.
+///
+/// # .twsignore
+///
+/// When `twsignore_path` is `None` (Python `None`), the scanner looks for
+/// `.twsignore` in the project root directory automatically.  Pass an
+/// explicit path string to use a different file; pass an empty string
+/// `""` to suppress ignore rules entirely (the scanner will not load any
+/// `.twsignore`).
 #[pyfunction]
-fn index(db_path: &str, root: &str) -> PyResult<String> {
+#[pyo3(signature = (db_path, root, twsignore_path=None))]
+fn index(db_path: &str, root: &str, twsignore_path: Option<&str>) -> PyResult<String> {
     let db = init_db(db_path)?;
     let root_path = Path::new(root);
 
+    // Resolve .twsignore path:
+    //   None       → auto-detect root/.twsignore (the default behaviour)
+    //   Some("")   → suppress ignore entirely
+    //   Some(path) → use the given file
+    let twsignore_opt: Option<std::path::PathBuf> = match twsignore_path {
+        Some("") => None, // empty string = suppress
+        Some(p) => Some(Path::new(p).to_path_buf()),
+        None => None, // let scanner auto-detect root/.twsignore
+    };
+    let twsignore_ref: Option<&Path> = twsignore_opt.as_deref();
+
     // Scan directory for source files
-    let files = indexer::scanner::scan_directory(root_path)
+    let files = indexer::scanner::scan_directory_with_ignore(root_path, twsignore_ref)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     let conn = db.connection();

@@ -18,10 +18,17 @@ def _rust_available() -> bool:
         return False
 
 
-def rust_index(db_path: str, project_root: str) -> str:
-    """Run index using Rust core. Returns summary string."""
+def rust_index(db_path: str, project_root: str, twsignore_path: str | None = None) -> str:
+    """Run index using Rust core. Returns summary string.
+
+    Args:
+        db_path: Path to the SQLite index database.
+        project_root: Root directory of the project to index.
+        twsignore_path: Optional path to a .twsignore file.  None means
+            auto-detect root/.twsignore; '' means suppress ignore entirely.
+    """
     from _core._core import index
-    return index(db_path, project_root)
+    return index(db_path, project_root, twsignore_path)
 
 
 def rust_search(db_path: str, query: str, limit: int = 50) -> list[dict]:

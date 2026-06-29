@@ -2,8 +2,13 @@
 //!
 //! Uses `git ls-files` as the primary strategy (respects `.gitignore`),
 //! falling back to `walkdir` when git is unavailable.
+//!
+//! Optional `.twsignore` support filters files on top of git's own
+//! exclusion rules.  See [`super::ignore`] for the parser.
 
 use std::path::{Path, PathBuf};
+
+use super::ignore::{self, IgnorePatterns};
 
 /// Directories to skip during filesystem walk (fallback only).
 const SKIP_DIRS: &[&str] = &[
@@ -25,16 +30,64 @@ const SKIP_PATH_PREFIXES: &[&str] = &[".tws/codegraph", ".tws/sessions"];
 
 /// Scan a directory for indexable source files.
 ///
+/// This is a convenience wrapper around [`scan_directory_with_ignore`]
+/// that does **not** apply any `.twsignore` rules.
+///
 /// Strategy:
 /// 1. Try `git ls-files --cached --others --exclude-standard` (fast + respects `.gitignore`).
 /// 2. Fall back to `walkdir` when git is unavailable.
 ///
 /// Returns a sorted list of relative paths.
 pub fn scan_directory(root: &Path) -> Result<Vec<PathBuf>, anyhow::Error> {
-    if let Some(files) = try_git_ls_files(root) {
+    scan_directory_with_ignore(root, None)
+}
+
+/// Scan a directory with optional `.twsignore` filtering.
+///
+/// After collecting files via `git ls-files` (or walkdir fallback), each
+/// relative path is tested against the ignore patterns loaded from
+/// *twsignore_path*.
+///
+/// When *twsignore_path* is `Some(p)`, the file at `p` is parsed as a
+/// `.twsignore` file.  When `None` the default `root/.twsignore` is used
+/// if it exists — this means a `.twsignore` in the project root is always
+/// honoured by default unless explicitly suppressed.
+///
+/// Returns a sorted list of relative paths (already filtered).
+pub fn scan_directory_with_ignore(
+    root: &Path,
+    twsignore_path: Option<&Path>,
+) -> Result<Vec<PathBuf>, anyhow::Error> {
+    // Phase 1 — collect all candidate files (git or walkdir).
+    let files = if let Some(git_files) = try_git_ls_files(root) {
+        git_files
+    } else {
+        walkdir_fallback(root)?
+    };
+
+    // Phase 2 — load ignore patterns.
+    let patterns: IgnorePatterns = match twsignore_path {
+        Some(explicit) => ignore::parse_twsignore(explicit)?,
+        None => {
+            let default = root.join(".twsignore");
+            ignore::parse_twsignore(&default)?
+        }
+    };
+
+    // Phase 3 — filter if there are patterns to apply.
+    if patterns.is_empty() {
         return Ok(files);
     }
-    walkdir_fallback(root)
+
+    let filtered: Vec<PathBuf> = files
+        .into_iter()
+        .filter(|f| {
+            let rel = f.to_str().unwrap_or("");
+            !patterns.is_ignored(rel)
+        })
+        .collect();
+
+    Ok(filtered)
 }
 
 // ---------------------------------------------------------------------------
