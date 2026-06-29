@@ -119,7 +119,7 @@ pub fn parse_twsignore_content(content: &str) -> Result<IgnorePatterns, anyhow::
 /// - No `/` inside → bare filename pattern: match at any depth by
 ///   prepending `**/`.
 /// - Contains `/` → full-path pattern: use as-is (match from root).
-fn compile_glob(raw: &str) -> Result<glob::Pattern, anyhow::Error> {
+pub(crate) fn compile_glob(raw: &str) -> Result<glob::Pattern, anyhow::Error> {
     let s = raw.trim();
 
     if s.ends_with('/') {

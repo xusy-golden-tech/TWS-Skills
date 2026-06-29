@@ -58,19 +58,23 @@ fn init_db(db_path: &str) -> PyResult<db::Database> {
 /// 3. If both are specified, include is applied first, then exclude.
 /// 4. If neither is specified, all paths pass (returns `true`).
 fn matches_scope(path: &str, include: &[String], exclude: &[String]) -> bool {
-    // Step 1: include filter — if specified, path must match at least one
+    let normalized = path.replace('\\', "/");
+
     if !include.is_empty() {
         let matched = include.iter().any(|p| {
-            glob::Pattern::new(p).map(|pat| pat.matches(path)).unwrap_or(false)
+            crate::indexer::ignore::compile_glob(p)
+                .map(|pat| pat.matches(&normalized))
+                .unwrap_or(false)
         });
         if !matched {
             return false;
         }
     }
-    // Step 2: exclude filter — if specified, path must NOT match any
     if !exclude.is_empty() {
         let excluded = exclude.iter().any(|p| {
-            glob::Pattern::new(p).map(|pat| pat.matches(path)).unwrap_or(false)
+            crate::indexer::ignore::compile_glob(p)
+                .map(|pat| pat.matches(&normalized))
+                .unwrap_or(false)
         });
         if excluded {
             return false;
