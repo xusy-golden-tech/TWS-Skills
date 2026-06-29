@@ -129,14 +129,14 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 
 ### ⑦ 代码审查
 
-独立子 agent 通过 Skill 工具加载 `comp-code-review`
+主 agent 按 comp-code-review 编排层执行：Impact Assessment → 三阶段并行审查（Plan → Main Loop → Filter）→ 汇总 → Triage。
 
 ```
-派独立子 agent 审查修复代码：
-□ 修复逻辑是否正确？有没有遗漏的边界情况？
-□ 有没有引入新问题？
-□ 测试是否覆盖了修复点？
-□ 符合代码规约吗？
+派独立子 agent 执行三阶段审查：
+1. 主 agent 先 spawn Impact Assessment 子 agent（加载 comp-impact-assessment）
+2. 对 HIGH/MEDIUM 风险文件并行 spawn Plan → Main Loop → Filter 三阶段子 agent
+3. 主 agent 汇总、去重、Triage 分类（A/B/C）
+4. A 类问题必须修，B 类主 agent 决定，C 类跳过
 ```
 
 ### ⑧ 防复燃

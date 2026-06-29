@@ -85,7 +85,10 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
 |--------|-----------|-----------|
 | 复现 | comp-reproduce | 定位相关符号、追踪调用链 |
 | 编码 | comp-implementation | 理解现有结构、确认影响范围 |
-| 代码审查 | comp-code-review | 验证接线完整性(D6)、架构健康度(D7) |
+| 代码审查(Plan) | comp-agentic-review-core | 分析 diff，产出 risk_zones 审查计划 |
+| 代码审查(Main Loop) | comp-agentic-review-core | 基于 Plan 用 CodeGraph 深度调查，确认 issues |
+| 代码审查(Filter) | comp-agentic-review-core | 干净上下文过滤误报 |
+| 代码审查(编排) | comp-code-review | 编排三阶段并行 spawn + 汇总 + Triage |
 | 测试 | comp-test | 确认回归测试范围 |
 | 后端编码(Python) | comp-backend-impl-python | 理解现有结构 |
 | 后端编码(Java) | comp-backend-impl-java | 理解现有结构 |
@@ -135,6 +138,7 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
 | 场景 | 最大并发 | 说明 |
 |------|---------|------|
 | 代码改动 | 2 | 避免文件冲突 |
+| 代码审查 | 5 | 审查只读，不修改代码，可用更高并发 |
 | 纯文档/调查类 | 4 | 不涉及代码冲突 |
 
 **超出限制时排队执行，不新增子 agent。**
