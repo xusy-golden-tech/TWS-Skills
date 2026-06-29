@@ -50,6 +50,35 @@ fn init_db(db_path: &str) -> PyResult<db::Database> {
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
+/// Check whether a file path matches the include/exclude scope filters.
+///
+/// Logic:
+/// 1. If `include` patterns are specified, the path must match at least one.
+/// 2. If `exclude` patterns are specified, the path must NOT match any.
+/// 3. If both are specified, include is applied first, then exclude.
+/// 4. If neither is specified, all paths pass (returns `true`).
+fn matches_scope(path: &str, include: &[String], exclude: &[String]) -> bool {
+    // Step 1: include filter — if specified, path must match at least one
+    if !include.is_empty() {
+        let matched = include.iter().any(|p| {
+            glob::Pattern::new(p).map(|pat| pat.matches(path)).unwrap_or(false)
+        });
+        if !matched {
+            return false;
+        }
+    }
+    // Step 2: exclude filter — if specified, path must NOT match any
+    if !exclude.is_empty() {
+        let excluded = exclude.iter().any(|p| {
+            glob::Pattern::new(p).map(|pat| pat.matches(path)).unwrap_or(false)
+        });
+        if excluded {
+            return false;
+        }
+    }
+    true
+}
+
 // ============================================================================
 // Ping
 // ============================================================================
@@ -175,8 +204,8 @@ fn index_one_file<'conn>(
 /// `""` to suppress ignore rules entirely (the scanner will not load any
 /// `.twsignore`).
 #[pyfunction]
-#[pyo3(signature = (db_path, root, twsignore_path=None))]
-fn index(db_path: &str, root: &str, twsignore_path: Option<&str>) -> PyResult<String> {
+#[pyo3(signature = (db_path, root, twsignore_path=None, include_patterns=None, exclude_patterns=None))]
+fn index(db_path: &str, root: &str, twsignore_path: Option<&str>, include_patterns: Option<Vec<String>>, exclude_patterns: Option<Vec<String>>) -> PyResult<String> {
     let db = init_db(db_path)?;
     let root_path = Path::new(root);
 
@@ -192,8 +221,27 @@ fn index(db_path: &str, root: &str, twsignore_path: Option<&str>) -> PyResult<St
     let twsignore_ref: Option<&Path> = twsignore_opt.as_deref();
 
     // Scan directory for source files
-    let files = indexer::scanner::scan_directory_with_ignore(root_path, twsignore_ref)
+    let mut files = indexer::scanner::scan_directory_with_ignore(root_path, twsignore_ref)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    // Apply --include / --exclude scope filtering
+    if let Some(ref inc) = include_patterns {
+        if !inc.is_empty() {
+            let exc = exclude_patterns.as_deref().unwrap_or(&[]);
+            files.retain(|f| {
+                let path_str = f.to_string_lossy().replace('\\', "/");
+                matches_scope(&path_str, inc, exc)
+            });
+        }
+    } else if let Some(ref exc) = exclude_patterns {
+        if !exc.is_empty() {
+            let empty: &[String] = &[];
+            files.retain(|f| {
+                let path_str = f.to_string_lossy().replace('\\', "/");
+                matches_scope(&path_str, empty, exc)
+            });
+        }
+    }
 
     let conn = db.connection();
 
@@ -485,11 +533,24 @@ fn lang_to_tree_sitter(lang: &str) -> Option<tree_sitter::Language> {
 /// Full-text search with qualifier parsing (kind:, lang:, path:).
 /// Returns a list of dicts with id, name, qualified_name, kind, file_path, language.
 #[pyfunction]
-fn search(py: Python<'_>, db_path: &str, query_text: &str, limit: Option<usize>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (db_path, query_text, limit=None, include_paths=None, exclude_paths=None))]
+fn search(py: Python<'_>, db_path: &str, query_text: &str, limit: Option<usize>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<Py<PyAny>> {
     let db = open_db(db_path)?;
     let parsed = query::search::parse_query(query_text);
-    let results = query::run_search_parsed(&db, &parsed, limit.unwrap_or(50))
+    let mut results = query::run_search_parsed(&db, &parsed, limit.unwrap_or(50))
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    // Apply --include / --exclude scope filtering
+    if let Some(ref inc) = include_paths {
+        if !inc.is_empty() {
+            let exc = exclude_paths.as_deref().unwrap_or(&[]);
+            results.retain(|r| matches_scope(&r.file_path, inc, exc));
+        }
+    } else if let Some(ref exc) = exclude_paths {
+        if !exc.is_empty() {
+            results.retain(|r| matches_scope(&r.file_path, &[], exc));
+        }
+    }
 
     let list = pyo3::types::PyList::empty(py);
     for r in &results {
@@ -509,12 +570,25 @@ fn search(py: Python<'_>, db_path: &str, query_text: &str, limit: Option<usize>)
 /// Show calls from or to a node.
 /// If `inbound` is true, show callers; else show callees.
 #[pyfunction]
-fn calls(db_path: &str, name: &str, inbound: Option<bool>, depth: Option<usize>) -> PyResult<String> {
+#[pyo3(signature = (db_path, name, inbound=None, depth=None, include_paths=None, exclude_paths=None))]
+fn calls(db_path: &str, name: &str, inbound: Option<bool>, depth: Option<usize>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
     let is_inbound = inbound.unwrap_or(false);
     let d = depth.unwrap_or(1);
-    let results = query::run_calls(&db, name, is_inbound, d)
+    let mut results = query::run_calls(&db, name, is_inbound, d)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    // Apply --include / --exclude scope filtering
+    if let Some(ref inc) = include_paths {
+        if !inc.is_empty() {
+            let exc = exclude_paths.as_deref().unwrap_or(&[]);
+            results.retain(|r| matches_scope(&r.file_path, inc, exc));
+        }
+    } else if let Some(ref exc) = exclude_paths {
+        if !exc.is_empty() {
+            results.retain(|r| matches_scope(&r.file_path, &[], exc));
+        }
+    }
 
     if results.is_empty() {
         return Ok(format!("No calls found for '{}'", name));
@@ -532,11 +606,25 @@ fn calls(db_path: &str, name: &str, inbound: Option<bool>, depth: Option<usize>)
 
 /// Compute impact radius of a symbol, grouped by module.
 #[pyfunction]
-fn impact(db_path: &str, name: &str, depth: Option<usize>) -> PyResult<String> {
+#[pyo3(signature = (db_path, name, depth=None, include_paths=None, exclude_paths=None))]
+fn impact(db_path: &str, name: &str, depth: Option<usize>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
     let d = depth.unwrap_or(1);
-    let results = query::run_impact(&db, name, d)
+    let mut results = query::run_impact(&db, name, d)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    // Apply --include / --exclude scope filtering
+    // ImpactResult.module is the file_path
+    if let Some(ref inc) = include_paths {
+        if !inc.is_empty() {
+            let exc = exclude_paths.as_deref().unwrap_or(&[]);
+            results.retain(|r| matches_scope(&r.module, inc, exc));
+        }
+    } else if let Some(ref exc) = exclude_paths {
+        if !exc.is_empty() {
+            results.retain(|r| matches_scope(&r.module, &[], exc));
+        }
+    }
 
     if results.is_empty() {
         return Ok(format!("No impact found for '{}'", name));
@@ -561,13 +649,32 @@ fn impact(db_path: &str, name: &str, depth: Option<usize>) -> PyResult<String> {
 
 /// Find the shortest path between two symbols.
 #[pyfunction]
-fn trace(db_path: &str, src: &str, tgt: &str) -> PyResult<String> {
+#[pyo3(signature = (db_path, src, tgt, include_paths=None, exclude_paths=None))]
+fn trace(db_path: &str, src: &str, tgt: &str, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
     let result = query::run_trace(&db, src, tgt)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     match result {
-        Some(path) => {
+        Some(mut path) => {
+            // Apply --include / --exclude scope filtering to path nodes
+            let has_scope = include_paths.as_ref().map_or(false, |v| !v.is_empty())
+                || exclude_paths.as_ref().map_or(false, |v| !v.is_empty());
+            if has_scope {
+                let inc = include_paths.as_deref().unwrap_or(&[]);
+                let exc = exclude_paths.as_deref().unwrap_or(&[]);
+                path.retain(|(nid, _)| {
+                    if let Ok(Some((_id, _kind, _name, _qn, _lang, fp))) = db.get_node(nid) {
+                        matches_scope(&fp, inc, exc)
+                    } else {
+                        false
+                    }
+                });
+            }
+            if path.len() < 2 {
+                return Ok(format!("No path found from '{}' to '{}' (all nodes filtered out by scope)", src, tgt));
+            }
+
             let mut out = format!("Trace from '{}' to '{}':\n", src, tgt);
             for (i, (_id, node_name)) in path.iter().enumerate() {
                 if i > 0 {

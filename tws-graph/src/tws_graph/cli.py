@@ -157,11 +157,16 @@ def index(
     deep: bool = typer.Option(False, "--deep", help="启用深度分析（代码克隆检测 similar_to 边，耗时较长）"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径（默认: 项目目录/.tws/codegraph/index.db）"),
     twsignore: Optional[str] = typer.Option(None, "--twsignore", help=".twsignore 文件路径（默认: 项目根/.twsignore；传空串禁用忽略规则）"),
+    include_patterns: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_patterns: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """索引项目的所有源文件，构建代码关系图。
 
     默认自动读取项目根目录的 .twsignore 文件来排除文件。
     使用 --twsignore 可指定自定义文件路径；使用 --twsignore '' 可禁用忽略规则。
+
+    --include / --exclude 支持 glob 模式，可重复指定。
+    例: tws-graph index --include "src/" --exclude "tests/"
     """
     root_dir = os.path.abspath(project_path)
     default_db = os.path.join(root_dir, DEFAULT_DB)
@@ -178,7 +183,8 @@ def index(
     import time as _time
     typer.echo(f"正在索引: {root_dir}")
     _t0 = _time.time()
-    result = rust_index(str(db_path_resolved), str(root_dir), twsignore_resolved)
+    result = rust_index(str(db_path_resolved), str(root_dir), twsignore_resolved,
+                        include_patterns, exclude_patterns)
     _duration_ms = int((_time.time() - _t0) * 1000)
     # Populate files table from nodes (Rust index fills nodes but not files)
     store = _get_store(db_path_resolved)
@@ -256,6 +262,8 @@ def calls(
     depth: int = typer.Option(1, "--depth", "-d", help="追溯深度"),
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """查询调用关系：谁调用了这个符号，或这个符号调了谁。
 
@@ -277,10 +285,7 @@ def calls(
         typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
 
-    typer.echo(rust_calls(resolved_db, symbol, inbound, depth))
-
-    if queries:
-        _show_unresolved_hint_in_calls(queries, focal_node, direction)
+    typer.echo(rust_calls(resolved_db, symbol, inbound, depth, include_paths, exclude_paths))
 
 
 # ============================================================================
@@ -293,6 +298,8 @@ def impact(
     depth: int = typer.Option(2, "--depth", "-d", help="影响传播深度 (默认 2)"),
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """分析修改一个符号的影响范围。"""
     resolved_db = os.path.abspath(db_path or DEFAULT_DB)
@@ -303,7 +310,7 @@ def impact(
     if not _rust_available():
         typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
-    typer.echo(rust_impact(resolved_db, symbol, depth))
+    typer.echo(rust_impact(resolved_db, symbol, depth, include_paths, exclude_paths))
 
 
 # ============================================================================
@@ -316,6 +323,8 @@ def trace(
     to_symbol: str = typer.Argument(..., help="目标符号（报错点）"),
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """查找两个符号之间的完整调用链。"""
     resolved_db = os.path.abspath(db_path or DEFAULT_DB)
@@ -326,7 +335,7 @@ def trace(
     if not _rust_available():
         typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
-    typer.echo(rust_trace(resolved_db, from_symbol, to_symbol))
+    typer.echo(rust_trace(resolved_db, from_symbol, to_symbol, include_paths, exclude_paths))
 
 
 # ============================================================================
@@ -394,6 +403,8 @@ def sync(
     project_path: str = typer.Argument(".", help="项目根目录"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
     twsignore: Optional[str] = typer.Option(None, "--twsignore", help=".twsignore 文件路径（默认: 项目根/.twsignore；传空串禁用忽略规则）"),
+    include_patterns: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_patterns: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """增量同步。v7.0.0: 调用 Rust index（Rust 核心内置增量逻辑）。
 
@@ -414,7 +425,8 @@ def sync(
     import time as _time
     typer.echo(f"正在同步: {root_dir}")
     _t0 = _time.time()
-    result = rust_index(str(db_path_resolved), str(root_dir), twsignore_resolved)
+    result = rust_index(str(db_path_resolved), str(root_dir), twsignore_resolved,
+                        include_patterns, exclude_patterns)
     _duration_ms = int((_time.time() - _t0) * 1000)
     store = _get_store(db_path_resolved)
     _sync_files_from_nodes(store, root_dir)
@@ -528,6 +540,8 @@ def search(
     semantic: bool = typer.Option(False, "--semantic", help="启用 11-signal 语义搜索"),
     signal_weights: Optional[str] = typer.Option(None, "--weights", help="JSON 格式信号权重覆盖"),
     embeddings: bool = typer.Option(False, "--embeddings", help="启用向量增强"),
+    include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
+    exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
 ):
     """全文搜索代码符号。
 
@@ -612,7 +626,7 @@ def search(
     if os.path.exists(resolved_db):
         from .rust_bridge import rust_search, _rust_available
         if _rust_available():
-            results = rust_search(resolved_db, query_str, limit)
+            results = rust_search(resolved_db, query_str, limit, include_paths, exclude_paths)
             if not results:
                 typer.echo(f"未找到匹配: {query_str}")
                 return

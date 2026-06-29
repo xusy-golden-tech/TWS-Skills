@@ -18,7 +18,9 @@ def _rust_available() -> bool:
         return False
 
 
-def rust_index(db_path: str, project_root: str, twsignore_path: str | None = None) -> str:
+def rust_index(db_path: str, project_root: str, twsignore_path: str | None = None,
+               include_patterns: list[str] | None = None,
+               exclude_patterns: list[str] | None = None) -> str:
     """Run index using Rust core. Returns summary string.
 
     Args:
@@ -26,36 +28,75 @@ def rust_index(db_path: str, project_root: str, twsignore_path: str | None = Non
         project_root: Root directory of the project to index.
         twsignore_path: Optional path to a .twsignore file.  None means
             auto-detect root/.twsignore; '' means suppress ignore entirely.
+        include_patterns: Optional list of glob patterns. If given, only
+            files matching at least one pattern are indexed.
+        exclude_patterns: Optional list of glob patterns. Files matching
+            any pattern are excluded from indexing.
     """
     from _core._core import index
-    return index(db_path, project_root, twsignore_path)
+    return index(db_path, project_root, twsignore_path, include_patterns, exclude_patterns)
 
 
-def rust_search(db_path: str, query: str, limit: int = 50) -> list[dict]:
-    """Search using Rust FTS5 engine."""
+def rust_search(db_path: str, query: str, limit: int = 50,
+                include_paths: list[str] | None = None,
+                exclude_paths: list[str] | None = None) -> list[dict]:
+    """Search using Rust FTS5 engine.
+
+    Args:
+        include_paths: Optional list of glob patterns. Only results whose
+            file_path matches at least one pattern are returned.
+        exclude_paths: Optional list of glob patterns. Results whose
+            file_path matches any pattern are excluded.
+    """
     from _core._core import search
-    return search(db_path, query, limit)
+    return search(db_path, query, limit, include_paths, exclude_paths)
 
 
-def rust_calls(db_path: str, node_name: str, inbound: bool = True, depth: int = 5) -> str:
+def rust_calls(db_path: str, node_name: str, inbound: bool = True, depth: int = 5,
+               include_paths: list[str] | None = None,
+               exclude_paths: list[str] | None = None) -> str:
     """Find call targets/callers using Rust BFS.
 
     Default: inbound=True (show callers), matching CLI default behavior.
+
+    Args:
+        include_paths: Optional list of glob patterns. Only results whose
+            file_path matches at least one pattern are returned.
+        exclude_paths: Optional list of glob patterns. Results whose
+            file_path matches any pattern are excluded.
     """
     from _core._core import calls
-    return calls(db_path, node_name, inbound, depth)
+    return calls(db_path, node_name, inbound, depth, include_paths, exclude_paths)
 
 
-def rust_impact(db_path: str, node_name: str, depth: int = 5) -> str:
-    """Impact analysis using Rust BFS."""
+def rust_impact(db_path: str, node_name: str, depth: int = 5,
+                include_paths: list[str] | None = None,
+                exclude_paths: list[str] | None = None) -> str:
+    """Impact analysis using Rust BFS.
+
+    Args:
+        include_paths: Optional list of glob patterns. Only results whose
+            file_path matches at least one pattern are returned.
+        exclude_paths: Optional list of glob patterns. Results whose
+            file_path matches any pattern are excluded.
+    """
     from _core._core import impact
-    return impact(db_path, node_name, depth)
+    return impact(db_path, node_name, depth, include_paths, exclude_paths)
 
 
-def rust_trace(db_path: str, src: str, tgt: str) -> str:
-    """Find path between two symbols using Rust BFS."""
+def rust_trace(db_path: str, src: str, tgt: str,
+               include_paths: list[str] | None = None,
+               exclude_paths: list[str] | None = None) -> str:
+    """Find path between two symbols using Rust BFS.
+
+    Args:
+        include_paths: Optional list of glob patterns. Only path nodes whose
+            file_path matches at least one pattern are included.
+        exclude_paths: Optional list of glob patterns. Path nodes whose
+            file_path matches any pattern are excluded.
+    """
     from _core._core import trace
-    return trace(db_path, src, tgt)
+    return trace(db_path, src, tgt, include_paths, exclude_paths)
 
 
 def rust_unresolved(db_path: str) -> str:
