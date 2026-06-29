@@ -1,6 +1,6 @@
 ---
 name: tws-graph-usage
-description: tws-graph 代码图使用指南（v5.7.0）。所有需要查图的子 agent 必须加载此 skill。包含安装检查、命令语法、错误处理和最佳实践
+description: tws-graph 代码图使用指南（v7.1.1）。所有需要查图的子 agent 必须加载此 skill。包含安装检查、命令语法、错误处理和最佳实践
 ---
 
 # tws-graph 代码图使用指南
@@ -92,10 +92,20 @@ tws-graph 通过 28+ 个提取器覆盖 30+ 种语言和配置格式。所有提
 
 | 命令 | 用途 | 示例 |
 |------|------|------|
-| `tws-graph index` | 全量/增量索引源文件 | `tws-graph index` |
+| `tws-graph index` | 全量/增量索引源文件（默认 rayon 并行提取） | `tws-graph index` 或 `tws-graph index --force --deep` |
 | `tws-graph sync` | 增量同步（stat 预筛选，比 index 更快） | `tws-graph sync` |
 | `tws-graph hooks install` | 安装 git hooks（自动增量索引） | `tws-graph hooks install` |
 | `tws-graph watch` | 文件变更监听，自动增量同步 | `tws-graph watch --path . --interval 2.0` |
+
+**并行控制**：`tws-graph index` 默认使用 rayon 并行提取（文件级 `par_chunks`）。设置环境变量 `TWS_USE_PARALLEL=0` 可回退到串行模式（调试/对比用，输出与并行 100% 一致）。
+
+```
+# 串行提取（调试用）
+TWS_USE_PARALLEL=0 tws-graph index
+
+# 并行提取（默认）
+tws-graph index
+```
 
 ### 符号查询
 
