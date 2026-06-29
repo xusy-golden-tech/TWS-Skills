@@ -1,6 +1,6 @@
 ---
 name: tws-graph-usage
-description: tws-graph 代码图使用指南（v7.1.1）。所有需要查图的子 agent 必须加载此 skill。包含安装检查、命令语法、错误处理和最佳实践
+description: tws-graph 代码图使用指南（v7.2.0）。所有需要查图的子 agent 必须加载此 skill。包含安装检查、命令语法、错误处理和最佳实践
 ---
 
 # tws-graph 代码图使用指南
@@ -94,6 +94,7 @@ tws-graph 通过 28+ 个提取器覆盖 30+ 种语言和配置格式。所有提
 |------|------|------|
 | `tws-graph index` | 全量/增量索引源文件（默认 rayon 并行提取） | `tws-graph index` 或 `tws-graph index --force --deep` |
 | `tws-graph sync` | 增量同步（stat 预筛选，比 index 更快） | `tws-graph sync` |
+| `tws-graph index` / `sync` 范围过滤 | `--twsignore` 自定义忽略文件，`--include`/`-I` 限定范围，`--exclude`/`-X` 排除文件 | `tws-graph index --include "src/**" --exclude "tests/"` |
 | `tws-graph hooks install` | 安装 git hooks（自动增量索引） | `tws-graph hooks install` |
 | `tws-graph watch` | 文件变更监听，自动增量同步 | `tws-graph watch --path . --interval 2.0` |
 
@@ -107,6 +108,26 @@ TWS_USE_PARALLEL=0 tws-graph index
 tws-graph index
 ```
 
+### .twsignore 忽略文件（v7.2.0）
+
+项目根目录放置 `.twsignore` 文件，格式与 `.gitignore` 一致，索引时自动排除匹配的文件：
+
+```
+# 排除构建产物和测试
+*.pyc
+__pycache__/
+node_modules/
+tests/
+*.log
+
+# 反选：保留重要文件
+!tests/smoke/
+```
+
+- 每行一个 glob pattern，`#` 注释，`!` 反选（re-include）
+- 索引时 scanner 自动读取项目根 `.twsignore`，与 `.gitignore` 叠加过滤
+- 自定义路径：`tws-graph index --twsignore .myignore`
+
 ### 符号查询
 
 | 命令 | 用途 | 示例 |
@@ -117,6 +138,8 @@ tws-graph index
 | `tws-graph impact <node>` | 查变更影响范围（谁依赖这个符号） | `tws-graph impact MyClass.my_method --depth 2` |
 | `tws-graph trace <src> <tgt>` | 查两个符号之间的调用路径 | `tws-graph trace main parse_config` |
 | `tws-graph unresolved` | 列出未解析引用，自动标记 `[external]`/`[internal]` | `tws-graph unresolved` |
+
+> **范围过滤（v7.2.0）**：`search`/`calls`/`impact`/`trace`/`unresolved` 均支持 `--include`/`-I` 和 `--exclude`/`-X`。例：`tws-graph search auth --include "src/**" --exclude "tests/"`
 
 ### 快照与差异
 
@@ -140,6 +163,8 @@ tws-graph index
 | `tws-graph health` | 代码健康评分（测试覆盖+死代码+耦合） | `tws-graph health --worst 10` |
 | `tws-graph analyze` | 图分析（算法：clone/community/centrality） | `tws-graph analyze --algorithm clone --threshold 0.8` |
 
+> **范围过滤（v7.2.0）**：以上全部命令支持 `--include`/`-I` 和 `--exclude`/`-X`。例：`tws-graph cycles --exclude "tests/"`、`tws-graph health --include "src/**" --worst 10`
+
 ### 导出与工具
 
 | 命令 | 用途 | 示例 |
@@ -150,6 +175,8 @@ tws-graph index
 | `tws-graph serve` | 启动 MCP 服务器（21 工具 + 3 资源） | `tws-graph serve --root . --db .tws/codegraph/index.db` |
 | `tws-graph lint` | 校验 skill 文件结构 | `tws-graph lint` |
 | `tws-graph lsp setup` | 检测已安装的 LSP server 可用性 | `tws-graph lsp setup` |
+
+> **范围过滤（v7.2.0）**：`export` 命令支持 `--include`/`-I` 和 `--exclude`/`-X`。例：`tws-graph export json --kind calls --exclude "tests/"`
 
 ## EdgeKind 参考
 
@@ -318,16 +345,26 @@ tws-graph metrics                   # 模块内聚/耦合度量
 tws-graph health --worst 10         # 代码健康评分，最差 10 个文件
 ```
 
+### 架构分析（限定范围，v7.2.0）
+
+```
+tws-graph cycles --exclude "tests/"              # 排除测试目录的循环依赖
+tws-graph metrics --include "src/**"             # 只统计 src 下的模块
+tws-graph health --worst 10 --exclude "tests/"   # 只评估源码健康度
+```
+
 ### 安全分析
 
 ```
 tws-graph taint                     # 污点分析（source→sink 全路径）
+tws-graph taint --exclude "tests/"  # 排除测试文件的污点路径
 ```
 
 ### 影响预测
 
 ```
 tws-graph predict-impact my_func    # 预测修改影响（半径+风险+测试建议）
+tws-graph predict-impact my_func --exclude "tests/"
 ```
 
 ### 图导出
@@ -336,6 +373,7 @@ tws-graph predict-impact my_func    # 预测修改影响（半径+风险+测试�
 tws-graph export dot --from main --depth 2     # DOT 格式（Graphviz）
 tws-graph export mermaid --from MyClass        # Mermaid 格式（Markdown）
 tws-graph export json --kind calls             # JSON 格式
+tws-graph export json --kind calls --exclude "tests/"
 ```
 
 ### 代码质量
@@ -344,6 +382,7 @@ tws-graph export json --kind calls             # JSON 格式
 tws-graph analyze --run dead-code              # 死代码检测
 tws-graph analyze --run entry-point            # 入口点识别
 tws-graph analyze --run git-diff               # Git diff 影响分析
+tws-graph analyze --run dead-code --exclude "tests/"
 tws-graph analyze --algorithm clone --threshold 0.8   # 克隆检测
 ```
 
