@@ -251,7 +251,7 @@ fn extract_query(
 ) -> anyhow::Result<()> {
     let query_text = get_text(source, Some(node));
     let name = if query_text.len() > 60 {
-        format!("query:{}...", &query_text[..60].replace('\n', " "))
+        format!("query:{}...", query_text.chars().take(60).collect::<String>().replace('\n', " "))
     } else {
         format!("query:{}", query_text.replace('\n', " "))
     };
