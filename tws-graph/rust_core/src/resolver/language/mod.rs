@@ -36,13 +36,14 @@ impl LanguageRegistry {
             "nix" => Some(Box::new(NixResolver)),
             "elixir" => Some(Box::new(ElixirResolver)),
             "haskell" => Some(Box::new(HaskellResolver)),
+            "clojure" => Some(Box::new(ClojureResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift", "lua", "bash", "groovy", "zig", "nix", "elixir", "haskell"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift", "lua", "bash", "groovy", "zig", "nix", "elixir", "haskell", "clojure"]
     }
 }
 
@@ -3610,6 +3611,229 @@ pub fn is_haskell_external(module_name: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Clojure module resolver (Stage 21)
+// ---------------------------------------------------------------------------
+
+/// Clojure module resolver.
+///
+/// Clojure module system conventions:
+/// - Namespace `foo.bar.baz` maps to file `foo/bar/baz.clj`, `.cljc`, or `.cljs`
+/// - `(:require [foo.bar :refer [baz]])` → imports `baz` from namespace `foo.bar`
+/// - `(:require [foo.bar :as fb])` → namespace alias
+/// - `(:use foo.bar)` → full namespace import
+/// - `(:import [java.util Date])` → Java class import
+/// - `clojure.*`, `cljs.*` are standard library (external)
+/// - `java.*`, `javax.*` are Java interop (external)
+pub struct ClojureResolver;
+
+impl ModuleResolver for ClojureResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        _source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        if module_name.is_empty() {
+            return Vec::new();
+        }
+
+        // 1. Direct ModuleIndex lookup by module name
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Try with common source root prefixes
+        for prefix in &["", "src.", "lib.", "test.", "tests."] {
+            let candidate = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&candidate) {
+                return files.clone();
+            }
+        }
+
+        // 3. Try rev-lookup if module_name looks like a file path
+        if let Some(actual_module) = module_index.rev_lookup(module_name) {
+            if let Some(files) = module_index.lookup(actual_module) {
+                return files.clone();
+            }
+        }
+
+        // 4. Generate candidate file paths from module name
+        //    e.g., "myapp.core" → "myapp/core.clj", "myapp/core.cljc", "myapp/core.cljs"
+        let module_path = clojure_module_to_path(module_name);
+
+        let mut candidates = Vec::new();
+        for ext in &["clj", "cljc", "cljs"] {
+            for prefix in &["", "src/", "lib/", "test/", "tests/"] {
+                candidates.push(format!("{}{}.{}", prefix, module_path, ext));
+            }
+        }
+
+        candidates
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "clojure")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_clojure_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "clojure"
+    }
+}
+
+/// Convert a Clojure namespace name to a slash-separated file path (without extension).
+///
+/// `"myapp.core"` → `"myapp/core"`
+fn clojure_module_to_path(module_name: &str) -> String {
+    module_name.replace('.', "/")
+}
+
+/// Check if a module name is a known Clojure/ClojureScript standard library
+/// or Java interop package (external dependency).
+///
+/// Clojure standard library includes:
+/// - `clojure.*` packages (clojure.core, clojure.string, clojure.set, etc.)
+/// - `clojure.*` sub-namespaces
+/// - `cljs.*` packages (ClojureScript standard library)
+/// - `java.*`, `javax.*`, `sun.*` (Java interop)
+/// - Popular third-party libraries: `ring.*`, `compojure.*`, `cheshire.*`, etc.
+pub fn is_clojure_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    let root = module_name.split('.').next().unwrap_or(module_name);
+
+    // Clojure standard library
+    if root == "clojure" || root == "cljs" {
+        return true;
+    }
+
+    // Java interop packages
+    if root == "java" || root == "javax" || root == "sun" {
+        return true;
+    }
+
+    // Clojure contrib libraries
+    let contrib_prefixes: &[&str] = &[
+        "clojure.core",
+        "clojure.string",
+        "clojure.set",
+        "clojure.data",
+        "clojure.java",
+        "clojure.edn",
+        "clojure.pprint",
+        "clojure.walk",
+        "clojure.xml",
+        "clojure.zip",
+        "clojure.reflect",
+        "clojure.template",
+        "clojure.test",
+        "clojure.stacktrace",
+        "clojure.spec",
+        "clojure.instant",
+        "clojure.main",
+        "clojure.inspector",
+        "clojure.repl",
+        "clojure.server",
+    ];
+
+    for prefix in contrib_prefixes {
+        if module_name.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    // Popular third-party Clojure libraries
+    let third_party_roots: &[&str] = &[
+        "ring",
+        "compojure",
+        "cheshire",
+        "clj_http",
+        "clj_time",
+        "environ",
+        "mount",
+        "component",
+        "integrant",
+        "duct",
+        "pedestal",
+        "luminus",
+        "reagent",
+        "re_frame",
+        "rum",
+        "om",
+        "fulcro",
+        "rum",
+        "datomic",
+        "next_jdbc",
+        "honey_sql",
+        "yesql",
+        "hugsql",
+        "toucan",
+        "korma",
+        "carmine",
+        "nippy",
+        "timbre",
+        "tools_logging",
+        "cider",
+        "nrepl",
+        "criterium",
+        "midje",
+        "expectations",
+        "test_check",
+        "spec_monstah",
+        "clojurewerkz",
+        "http_kit",
+        "aleph",
+        "manifold",
+        "bidi",
+        "reitit",
+        "malli",
+        "spec_coerce",
+        "core_async",
+        "core_cache",
+        "core_match",
+        "core_rrb_vector",
+        "core_typed",
+        "core_logic",
+        "core_memoize",
+        "core_unify",
+        "tools_analyzer",
+        "tools_nrepl",
+        "tools_trace",
+        "tools_namespace",
+    ];
+
+    if third_party_roots.contains(&root) {
+        return true;
+    }
+
+    // Common JVM library prefixes (Clojure interop)
+    let jvm_prefixes: &[&str] = &[
+        "org.apache",
+        "org.springframework",
+        "com.google",
+        "io.netty",
+    ];
+
+    for prefix in jvm_prefixes {
+        if module_name.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3678,7 +3902,7 @@ mod tests {
 
     #[test]
     fn test_language_registry_get_unsupported() {
-        let r = LanguageRegistry::get("clojure");
+        let r = LanguageRegistry::get("perl");
         assert!(r.is_none());
     }
 
@@ -6612,5 +6836,145 @@ mod tests {
             "Expected HaskellResolver in LanguageRegistry"
         );
         assert_eq!(resolver.unwrap().language(), "haskell");
+    }
+
+    // ------------------------------------------------------------------
+    // Clojure resolver tests (Stage 21)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_clojure_resolver_is_external_stdlib() {
+        let resolver = ClojureResolver;
+        assert!(resolver.is_external("clojure.string"));
+        assert!(resolver.is_external("clojure.core"));
+        assert!(resolver.is_external("clojure.set"));
+        assert!(resolver.is_external("clojure.data.json"));
+    }
+
+    #[test]
+    fn test_clojure_resolver_is_external_jvm() {
+        let resolver = ClojureResolver;
+        assert!(resolver.is_external("java.util.Date"));
+        assert!(resolver.is_external("java.util.List"));
+        assert!(resolver.is_external("javax.servlet.http.HttpServlet"));
+    }
+
+    #[test]
+    fn test_clojure_resolver_not_external_project_ns() {
+        let resolver = ClojureResolver;
+        assert!(!resolver.is_external("myapp.core"));
+        assert!(!resolver.is_external("myapp.utils.helpers"));
+        assert!(!resolver.is_external("com.mycompany.project"));
+    }
+
+    #[test]
+    fn test_clojure_resolver_language() {
+        let resolver = ClojureResolver;
+        assert_eq!(resolver.language(), "clojure");
+    }
+
+    #[test]
+    fn test_clojure_resolver_file_to_module_name() {
+        let resolver = ClojureResolver;
+        assert_eq!(
+            resolver.file_to_module_name("src/myapp/core.clj", Path::new(".")),
+            Some("myapp.core".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("src/myapp/services/user.cljc", Path::new(".")),
+            Some("myapp.services.user".to_string())
+        );
+    }
+
+    #[test]
+    fn test_clojure_resolver_resolve_module_via_index() {
+        let resolver = ClojureResolver;
+        let mut index = ModuleIndex::empty();
+        index.insert("myapp.core", "src/myapp/core.clj".to_string());
+
+        let candidates = resolver.resolve_module(
+            "myapp.core",
+            "src/myapp/handler.clj",
+            Path::new("."),
+            &index,
+        );
+        assert!(candidates.contains(&"src/myapp/core.clj".to_string()));
+    }
+
+    #[test]
+    fn test_clojure_resolver_resolve_module_candidates() {
+        let resolver = ClojureResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "myapp.core",
+            "src/myapp/handler.clj",
+            Path::new("."),
+            &index,
+        );
+        // Should generate candidate paths for .clj, .cljc, .cljs
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().any(|c| c == "src/myapp/core.clj"));
+        assert!(candidates.iter().any(|c| c == "src/myapp/core.cljc"));
+        assert!(candidates.iter().any(|c| c == "src/myapp/core.cljs"));
+    }
+
+    #[test]
+    fn test_clojure_resolver_resolve_module_empty() {
+        let resolver = ClojureResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module("", "src/test.clj", Path::new("."), &index);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_clojure_module_to_path() {
+        assert_eq!(clojure_module_to_path("myapp"), "myapp");
+        assert_eq!(clojure_module_to_path("myapp.core"), "myapp/core");
+        assert_eq!(clojure_module_to_path("myapp.services.user"), "myapp/services/user");
+    }
+
+    #[test]
+    fn test_language_registry_get_clojure() {
+        let resolver = LanguageRegistry::get("clojure");
+        assert!(
+            resolver.is_some(),
+            "Expected ClojureResolver in LanguageRegistry"
+        );
+        assert_eq!(resolver.unwrap().language(), "clojure");
+    }
+
+    #[test]
+    fn test_is_clojure_external_third_party() {
+        assert!(is_clojure_external("ring.middleware"));
+        assert!(is_clojure_external("compojure.core"));
+        assert!(is_clojure_external("cheshire.core"));
+        assert!(is_clojure_external("reagent.core"));
+        assert!(is_clojure_external("org.apache.commons"));
+        assert!(is_clojure_external("com.google.guava"));
+    }
+
+    #[test]
+    fn test_is_clojure_external_not_project() {
+        assert!(!is_clojure_external("my_corp.internal.secrets"));
+        assert!(!is_clojure_external(""));
+        assert!(!is_clojure_external("acme_inc.backend"));
+    }
+
+    #[test]
+    fn test_clojure_resolver_rev_lookup_fallback() {
+        let resolver = ClojureResolver;
+        let mut index = ModuleIndex::empty();
+        // ModuleIndex has rev mapping: file_path → module name
+        index.insert("myapp.internal", "src/myapp/internal/x.clj".to_string());
+
+        // If module_name is actually a file_path, try rev_lookup
+        let candidates = resolver.resolve_module(
+            "src/myapp/internal/x.clj",
+            "src/test.clj",
+            Path::new("."),
+            &index,
+        );
+        // Should find via rev_lookup: file_path → "myapp.internal" → files
+        assert!(candidates.contains(&"src/myapp/internal/x.clj".to_string()));
     }
 }

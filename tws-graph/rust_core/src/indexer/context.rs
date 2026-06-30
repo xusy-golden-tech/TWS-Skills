@@ -261,6 +261,19 @@ impl ExtractionContext {
         self.name_stack.len()
     }
 
+    /// Return the name of the innermost namespace scope, if any.
+    ///
+    /// Walks the scope stack from top to bottom looking for an entry
+    /// with `kind == "namespace"`.  This is used by extractors that need
+    /// to qualify symbols with their enclosing namespace / module name.
+    pub fn current_namespace(&self) -> Option<&str> {
+        self.scope_stack
+            .iter()
+            .rev()
+            .find(|s| s.kind == "namespace")
+            .map(|s| s.name.as_str())
+    }
+
     /// Execute a closure within a temporary named scope.
     ///
     /// The scope is pushed before `f` runs and popped after it returns

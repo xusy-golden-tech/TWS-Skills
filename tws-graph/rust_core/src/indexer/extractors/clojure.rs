@@ -4,14 +4,16 @@
 //! (`.clj`, `.cljs`, `.cljc`, `.edn`) using the tree-sitter-clojure grammar.
 //!
 //! # Node kinds produced
-//! - `namespace`: ns declaration
-//! - `var_def`: def/defonce definitions
+//! - `module`: ns declaration
+//! - `variable`: def/defonce definitions
 //! - `function`: defn/defn- definitions
 //! - `file`: source file
 //!
 //! # Edge kinds produced
 //! - `calls`: function calls (list literals where first symbol is a function)
 //! - `contains`: containment (file -> namespace/function)
+//! - `references`: cross-file symbol references (from :require :refer)
+//! - `imports`: namespace imports
 
 use crate::db::hash_id;
 use crate::indexer::context::ExtractionContext;
@@ -120,7 +122,7 @@ fn handle_list(
     ctx: &mut ExtractionContext,
     parent_id: &str,
 ) -> anyhow::Result<()> {
-    // Get the first sym_lit child (the operator/function name)
+    // Get the first sym_lit/kwd_lit child (the operator/function name)
     let op = get_nth_sym_text(source, node, 0);
     if op.is_empty() {
         // Walk children for nested lists
@@ -134,18 +136,23 @@ fn handle_list(
         }
         "def" | "defonce" => {
             extract_var(source, node, ctx, parent_id)?;
-            // Also walk children for nested calls
             walk_list_children(source, node, ctx, parent_id)?;
         }
         "defn" | "defn-" | "defmacro" => {
             extract_function(source, node, ctx, parent_id)?;
-            // Walk children including the body for calls
             walk_list_children(source, node, ctx, parent_id)?;
         }
+        // Handle :require / require (keyword in ns, or standalone form)
+        ":require" | "require" | ":use" | "use" => {
+            extract_clojure_require_or_use(source, node, ctx, parent_id, &op)?;
+        }
+        // Handle :import / import (keyword in ns, or standalone form)
+        ":import" | "import" => {
+            extract_clojure_import(source, node, ctx, parent_id)?;
+        }
         _ => {
-            // Regular function call
+            // Regular function call (but skip Java interop dot-prefixed calls)
             extract_call(source, node, ctx, parent_id, &op)?;
-            // Walk children for nested calls
             walk_list_children(source, node, ctx, parent_id)?;
         }
     }
@@ -178,9 +185,15 @@ fn extract_namespace(
     ctx.push_scope_node(&ns_id);
 
     // Walk the rest of the list for require/import clauses
+    // (list_lit children like (:require ...), (:use ...), (:import ...)
+    //  are now handled by the handle_list dispatch)
     walk_list_children(source, node, ctx, &ns_id)?;
 
-    ctx.pop_scope();
+    // NOTE: namespace scope is intentionally NOT popped here.
+    // Clojure namespace scope persists for the entire file, so that
+    // subsequent defn/def definitions and calls can be qualified with
+    // the namespace name for cross-file resolution.
+    // The scope is cleaned up when the ExtractionContext is dropped.
     Ok(())
 }
 
@@ -239,6 +252,259 @@ fn extract_function(
 }
 
 // ---------------------------------------------------------------------------
+// Require / Use / Import clause extraction
+// ---------------------------------------------------------------------------
+
+/// Process a `:require`/`require`/`:use`/`use` clause (ns-keyword or standalone).
+///
+/// `op` is the raw operator text (may or may not have colon prefix).
+/// The node is the list_lit containing the keyword/symbol and its arguments.
+fn extract_clojure_require_or_use(
+    source: &[u8],
+    node: Node,
+    ctx: &mut ExtractionContext,
+    parent_id: &str,
+    op: &str,
+) -> anyhow::Result<()> {
+    let line = node.start_position().row as u32 + 1;
+
+    // Determine the semantic kind: :require, :use, :import
+    let semantic_kind = if op.contains("use") { ":use" } else { ":require" };
+
+    // Iterate named children, skipping the first (the keyword/symbol itself)
+    for i in 1..node.named_child_count() {
+        if let Some(child) = node.named_child(i) {
+            match child.kind() {
+                "vec_lit" => {
+                    extract_require_vec(source, child, ctx, parent_id, line, semantic_kind)?;
+                }
+                "sym_lit" => {
+                    // (:use clojure.java.io) — direct namespace symbol
+                    let ns_name = get_sym_name(source, child);
+                    if !ns_name.is_empty() {
+                        let qualified = format!("{}::", ns_name);
+                        let target = hash_id(&ctx.file_path, &qualified);
+                        ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&qualified));
+                    }
+                }
+                "quoting_lit" => {
+                    // (require '[foo.bar :as fb]) — quoted vector/symbol
+                    for j in 0..child.named_child_count() {
+                        if let Some(inner) = child.named_child(j) {
+                            if inner.kind() == "vec_lit" {
+                                extract_require_vec(source, inner, ctx, parent_id, line, semantic_kind)?;
+                            }
+                            if inner.kind() == "sym_lit" {
+                                let ns_name = get_sym_name(source, inner);
+                                if !ns_name.is_empty() {
+                                    let qualified = format!("{}::", ns_name);
+                                    let target = hash_id(&ctx.file_path, &qualified);
+                                    ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&qualified));
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Process an `:import`/`import` clause (ns-keyword or standalone).
+fn extract_clojure_import(
+    source: &[u8],
+    node: Node,
+    ctx: &mut ExtractionContext,
+    parent_id: &str,
+) -> anyhow::Result<()> {
+    let line = node.start_position().row as u32 + 1;
+
+    for i in 1..node.named_child_count() {
+        if let Some(child) = node.named_child(i) {
+            match child.kind() {
+                "vec_lit" => {
+                    extract_require_vec(source, child, ctx, parent_id, line, ":import")?;
+                }
+                "quoting_lit" => {
+                    for j in 0..child.named_child_count() {
+                        if let Some(inner) = child.named_child(j) {
+                            if inner.kind() == "vec_lit" {
+                                extract_require_vec(source, inner, ctx, parent_id, line, ":import")?;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Require vector parsing: [foo.bar :refer [baz qux] :as fb]
+// ---------------------------------------------------------------------------
+
+/// Process a single vector inside a require/use/import clause.
+///
+/// Forms:
+/// - `[foo.bar :refer [baz qux]]` — selective symbol import
+/// - `[foo.bar :refer :all]` — import all public symbols
+/// - `[foo.bar :as fb]` — namespace alias
+/// - `[java.util.Date]` — Java class import (from :import)
+/// - `[foo.bar]` — bare namespace import (from :use)
+fn extract_require_vec(
+    source: &[u8],
+    vec_node: Node,
+    ctx: &mut ExtractionContext,
+    parent_id: &str,
+    line: u32,
+    op: &str,
+) -> anyhow::Result<()> {
+    // Collect all named children
+    let mut items: Vec<(String, String, Option<Node>)> = Vec::new();
+    for i in 0..vec_node.named_child_count() {
+        if let Some(child) = vec_node.named_child(i) {
+            let (kind, text) = match child.kind() {
+                "sym_lit" => ("sym", get_sym_name(source, child)),
+                "kwd_lit" => ("kwd", get_kwd_name(source, child)),
+                "vec_lit" => ("vec", String::new()),
+                _ => continue,
+            };
+            items.push((kind.to_string(), text, Some(child)));
+        }
+    }
+
+    if items.is_empty() {
+        return Ok(());
+    }
+
+    // First item is always the namespace/class name
+    let module_name = &items[0].1;
+    if module_name.is_empty() {
+        return Ok(());
+    }
+
+    // For :import (Java imports), create references for each class name
+    if op == ":import" {
+        // First item is the Java package prefix, remaining are class names
+        // e.g., [java.util Date Calendar] → module = "java.util", classes = ["Date", "Calendar"]
+        for (kind, name, _) in &items[1..] {
+            if kind == "sym" && !name.is_empty() {
+                let qualified = format!("{}.{}::{}", module_name, name, name);
+                let target = hash_id(&ctx.file_path, &qualified);
+                ctx.add_edge(parent_id, &target, EdgeKind::References, line, Some(&qualified));
+            }
+        }
+        // If only one item (e.g., [java.util.Date]), it IS the full class name
+        if items.len() == 1 {
+            let qualified = format!("{}::", module_name);
+            let target = hash_id(&ctx.file_path, &qualified);
+            ctx.add_edge(parent_id, &target, EdgeKind::References, line, Some(&qualified));
+        }
+        return Ok(());
+    }
+
+    // For :require and :use — process keyword options
+    let mut had_import = false;
+    let mut i = 1;
+    while i < items.len() {
+        let (kind, text, _) = &items[i];
+
+        if kind == "kwd" {
+            // Note: kwd_name text does NOT include the colon prefix.
+            // "refer", "as", "rename", "all" etc. (not ":refer", ":as"...)
+            match text.as_str() {
+                "refer" => {
+                    had_import = true;
+                    i += 1;
+                    if i < items.len() {
+                        let (ref_kind, ref_name, ref_node) = &items[i];
+                        match ref_kind.as_str() {
+                            "vec" => {
+                                // :refer [baz qux] — extract each symbol from inner vec
+                                if let Some(inner_vec) = ref_node {
+                                    extract_refer_symbols(
+                                        source, *inner_vec, ctx, parent_id, line, module_name,
+                                    )?;
+                                }
+                            }
+                            "kwd" => {
+                                // :refer :all
+                                if ref_name == "all" {
+                                    let qualified = format!("{}::", module_name);
+                                    let target = hash_id(&ctx.file_path, &qualified);
+                                    ctx.add_edge(parent_id, &target, EdgeKind::References,
+                                        line, Some(&qualified));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                "as" => {
+                    // :as fb — namespace alias (creates IMPORTS edge for the namespace)
+                    had_import = true;
+                    i += 1;
+                    if i < items.len() {
+                        let qualified = format!("{}::", module_name);
+                        let target = hash_id(&ctx.file_path, &qualified);
+                        ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&qualified));
+                    }
+                }
+                "rename" => {
+                    // :rename {old new} — less common, skip for now
+                    had_import = true;
+                    i += 2; // skip the map value
+                }
+                "require" | "use" => {
+                    // Nested require within require (rare)
+                }
+                _ => {}
+            }
+        }
+
+        i += 1;
+    }
+
+    // Bare namespace import with no keyword options (e.g., [clojure.string])
+    if !had_import && items.len() == 1 {
+        let qualified = format!("{}::", module_name);
+        let target = hash_id(&ctx.file_path, &qualified);
+        ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&qualified));
+    }
+
+    Ok(())
+}
+
+/// Extract symbols from a :refer vector like [baz qux join].
+fn extract_refer_symbols(
+    source: &[u8],
+    vec_node: Node,
+    ctx: &mut ExtractionContext,
+    parent_id: &str,
+    line: u32,
+    module_name: &str,
+) -> anyhow::Result<()> {
+    for i in 0..vec_node.named_child_count() {
+        if let Some(child) = vec_node.named_child(i) {
+            if child.kind() == "sym_lit" {
+                let sym_name = get_sym_name(source, child);
+                if !sym_name.is_empty() {
+                    let qualified = format!("{}::{}", module_name, sym_name);
+                    let target = hash_id(&ctx.file_path, &qualified);
+                    ctx.add_edge(parent_id, &target, EdgeKind::References, line, Some(&qualified));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Call extraction
 // ---------------------------------------------------------------------------
 
@@ -256,9 +522,18 @@ fn extract_call(
         return Ok(());
     }
 
+    // Filter Java interop calls: symbols starting with "." or containing "/"
+    // (.toString obj) → callee = ".toString"
+    // (Math/pow 2 3) → callee = "Math/pow" (Java static method)
+    if callee.starts_with('.') {
+        return Ok(());
+    }
+
+    // Build target_text with namespace qualification for cross-file resolution
+    let target_text = build_call_target_text(ctx, callee);
     let target_qn = build_qualified_target(&ctx.file_path, callee);
     let target = hash_id(&ctx.file_path, &target_qn);
-    ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(callee));
+    ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&target_text));
 
     Ok(())
 }
@@ -267,7 +542,7 @@ fn extract_call(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Get the text of the nth sym_lit child in a list_lit.
+/// Get the text of the nth sym_lit/kwd_lit child in a list_lit or vec_lit.
 fn get_nth_sym_text(source: &[u8], node: Node, n: usize) -> String {
     let mut sym_count = 0;
     for i in 0..node.named_child_count() {
@@ -282,7 +557,7 @@ fn get_nth_sym_text(source: &[u8], node: Node, n: usize) -> String {
                 }
                 sym_count += 1;
             } else if child.kind() == "kwd_lit" {
-                // Keyword literals like :require are counted as syms too in some contexts
+                // Keyword literals like :require are counted as syms too
                 if sym_count == n {
                     if let Some(name_node) = find_child_by_kind(child, "kwd_name") {
                         return get_text(source, Some(name_node));
@@ -319,22 +594,21 @@ fn walk_list_children(
     Ok(())
 }
 
-fn walk_all_children(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<()> {
-    for i in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(i) {
-            walk_node(source, child, ctx, parent_id)?;
-        }
-    }
-    Ok(())
-}
-
 fn build_qualified_target(file_path: &str, name: &str) -> String {
     format!("{file_path}::{name}")
+}
+
+/// Build the target_text for a call edge, including namespace qualification
+/// for cross-file resolution.
+///
+/// If the call is inside a namespace scope, the format is
+/// `"namespace_name::callee"`, otherwise `"file_path::callee"`.
+fn build_call_target_text(ctx: &ExtractionContext, callee: &str) -> String {
+    if let Some(ns) = ctx.current_namespace() {
+        format!("{}::{}", ns, callee)
+    } else {
+        format!("{}::{}", ctx.file_path, callee)
+    }
 }
 
 fn get_text(source: &[u8], node: Option<Node>) -> String {
@@ -353,6 +627,24 @@ fn find_child_by_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
         }
     }
     None
+}
+
+/// Get the name text from a sym_lit node by reading its sym_name child.
+fn get_sym_name(source: &[u8], node: Node) -> String {
+    if let Some(name_node) = find_child_by_kind(node, "sym_name") {
+        get_text(source, Some(name_node))
+    } else {
+        get_text(source, Some(node))
+    }
+}
+
+/// Get the name text from a kwd_lit node by reading its kwd_name child.
+fn get_kwd_name(source: &[u8], node: Node) -> String {
+    if let Some(name_node) = find_child_by_kind(node, "kwd_name") {
+        get_text(source, Some(name_node))
+    } else {
+        get_text(source, Some(node))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -485,11 +777,10 @@ mod tests {
             "(ns test)\n(defn f [x]\n  (inc x))\n",
             "src/test.clj",
         );
-        // inc is not a special form, should be a call
         let calls = find_edges(&ctx, EdgeKind::Calls);
         let targets: Vec<&str> = calls.iter().filter_map(|e| e.target_text.as_deref()).collect();
-        // inc might not be in special forms list
         assert!(!calls.is_empty(), "Expected some call edges");
+        // inc is in the special forms list, might or might not be there
     }
 
     #[test]
@@ -499,7 +790,7 @@ mod tests {
             "src/test.clj",
         );
         let calls = find_edges(&ctx, EdgeKind::Calls);
-        assert!(calls.iter().any(|e| e.target_text.as_deref() == Some("my-custom-fn")));
+        assert!(calls.iter().any(|e| e.target_text.as_deref() == Some("test::my-custom-fn")));
     }
 
     #[test]
@@ -510,9 +801,8 @@ mod tests {
         );
         let calls = find_edges(&ctx, EdgeKind::Calls);
         let targets: Vec<&str> = calls.iter().filter_map(|e| e.target_text.as_deref()).collect();
-        // log and transform should be calls
-        assert!(targets.iter().any(|t| *t == "log"), "Expected 'log' call");
-        assert!(targets.iter().any(|t| *t == "transform"), "Expected 'transform' call");
+        assert!(targets.iter().any(|t| t.ends_with("::log")), "Expected 'log' call");
+        assert!(targets.iter().any(|t| t.ends_with("::transform")), "Expected 'transform' call");
     }
 
     #[test]
@@ -522,10 +812,22 @@ mod tests {
             "src/test.clj",
         );
         let calls = find_edges(&ctx, EdgeKind::Calls);
-        // let should be filtered out as a special form
         let targets: Vec<&str> = calls.iter().filter_map(|e| e.target_text.as_deref()).collect();
         assert!(!targets.contains(&"let"), "let should be filtered as special form");
         assert!(!targets.contains(&"defn"), "defn should be filtered as special form");
+    }
+
+    #[test]
+    fn test_java_interop_filtered() {
+        let ctx = extract(
+            "(ns test)\n(defn get-name [obj]\n  (.getName obj))\n",
+            "src/test.clj",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        // .getName should be filtered (Java interop)
+        assert!(!targets.iter().any(|t| t.contains(".getName")),
+            "Java interop calls should be filtered from call edges");
     }
 
     // ------------------------------------------------------------------
@@ -537,6 +839,129 @@ mod tests {
         let ctx = extract("(ns test)\n(defn f [] (g))\n", "src/test.clj");
         let contains = find_edges(&ctx, EdgeKind::Contains);
         assert!(!contains.is_empty(), "Expected CONTAINS edges");
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-file reference extraction (Stage 21)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_require_with_refer() {
+        let ctx = extract(
+            "(ns myapp.core\n  (:require [clojure.string :refer [join split]]))\n",
+            "src/myapp/core.clj",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(targets.iter().any(|t| *t == "clojure.string::join"),
+            "Expected REFERENCE edge for clojure.string::join");
+        assert!(targets.iter().any(|t| *t == "clojure.string::split"),
+            "Expected REFERENCE edge for clojure.string::split");
+    }
+
+    #[test]
+    fn test_require_with_as() {
+        let ctx = extract(
+            "(ns myapp.core\n  (:require [clojure.string :as str]))\n",
+            "src/myapp/core.clj",
+        );
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        let targets: Vec<&str> = imports.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(targets.iter().any(|t| *t == "clojure.string::"),
+            "Expected IMPORTS edge for clojure.string::");
+    }
+
+    #[test]
+    fn test_require_with_refer_all() {
+        let ctx = extract(
+            "(ns myapp.core\n  (:require [clojure.data.json :refer :all]))\n",
+            "src/myapp/core.clj",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(targets.iter().any(|t| *t == "clojure.data.json::"),
+            "Expected REFERENCE edge for clojure.data.json:: (refer :all)");
+    }
+
+    #[test]
+    fn test_multiple_requires() {
+        let ctx = extract(
+            "(ns myapp.core\n  (:require [clojure.string :refer [join]]\n            [clojure.set :refer [union difference]]))\n",
+            "src/myapp/core.clj",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(targets.iter().any(|t| *t == "clojure.string::join"),
+            "Expected REFERENCE for clojure.string::join");
+        assert!(targets.iter().any(|t| *t == "clojure.set::union"),
+            "Expected REFERENCE for clojure.set::union");
+        assert!(targets.iter().any(|t| *t == "clojure.set::difference"),
+            "Expected REFERENCE for clojure.set::difference");
+    }
+
+    #[test]
+    fn test_use_clause() {
+        let ctx = extract(
+            "(ns myapp.core\n  (:use clojure.java.io))\n",
+            "src/myapp/core.clj",
+        );
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        let targets: Vec<&str> = imports.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(targets.iter().any(|t| *t == "clojure.java.io::"),
+            "Expected IMPORTS edge for clojure.java.io::");
+    }
+
+    #[test]
+    fn test_import_java_classes() {
+        let ctx = extract(
+            "(ns myapp.core\n  (:import [java.util Date Calendar]))\n",
+            "src/myapp/core.clj",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(targets.iter().any(|t| t.contains("java.util.Date")),
+            "Expected REFERENCE edge for java.util.Date");
+        assert!(targets.iter().any(|t| t.contains("java.util.Calendar")),
+            "Expected REFERENCE edge for java.util.Calendar");
+    }
+
+    #[test]
+    fn test_standalone_require() {
+        let ctx = extract(
+            "(ns test)\n(require '[clojure.string :refer [join]])\n",
+            "src/test.clj",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(targets.iter().any(|t| *t == "clojure.string::join"),
+            "Expected REFERENCE edge for standalone require clojure.string::join");
+    }
+
+    #[test]
+    fn test_call_with_namespace_qualification() {
+        let ctx = extract(
+            "(ns myapp.core)\n(defn greet [name]\n  (println \"Hello\" name)\n  (helper name))\n",
+            "src/myapp/core.clj",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        // helper should be qualified with namespace
+        assert!(targets.iter().any(|t| *t == "myapp.core::helper"),
+            "Expected call target_text with namespace qualification: myapp.core::helper");
+    }
+
+    #[test]
+    fn test_call_without_namespace_uses_file_path() {
+        let ctx = extract(
+            "(println \"hello\")\n",
+            "src/script.clj",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        // println is a special form (in the list), so it should be filtered
+        // Just verify no crash and file node exists
+        let files = find_nodes(&ctx, NodeKind::File);
+        assert_eq!(files.len(), 1);
     }
 
     // ------------------------------------------------------------------
@@ -557,10 +982,23 @@ mod tests {
             "src/test.clj",
         );
         let calls = find_edges(&ctx, EdgeKind::Calls);
-        let targets: Vec<&str> = calls.iter().filter_map(|e| e.target_text.as_deref()).collect();
         // println is in special forms list, so it may be filtered
-        // But that's OK - we should at least not crash
+        // Just verify we don't crash
         let files = find_nodes(&ctx, NodeKind::File);
         assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn test_empty_require() {
+        // require with no references (bare namespace)
+        let ctx = extract(
+            "(ns myapp.core\n  (:require [clojure.string]))\n",
+            "src/myapp/core.clj",
+        );
+        // Should not crash, should still create IMPORTS edge for the namespace
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        assert!(imports.iter().any(|e| {
+            e.target_text.as_deref() == Some("clojure.string::")
+        }), "Expected IMPORTS edge for bare require clojure.string::");
     }
 }

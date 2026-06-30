@@ -102,6 +102,7 @@ impl ModuleIndex {
 /// | Go           | `pkg/foo/bar.go` → `foo` (parent directory = package name)  |
 /// | Rust         | `src/foo/bar.rs` → `foo::bar`, `src/foo/mod.rs` → `foo`    |
 /// | Zig          | `src/foo.zig` → `foo`, `src/foo/bar.zig` → `foo.bar`          |
+/// | Clojure      | `src/myapp/core.clj` → `myapp.core`, also .cljc/.cljs        |
 pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
     match language {
         "python" => infer_python_module(file_path),
@@ -124,6 +125,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "nix" => infer_nix_module(file_path),
         "elixir" => infer_elixir_module(file_path),
         "haskell" => infer_haskell_module(file_path),
+        "clojure" => infer_clojure_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -1243,6 +1245,65 @@ fn infer_haskell_module(file_path: &str) -> Option<String> {
 /// Strip common Haskell source root prefixes.
 fn strip_haskell_source_root(path: &str) -> String {
     let prefixes = &["src/", "lib/", "app/"];
+    for prefix in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+    path.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Clojure module name inference (Stage 21)
+// ---------------------------------------------------------------------------
+
+/// Clojure module name inference.
+///
+/// Rules:
+/// 1. Only handle `.clj`, `.cljs`, `.cljc` files.
+/// 2. Strip the extension.
+/// 3. Strip common source root prefixes (`src/`, `lib/`, `test/`).
+/// 4. Replace path separators with dots (Clojure namespace convention).
+///
+/// Clojure convention: namespace `myapp.core` maps to file `myapp/core.clj`
+/// or `myapp/core.cljc` (reader conditionals) or `myapp/core.cljs`.
+///
+/// Examples:
+/// - `src/myapp/core.clj` → `myapp.core`
+/// - `lib/utils/helpers.clj` → `utils.helpers`
+/// - `test/myapp/core_test.clj` → `myapp.core_test`
+/// - `script.clj` → `script`
+/// - `src/myapp/api/v2.cljc` → `myapp.api.v2`
+fn infer_clojure_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Handle Clojure source files
+    let without_ext = if path.ends_with(".clj") && !path.ends_with(".cljc") && !path.ends_with(".cljs") {
+        &path[..path.len() - 4]
+    } else if path.ends_with(".cljc") {
+        &path[..path.len() - 5]
+    } else if path.ends_with(".cljs") {
+        &path[..path.len() - 5]
+    } else {
+        return None;
+    };
+
+    // Strip common source root prefixes
+    let stripped = strip_clojure_source_root(without_ext);
+
+    // Replace / with . for namespace convention
+    let module = stripped.replace('/', ".");
+
+    if module.is_empty() {
+        None
+    } else {
+        Some(module)
+    }
+}
+
+/// Strip common Clojure source root prefixes.
+fn strip_clojure_source_root(path: &str) -> String {
+    let prefixes = &["src/", "lib/", "test/", "tests/"];
     for prefix in prefixes {
         if path.starts_with(prefix) {
             return path[prefix.len()..].to_string();
@@ -2647,5 +2708,81 @@ mod tests {
         );
         // Non-.hs files still return None even for "haskell" language
         assert_eq!(infer_module_name("src/foo/bar.rb", "haskell"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // Clojure module name inference (Stage 21)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_clojure_module_src() {
+        assert_eq!(
+            infer_module_name("src/myapp/core.clj", "clojure"),
+            Some("myapp.core".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/myapp/utils/helpers.clj", "clojure"),
+            Some("myapp.utils.helpers".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_clojure_module_cljc() {
+        assert_eq!(
+            infer_module_name("src/myapp/api/v2.cljc", "clojure"),
+            Some("myapp.api.v2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_clojure_module_cljs() {
+        assert_eq!(
+            infer_module_name("src/myapp/frontend/ui.cljs", "clojure"),
+            Some("myapp.frontend.ui".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_clojure_module_lib() {
+        assert_eq!(
+            infer_module_name("lib/utils/string.clj", "clojure"),
+            Some("utils.string".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_clojure_module_test_dir() {
+        assert_eq!(
+            infer_module_name("test/myapp/core_test.clj", "clojure"),
+            Some("myapp.core_test".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_clojure_module_no_prefix() {
+        assert_eq!(
+            infer_module_name("script.clj", "clojure"),
+            Some("script".to_string())
+        );
+        assert_eq!(
+            infer_module_name("myapp/core.clj", "clojure"),
+            Some("myapp.core".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_clojure_module_non_clojure() {
+        assert_eq!(infer_module_name("src/foo.py", "clojure"), None);
+        assert_eq!(infer_module_name("src/foo.java", "clojure"), None);
+        assert_eq!(infer_module_name("src/foo.rs", "clojure"), None);
+        assert_eq!(infer_module_name("src/foo.edn", "clojure"), None);
+    }
+
+    #[test]
+    fn test_strip_clojure_source_root() {
+        assert_eq!(strip_clojure_source_root("src/myapp/core"), "myapp/core");
+        assert_eq!(strip_clojure_source_root("lib/helpers"), "helpers");
+        assert_eq!(strip_clojure_source_root("test/myapp/test"), "myapp/test");
+        assert_eq!(strip_clojure_source_root("no_prefix"), "no_prefix");
     }
 }
