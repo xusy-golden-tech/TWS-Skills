@@ -1,6 +1,6 @@
 ﻿---
 name: flow-fix-bug
-description: 修复 Bug。复杂度门禁 → 简化或完整路径。完整：复现→根因→方案→回归测试→修复→运行测试→审查→防复燃→影响评估→集成→同步
+description: 修复 Bug。复杂度门禁 → 简化或完整路径。完整：复现→根因→方案→回归测试→修复→审查→运行测试→防复燃→影响评估→集成→同步
 ---
 
 <SUBAGENT-STOP>
@@ -36,7 +36,7 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 ### 完整路径
 
 ```
-复现 → 根因 → 方案 → 方案架构校验 → 编写回归测试 → 修复 → 运行测试 → 防复燃 → 影响评估 → 集成 → 同步
+复现 → 根因 → 方案 → 方案架构校验 → 编写回归测试 → 修复 → 代码审查 → 运行测试 → 防复燃 → 影响评估 → 集成 → 同步
 ```
 
 ---
@@ -114,7 +114,20 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 3. 验证 Bug 不再复现
 ```
 
-### ⑥ 运行测试
+### ⑥ 代码审查
+
+主 agent 按 comp-code-review 编排层执行：Impact Assessment → 三阶段并行审查（Plan → Main Loop → Filter）→ 汇总 → Triage。
+
+```
+派独立子 agent 执行三阶段审查：
+1. 主 agent 先 spawn Impact Assessment 子 agent（加载 comp-impact-assessment）
+2. 对 HIGH/MEDIUM 风险文件并行 spawn Plan → Main Loop → Filter 三阶段子 agent
+3. 主 agent 汇总、去重、Triage 分类（A/B/C）
+4. A 类问题必须修，B 类主 agent 决定，C 类跳过
+5. 审查通过后再进测试——避免在已知有问题的代码上浪费测试时间
+```
+
+### ⑦ 运行测试
 
 ```
 链式验证 → 检查修复已完成
@@ -125,18 +138,6 @@ This is a top-level flow skill. Do not trigger it if you were dispatched as a su
 
 如测试失败：按 comp-test 中的「先分类再行动」判定方向。
 ④中编写的回归测试失败时，默认判断为修复不完整——不得直接改测试。
-```
-
-### ⑦ 代码审查
-
-主 agent 按 comp-code-review 编排层执行：Impact Assessment → 三阶段并行审查（Plan → Main Loop → Filter）→ 汇总 → Triage。
-
-```
-派独立子 agent 执行三阶段审查：
-1. 主 agent 先 spawn Impact Assessment 子 agent（加载 comp-impact-assessment）
-2. 对 HIGH/MEDIUM 风险文件并行 spawn Plan → Main Loop → Filter 三阶段子 agent
-3. 主 agent 汇总、去重、Triage 分类（A/B/C）
-4. A 类问题必须修，B 类主 agent 决定，C 类跳过
 ```
 
 ### ⑧ 防复燃
