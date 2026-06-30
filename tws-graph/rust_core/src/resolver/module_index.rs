@@ -91,6 +91,8 @@ impl ModuleIndex {
 /// |              | `src/foo/bar/__init__.py` → `foo.bar`                        |
 /// | TypeScript   | `src/foo/bar.ts` → `src/foo/bar` (relative path, stripped ext)|
 /// | Java         | `src/com/foo/Bar.java` → `com.foo.Bar`                       |
+/// | Kotlin       | `src/com/foo/Bar.kt` → `com.foo.Bar`                          |
+/// | Scala        | `src/com/foo/Bar.scala` → `com.foo.Bar`                       |
 /// | Go           | `pkg/foo/bar.go` → `foo` (parent directory = package name)  |
 /// | Rust         | `src/foo/bar.rs` → `foo::bar`, `src/foo/mod.rs` → `foo`    |
 pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
@@ -99,6 +101,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "typescript" | "javascript" | "tsx" | "jsx" => infer_typescript_module(file_path),
         "java" => infer_java_module(file_path),
         "kotlin" => infer_kotlin_module(file_path),
+        "scala" => infer_scala_module(file_path),
         "go" => infer_go_module(file_path),
         "rust" => infer_rust_module(file_path),
         "php" => infer_php_module(file_path),
@@ -293,6 +296,65 @@ fn strip_kotlin_source_root(path: &str) -> String {
     let prefixes = &[
         ("src/main/kotlin/", "src/main/kotlin/"),
         ("src/test/kotlin/", "src/test/kotlin/"),
+        ("src/main/java/", "src/main/java/"),
+        ("src/test/java/", "src/test/java/"),
+        ("src/main/", "src/main/"),
+        ("src/test/", "src/test/"),
+        ("src/", "src/"),
+        ("lib/", "lib/"),
+    ];
+
+    for (_name, prefix) in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+
+    path.to_string()
+}
+
+/// Scala module name inference.
+///
+/// Rules:
+/// 1. Strip `.scala` or `.sc` extension.
+/// 2. Strip common source root prefixes (Maven/Gradle/SBT conventions).
+/// 3. Replace path separators with dots.
+///
+/// Examples:
+/// - `src/main/scala/com/foo/bar/MyClass.scala` → `com.foo.bar.MyClass`
+/// - `src/test/scala/com/foo/bar/MySpec.scala` → `com.foo.bar.MySpec`
+/// - `src/com/example/Utils.scala` → `com.example.Utils`
+fn infer_scala_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Handle .scala and .sc files
+    let without_ext = if path.ends_with(".scala") {
+        &path[..path.len() - 6]
+    } else if path.ends_with(".sc") && !path.ends_with(".scala") {
+        &path[..path.len() - 3]
+    } else {
+        return None;
+    };
+
+    // Strip common Scala/Java source root prefixes
+    let stripped = strip_scala_source_root(without_ext);
+
+    // Replace / with . to get dotted package notation
+    let module = stripped.replace('/', ".");
+
+    if module.is_empty() {
+        None
+    } else {
+        Some(module)
+    }
+}
+
+/// Strip Scala source root prefixes.  Scala can live in standard Maven/Gradle/SBT
+/// directory layouts for `scala` or `java` source sets.
+fn strip_scala_source_root(path: &str) -> String {
+    let prefixes = &[
+        ("src/main/scala/", "src/main/scala/"),
+        ("src/test/scala/", "src/test/scala/"),
         ("src/main/java/", "src/main/java/"),
         ("src/test/java/", "src/test/java/"),
         ("src/main/", "src/main/"),
@@ -872,6 +934,57 @@ mod tests {
             infer_module_name("src/main/java/com/foo/bar/Utils.kt", "kotlin"),
             Some("com.foo.bar.Utils".to_string())
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Scala module name inference (Stage 11)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_scala_module_maven_src() {
+        assert_eq!(
+            infer_module_name("src/main/scala/com/foo/bar/MyClass.scala", "scala"),
+            Some("com.foo.bar.MyClass".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_scala_module_test_src() {
+        assert_eq!(
+            infer_module_name("src/test/scala/com/foo/bar/MySpec.scala", "scala"),
+            Some("com.foo.bar.MySpec".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_scala_module_simple_src() {
+        assert_eq!(
+            infer_module_name("src/com/example/Utils.scala", "scala"),
+            Some("com.example.Utils".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_scala_module_no_prefix() {
+        assert_eq!(
+            infer_module_name("com/foo/bar/App.scala", "scala"),
+            Some("com.foo.bar.App".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_scala_module_sc_extension() {
+        assert_eq!(
+            infer_module_name("src/com/example/Script.sc", "scala"),
+            Some("com.example.Script".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_scala_module_non_scala() {
+        assert_eq!(infer_module_name("src/com/foo/bar.java", "scala"), None);
+        assert_eq!(infer_module_name("src/com/foo/bar.kt", "scala"), None);
+        assert_eq!(infer_module_name("src/com/foo/bar.py", "scala"), None);
     }
 
     #[test]

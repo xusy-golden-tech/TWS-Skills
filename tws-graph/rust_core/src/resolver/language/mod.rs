@@ -20,6 +20,7 @@ impl LanguageRegistry {
             "typescript" | "javascript" | "tsx" | "jsx" => Some(Box::new(TypeScriptResolver)),
             "java" => Some(Box::new(JavaResolver)),
             "kotlin" => Some(Box::new(KotlinResolver)),
+            "scala" => Some(Box::new(ScalaResolver)),
             "go" => Some(Box::new(GoResolver)),
             "rust" => Some(Box::new(RustResolver)),
             "php" => Some(Box::new(PhpResolver)),
@@ -32,7 +33,7 @@ impl LanguageRegistry {
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin", "go", "rust", "php", "ruby", "c", "cpp", "csharp"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp"]
     }
 }
 
@@ -631,6 +632,141 @@ pub fn is_kotlin_external(module_name: &str) -> bool {
     }
 
     // All Java stdlib / third-party prefixes also apply to Kotlin
+    is_java_external(module_name)
+}
+
+// ---------------------------------------------------------------------------
+// Scala module resolver
+// ---------------------------------------------------------------------------
+
+/// Scala module resolver.
+///
+/// Uses the same JVM package conventions as Java/Kotlin:
+/// - `import com.foo.bar.MyClass` → module = `com.foo.bar.MyClass` → file = `com/foo/bar/MyClass.scala`
+/// - `import com.foo.bar._` → module = `com.foo.bar` → files = `com/foo/bar/*.scala`
+/// - `import com.foo.bar.{Baz, Qux}` → each symbol resolved individually
+/// - ModuleIndex lookup: dotted package.name → file_path mapping
+/// - Source root prefixes: `src/main/scala/`, `src/main/java/`, `src/test/scala/`, etc.
+///
+/// Scala files can coexist with Java/Kotlin in the same source tree; known stdlib
+/// and third-party JVM packages are classified as external.
+pub struct ScalaResolver;
+
+impl ModuleResolver for ScalaResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        _source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        // 1. Direct ModuleIndex lookup
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Try removing the class/function name to get package name
+        if let Some(last_dot) = module_name.rfind('.') {
+            let package_name = &module_name[..last_dot];
+            let class_name = &module_name[last_dot + 1..];
+
+            // Look up the package in ModuleIndex
+            if let Some(files) = module_index.lookup(package_name) {
+                return files.clone();
+            }
+
+            // 3. Try standard source root prefixes (Maven/Gradle/SBT conventions)
+            let package_path = package_name.replace('.', "/");
+            let candidates = vec![
+                format!("src/main/scala/{}/{}.scala", package_path, class_name),
+                format!("src/test/scala/{}/{}.scala", package_path, class_name),
+                format!("src/main/java/{}/{}.scala", package_path, class_name),
+                format!("src/test/java/{}/{}.scala", package_path, class_name),
+                format!("src/{}/{}.scala", package_path, class_name),
+            ];
+
+            let mut result = Vec::new();
+            for candidate in &candidates {
+                if let Some(files) = module_index.lookup(candidate) {
+                    result.extend(files.clone());
+                }
+            }
+
+            // Also try as dotted name
+            for candidate in &candidates {
+                let dotted = candidate.replace('/', ".").trim_end_matches(".scala").to_string();
+                if let Some(files) = module_index.lookup(&dotted) {
+                    result.extend(files.clone());
+                }
+            }
+
+            if !result.is_empty() {
+                return result;
+            }
+
+            return candidates;
+        }
+
+        // 4. Handle package-only module_name (from wildcard imports)
+        let package_path = module_name.replace('.', "/");
+        let candidates = vec![
+            format!("src/main/scala/{}", package_path),
+            format!("src/test/scala/{}", package_path),
+            format!("src/main/java/{}", package_path),
+            format!("src/test/java/{}", package_path),
+            format!("src/{}", package_path),
+        ];
+
+        // Try ModuleIndex lookup with various prefixes
+        for prefix in &["src.main.scala.", "src.test.scala.", "src.main.java.", "src.test.java.", "src."] {
+            let with_prefix = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&with_prefix) {
+                return files.clone();
+            }
+        }
+
+        candidates
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "scala")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_scala_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "scala"
+    }
+}
+
+/// Check if a module name is a known Scala/JVM standard library or common
+/// third-party framework.  Scala shares the JVM ecosystem so this is
+/// based on `is_java_external`, plus Scala-specific stdlib and framework prefixes.
+pub fn is_scala_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    // Scala-specific stdlib and framework prefixes
+    let scala_prefixes: &[&str] = &[
+        "scala.", "akka.", "play.", "zio.", "cats.",
+        "shapeless.", "scalaz.", "scalatest.", "scalacheck.",
+        "slick.", "doobie.", "http4s.", "fs2.",
+        "com.typesafe.", "org.typelevel.",
+    ];
+    for prefix in scala_prefixes {
+        if module_name.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    // All Java stdlib / third-party prefixes also apply to Scala
     is_java_external(module_name)
 }
 
@@ -3177,5 +3313,173 @@ mod tests {
     fn test_supported_languages_includes_csharp() {
         let langs = LanguageRegistry::supported_languages();
         assert!(langs.contains(&"csharp"));
+    }
+
+    // ------------------------------------------------------------------
+    // Scala resolver tests (Stage 11)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_scala_resolver_is_external_stdlib() {
+        let resolver = ScalaResolver;
+        assert!(resolver.is_external("scala.collection.immutable.List"));
+        assert!(resolver.is_external("scala.concurrent.Future"));
+        assert!(resolver.is_external("scala.io.Source"));
+        assert!(resolver.is_external("scala.math.BigDecimal"));
+        // Java stdlib also available in Scala
+        assert!(resolver.is_external("java.util.ArrayList"));
+        assert!(resolver.is_external("javax.inject.Inject"));
+    }
+
+    #[test]
+    fn test_scala_resolver_is_external_third_party() {
+        let resolver = ScalaResolver;
+        // Akka ecosystem
+        assert!(resolver.is_external("akka.actor.ActorSystem"));
+        assert!(resolver.is_external("akka.http.scaladsl.server.Directives"));
+        // Play framework
+        assert!(resolver.is_external("play.api.mvc.Controller"));
+        // ZIO
+        assert!(resolver.is_external("zio.ZIO"));
+        // Cats
+        assert!(resolver.is_external("cats.effect.IO"));
+        // Typelevel
+        assert!(resolver.is_external("org.typelevel.cats.effect.IO"));
+        // Typesafe config
+        assert!(resolver.is_external("com.typesafe.config.ConfigFactory"));
+        // Slick (database)
+        assert!(resolver.is_external("slick.jdbc.PostgresProfile"));
+        // http4s
+        assert!(resolver.is_external("http4s.HttpRoutes"));
+        // Spring (Scala can use Java frameworks)
+        assert!(resolver.is_external("org.springframework.stereotype.Service"));
+    }
+
+    #[test]
+    fn test_scala_resolver_not_external_project_package() {
+        let resolver = ScalaResolver;
+        // Project-internal packages should NOT be external
+        assert!(!resolver.is_external("com.mycompany.app.MyClass"));
+        assert!(!resolver.is_external("com.example.service.UserService"));
+        assert!(!resolver.is_external("models.Customer"));
+        assert!(!resolver.is_external("services.AuthService"));
+    }
+
+    #[test]
+    fn test_scala_resolver_empty_module_name() {
+        let resolver = ScalaResolver;
+        assert!(!resolver.is_external(""));
+    }
+
+    #[test]
+    fn test_scala_resolver_language() {
+        let resolver = ScalaResolver;
+        assert_eq!(resolver.language(), "scala");
+    }
+
+    #[test]
+    fn test_scala_resolver_file_to_module_name() {
+        let resolver = ScalaResolver;
+        // Scala files under Maven/Gradle/SBT layout
+        assert_eq!(
+            resolver.file_to_module_name("src/main/scala/com/foo/bar/MyClass.scala", Path::new(".")),
+            Some("com.foo.bar.MyClass".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("src/test/scala/com/foo/bar/MySpec.scala", Path::new(".")),
+            Some("com.foo.bar.MySpec".to_string())
+        );
+        // Simple src/ layout
+        assert_eq!(
+            resolver.file_to_module_name("src/com/example/Utils.scala", Path::new(".")),
+            Some("com.example.Utils".to_string())
+        );
+        // Non-Scala files return None
+        assert_eq!(
+            resolver.file_to_module_name("src/com/example/Utils.java", Path::new(".")),
+            None
+        );
+        assert_eq!(
+            resolver.file_to_module_name("src/com/example/Utils.py", Path::new(".")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_scala_resolver_resolve_module_empty_index() {
+        let resolver = ScalaResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "com.foo.bar.MyClass",
+            "src/test.scala",
+            Path::new("."),
+            &index,
+        );
+        // Should return candidate paths even without index data
+        assert!(!candidates.is_empty(), "Expected candidate paths from empty ModuleIndex");
+        assert!(candidates.contains(
+            &"src/main/scala/com/foo/bar/MyClass.scala".to_string()
+        ));
+    }
+
+    #[test]
+    fn test_scala_resolver_resolve_module_with_index() {
+        use crate::db::hash_id;
+        use crate::db::Database;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let db_path = std::env::temp_dir().join("tws_scala_resolver_test.db");
+        let _ = std::fs::remove_file(&db_path);
+        let db = Database::initialize(&db_path).unwrap();
+
+        // Insert nodes for Scala files
+        let paths = vec![
+            ("src/main/scala/com/foo/bar/MyClass.scala", "com.foo.bar.MyClass"),
+            ("src/main/scala/com/foo/baz/Other.scala", "com.foo.baz.Other"),
+            ("src/main/scala/com/example/App.scala", "com.example.App"),
+        ];
+        for (file_path, module_name) in &paths {
+            let id = hash_id(file_path, &format!("{}::{}", file_path, module_name));
+            db.connection().execute(
+                "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, start_line, end_line, updated_at) VALUES (?1, 'class', ?2, ?3, ?4, 'scala', 1, 1, ?5)",
+                rusqlite::params![id, module_name, format!("{}::{}", file_path, module_name), file_path, ts],
+            ).unwrap();
+        }
+
+        let index = ModuleIndex::build(&db).unwrap();
+
+        let resolver = ScalaResolver;
+        // Direct lookup by module name
+        let candidates = resolver.resolve_module(
+            "com.foo.bar.MyClass",
+            "src/test.scala",
+            Path::new("."),
+            &index,
+        );
+        assert!(!candidates.is_empty(), "Expected resolved candidates for known module");
+        assert!(
+            candidates.contains(&"src/main/scala/com/foo/bar/MyClass.scala".to_string()),
+            "Expected direct match: {:?}", candidates
+        );
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_language_registry_get_scala() {
+        let r = LanguageRegistry::get("scala");
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().language(), "scala");
+    }
+
+    #[test]
+    fn test_supported_languages_includes_scala() {
+        let langs = LanguageRegistry::supported_languages();
+        assert!(langs.contains(&"scala"));
     }
 }
