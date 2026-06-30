@@ -122,6 +122,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "bash" => infer_bash_module(file_path),
         "zig" => infer_zig_module(file_path),
         "nix" => infer_nix_module(file_path),
+        "elixir" => infer_elixir_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -1105,6 +1106,94 @@ fn strip_nix_source_root(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Elixir module name inference
+// ---------------------------------------------------------------------------
+
+/// Infer an Elixir module name from a file path.
+///
+/// Elixir convention: `lib/my_app/services/user.ex` → `MyApp.Services.User`
+///
+/// Rules:
+/// 1. Only process `.ex` and `.exs` files.
+/// 2. Strip the extension.
+/// 3. Strip common source root prefixes (`lib/`, `src/`, `test/`).
+/// 4. Replace `/` with `.`.
+/// 5. Convert each underscore-separated segment to CamelCase.
+fn infer_elixir_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle Elixir source files
+    if !path.ends_with(".ex") && !path.ends_with(".exs") {
+        return None;
+    }
+
+    // Strip extension (either .ex or .exs)
+    let without_ext = if path.ends_with(".exs") {
+        &path[..path.len() - 4]
+    } else {
+        &path[..path.len() - 3]
+    };
+
+    // Strip common source root prefixes
+    let stripped = strip_elixir_source_root(without_ext);
+
+    if stripped.is_empty() {
+        return None;
+    }
+
+    // Convert path segments to CamelCase module segments
+    let module_name = path_to_elixir_module(&stripped);
+
+    if module_name.is_empty() {
+        None
+    } else {
+        Some(module_name)
+    }
+}
+
+/// Strip common Elixir source root prefixes from a path.
+fn strip_elixir_source_root(path: &str) -> String {
+    let prefixes = &["lib/", "src/", "test/", "tests/"];
+    for prefix in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+    path.to_string()
+}
+
+/// Convert a slash-separated file path (extension stripped, prefix stripped) to
+/// an Elixir dot-separated module name.
+///
+/// `"my_app/services/user"` → `"MyApp.Services.User"`
+fn path_to_elixir_module(path: &str) -> String {
+    path.split('/')
+        .filter(|s| !s.is_empty())
+        .map(segment_to_camel_case)
+        .collect::<Vec<String>>()
+        .join(".")
+}
+
+/// Convert a single path segment (e.g., `"my_app"`) to CamelCase (`"MyApp"`).
+fn segment_to_camel_case(segment: &str) -> String {
+    segment.split('_')
+        .filter(|s| !s.is_empty())
+        .map(|word| {
+            let mut chars: Vec<char> = word.chars().collect();
+            if let Some(first) = chars.first_mut() {
+                *first = first.to_ascii_uppercase();
+            }
+            // Lowercase the rest to handle mixed case
+            for c in chars.iter_mut().skip(1) {
+                *c = c.to_ascii_lowercase();
+            }
+            chars.into_iter().collect::<String>()
+        })
+        .collect::<Vec<String>>()
+        .join("")
 }
 
 // ---------------------------------------------------------------------------
@@ -2349,5 +2438,77 @@ mod tests {
         assert_eq!(strip_nix_source_root("lib/bar"), "bar");
         assert_eq!(strip_nix_source_root("nix/baz"), "baz");
         assert_eq!(strip_nix_source_root("no_prefix"), "no_prefix");
+    }
+
+    // ------------------------------------------------------------------
+    // Elixir module inference tests (Stage 19)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_elixir_module_lib() {
+        assert_eq!(
+            infer_module_name("lib/my_app/services/user.ex", "elixir"),
+            Some("MyApp.Services.User".to_string())
+        );
+        assert_eq!(
+            infer_module_name("lib/my_app.ex", "elixir"),
+            Some("MyApp".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_elixir_module_exs() {
+        assert_eq!(
+            infer_module_name("lib/mix/tasks/setup.exs", "elixir"),
+            Some("Mix.Tasks.Setup".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_elixir_module_src_prefix() {
+        assert_eq!(
+            infer_module_name("src/services/worker.ex", "elixir"),
+            Some("Services.Worker".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_elixir_module_test_prefix() {
+        assert_eq!(
+            infer_module_name("test/my_app/user_test.exs", "elixir"),
+            Some("MyApp.UserTest".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_elixir_module_no_prefix() {
+        assert_eq!(
+            infer_module_name("my_module.ex", "elixir"),
+            Some("MyModule".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_elixir_module_non_elixir() {
+        assert_eq!(infer_module_name("src/foo.py", "elixir"), None);
+        assert_eq!(infer_module_name("src/foo.ex", "elixir"), Some("Foo".to_string()));
+        assert_eq!(infer_module_name("src/foo.java", "elixir"), None);
+    }
+
+    #[test]
+    fn test_strip_elixir_source_root() {
+        assert_eq!(strip_elixir_source_root("lib/foo/bar"), "foo/bar");
+        assert_eq!(strip_elixir_source_root("src/baz"), "baz");
+        assert_eq!(strip_elixir_source_root("test/qux"), "qux");
+        assert_eq!(strip_elixir_source_root("tests/quux"), "quux");
+        assert_eq!(strip_elixir_source_root("no_prefix"), "no_prefix");
+    }
+
+    #[test]
+    fn test_segment_to_camel_case() {
+        assert_eq!(segment_to_camel_case("my_app"), "MyApp");
+        assert_eq!(segment_to_camel_case("user"), "User");
+        assert_eq!(segment_to_camel_case("services"), "Services");
+        assert_eq!(segment_to_camel_case("http_client"), "HttpClient");
     }
 }

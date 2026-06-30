@@ -34,13 +34,14 @@ impl LanguageRegistry {
             "groovy" => Some(Box::new(GroovyResolver)),
             "zig" => Some(Box::new(ZigResolver)),
             "nix" => Some(Box::new(NixResolver)),
+            "elixir" => Some(Box::new(ElixirResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift", "lua", "bash", "groovy", "zig", "nix"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift", "lua", "bash", "groovy", "zig", "nix", "elixir"]
     }
 }
 
@@ -3203,6 +3204,221 @@ fn simplify_nix_path(path: &str) -> String {
     stack.join("/")
 }
 
+// ---------------------------------------------------------------------------
+// Elixir module resolver (Stage 19)
+// ---------------------------------------------------------------------------
+
+/// Elixir module resolver.
+///
+/// Elixir uses a `.`-separated module system:
+/// - `alias MyApp.Services.User` → resolve to `lib/my_app/services/user.ex`
+/// - `import Enum` → external (Elixir stdlib)
+/// - `use Phoenix.LiveView` → external (third-party package)
+/// - `require Logger` → external (Elixir stdlib)
+///
+/// Module name to file path mapping:
+/// `MyApp.Services.User` → `lib/my_app/services/user.ex`
+/// (dots → slashes, CamelCase → snake_case)
+pub struct ElixirResolver;
+
+impl ModuleResolver for ElixirResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        _source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        if module_name.is_empty() {
+            return Vec::new();
+        }
+
+        // 1. Direct ModuleIndex lookup by module name
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Try with common source root prefixes
+        for prefix in &["", "lib.", "src.", "test."] {
+            let candidate = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&candidate) {
+                return files.clone();
+            }
+        }
+
+        // 3. Generate candidate file paths from module name
+        //    e.g., "MyApp.Services.User" → "lib/my_app/services/user.ex"
+        let module_path = elixir_module_to_path(module_name);
+
+        let mut candidates = Vec::new();
+        for prefix in &["lib/", "src/", "test/", "tests/", ""] {
+            // .ex file
+            let ex_file = format!("{}{}.ex", prefix, module_path);
+            candidates.push(ex_file);
+
+            // .exs file (script)
+            let exs_file = format!("{}{}.exs", prefix, module_path);
+            candidates.push(exs_file);
+        }
+
+        candidates
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "elixir")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_elixir_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "elixir"
+    }
+}
+
+/// Convert an Elixir module name to a slash-separated file path (without extension).
+///
+/// `"MyApp.Services.User"` → `"my_app/services/user"`
+fn elixir_module_to_path(module_name: &str) -> String {
+    module_name.split('.')
+        .map(camel_to_snake)
+        .collect::<Vec<String>>()
+        .join("/")
+}
+
+/// Convert a CamelCase segment to snake_case.
+///
+/// `"MyApp"` → `"my_app"`, `"User"` → `"user"`, `"HTTPClient"` → `"http_client"`
+fn camel_to_snake(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+
+    let mut result = String::new();
+    let chars: Vec<char> = s.chars().collect();
+
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                // Check if we need an underscore
+                let prev = chars[i - 1];
+                // Insert underscore before uppercase letter unless:
+                // - previous is also uppercase (for acronyms like HTTPClient)
+                // - but do insert if next char is lowercase (e.g., HTTPClient → http_client)
+                let next_is_lower = chars.get(i + 1).map(|n| n.is_lowercase()).unwrap_or(false);
+                if !prev.is_uppercase() || (prev.is_uppercase() && next_is_lower) {
+                    result.push('_');
+                }
+            }
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+/// Check if a module name is a known Elixir standard library, popular
+/// third-party package, or framework module.
+///
+/// Elixir ships with a well-defined standard library.  Phoenix, Ecto, and other
+/// popular packages are also treated as external.
+pub fn is_elixir_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    // Relative references are always local
+    if module_name.starts_with('.') {
+        return false;
+    }
+
+    let root = module_name.split('.').next().unwrap_or(module_name);
+
+    // Elixir standard library (core Kernel modules + stdlib)
+    let elixir_stdlib: &[&str] = &[
+        // Kernel and special forms
+        "Kernel", "Kernel\\SpecialForms",
+        // Core modules
+        "Access", "Agent", "Application", "Atom", "Base", "Behaviour",
+        "Bitwise", "Calendar", "Code", "Collectable", "Compiler",
+        "Date", "DateTime", "Dict", "DynamicSupervisor", "Enum",
+        "Enumerable", "Exception", "File", "Float", "Function",
+        "GenEvent", "GenServer", "GenStatem", "HashDict", "HashSet",
+        "IO", "Inspect", "Integer", "Keyword", "List", "Logger",
+        "Macro", "Map", "MapSet", "Module", "NaiveDateTime", "Node",
+        "OptionParser", "Path", "Port", "Process", "Protocol",
+        "Range", "Record", "Regex", "Registry", "Set", "Stream",
+        "String", "StringIO", "Supervisor", "System", "Task",
+        "Time", "Tuple", "URI", "Version",
+        // Mix (build tool)
+        "Mix",
+    ];
+
+    if elixir_stdlib.contains(&root) {
+        return true;
+    }
+
+    // Popular Elixir third-party packages
+    let third_party_roots: &[&str] = &[
+        // Phoenix framework
+        "Phoenix", "Plug",
+        // Ecto (database)
+        "Ecto",
+        // Other popular libs
+        "Eex", "ExUnit", "Earmark", "ExDoc",
+        "Absinthe", "Jason", "Poison",
+        "Broadway", "Flow", "Genstage",
+        "NimbleCSV", "NimbleParsec", "NimbleOptions",
+        "Telemetry", "TelemetryMetrics", "TelemetryPoller",
+        "Finch", "Req", "HTTPoison", "Tesla",
+        "Swoosh", "Bamboo",
+        "Oban", "Quantum",
+        "Credo", "Sobelow", "Dialyxir",
+        "Wallaby", "Hound",
+        "Comeonin", "Argon2", "Bcrypt",
+        "Cachex", "ConCache", "Nebulex",
+        "Mox", "Mimic", "ExMachina", "Faker",
+        "Timex", "VegaLite", "Kino",
+        "Bandit", "Cowboy", "WebSock",
+        "Ash", "Oban", "Guardian",
+        // GraphQL
+        "Absinthe",
+        // LiveView
+        "LiveView", "LiveComponent", "Surface",
+        // Broadway
+        "Broadway",
+    ];
+
+    if third_party_roots.contains(&root) {
+        return true;
+    }
+
+    // Check common two-level prefixes (e.g., "Phoenix.LiveView")
+    let two_level = module_name.split('.').take(2).collect::<Vec<_>>().join(".");
+    let third_party_prefixes: &[&str] = &[
+        "Phoenix.LiveView", "Phoenix.HTML", "Phoenix.PubSub",
+        "Phoenix.Ecto", "Phoenix.Swoosh",
+        "Plug.Conn", "Plug.CSRF",
+        "Ecto.SQL", "Ecto.Schema", "Ecto.Query", "Ecto.Changeset",
+        "Absinthe.Schema", "Absinthe.Middleware",
+    ];
+
+    for prefix in third_party_prefixes {
+        if module_name.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5822,5 +6038,192 @@ mod tests {
         assert_eq!(simplify_nix_path("src/../lib/utils.nix"), "lib/utils.nix");
         assert_eq!(simplify_nix_path("./utils.nix"), "utils.nix");
         assert_eq!(simplify_nix_path("src/lib/../default.nix"), "src/default.nix");
+    }
+
+    // ------------------------------------------------------------------
+    // Elixir resolver tests (Stage 19)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_elixir_resolver_language() {
+        let resolver = ElixirResolver;
+        assert_eq!(resolver.language(), "elixir");
+    }
+
+    #[test]
+    fn test_is_elixir_external_stdlib() {
+        assert!(is_elixir_external("Enum"));
+        assert!(is_elixir_external("String"));
+        assert!(is_elixir_external("List"));
+        assert!(is_elixir_external("Map"));
+        assert!(is_elixir_external("Logger"));
+        assert!(is_elixir_external("GenServer"));
+        assert!(is_elixir_external("Mix"));
+    }
+
+    #[test]
+    fn test_is_elixir_external_third_party() {
+        assert!(is_elixir_external("Phoenix"));
+        assert!(is_elixir_external("Ecto"));
+        assert!(is_elixir_external("Plug"));
+        assert!(is_elixir_external("Jason"));
+        assert!(is_elixir_external("Absinthe"));
+    }
+
+    #[test]
+    fn test_is_elixir_external_two_level() {
+        assert!(is_elixir_external("Phoenix.LiveView"));
+        assert!(is_elixir_external("Phoenix.LiveView.Engine"));
+        assert!(is_elixir_external("Ecto.Schema"));
+        assert!(is_elixir_external("Ecto.Query"));
+        assert!(is_elixir_external("Plug.Conn"));
+    }
+
+    #[test]
+    fn test_is_elixir_external_not_external() {
+        // Project-local modules should NOT be external
+        assert!(!is_elixir_external("MyApp"));
+        assert!(!is_elixir_external("MyApp.Services.User"));
+        assert!(!is_elixir_external("Internal"));
+    }
+
+    #[test]
+    fn test_is_elixir_external_empty() {
+        assert!(!is_elixir_external(""));
+    }
+
+    #[test]
+    fn test_elixir_resolver_file_to_module_name() {
+        let resolver = ElixirResolver;
+        assert_eq!(
+            resolver.file_to_module_name("lib/my_app/services/user.ex", Path::new(".")),
+            Some("MyApp.Services.User".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("src/worker.ex", Path::new(".")),
+            Some("Worker".to_string())
+        );
+        // Non-Elixir files
+        assert_eq!(
+            resolver.file_to_module_name("src/foo.py", Path::new(".")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_elixir_resolver_resolve_module_direct() {
+        let resolver = ElixirResolver;
+        let mut index = ModuleIndex::empty();
+
+        // Register: lib/my_app/services/user.ex → module "MyApp.Services.User"
+        index.insert(
+            "MyApp.Services.User",
+            "lib/my_app/services/user.ex".to_string(),
+        );
+
+        let candidates = resolver.resolve_module(
+            "MyApp.Services.User",
+            "lib/my_app/services/user.ex",
+            Path::new("."),
+            &index,
+        );
+        assert!(
+            candidates.contains(&"lib/my_app/services/user.ex".to_string()),
+            "Expected lib/my_app/services/user.ex in candidates, got {:?}",
+            candidates
+        );
+    }
+
+    #[test]
+    fn test_elixir_resolver_resolve_module_nested() {
+        let resolver = ElixirResolver;
+        let mut index = ModuleIndex::empty();
+
+        index.insert(
+            "MyApp.Services.Helper",
+            "lib/my_app/services/helper.ex".to_string(),
+        );
+
+        let candidates = resolver.resolve_module(
+            "MyApp.Services.Helper",
+            "lib/my_app/worker.ex",
+            Path::new("."),
+            &index,
+        );
+        assert!(
+            candidates.contains(&"lib/my_app/services/helper.ex".to_string()),
+            "Expected module to be resolved, got {:?}",
+            candidates
+        );
+    }
+
+    #[test]
+    fn test_elixir_resolver_resolve_module_prefix_fallback() {
+        let resolver = ElixirResolver;
+        let mut index = ModuleIndex::empty();
+
+        // Index has stripped prefix: "Services.Worker" → "src/services/worker.ex"
+        index.insert(
+            "Services.Worker",
+            "src/services/worker.ex".to_string(),
+        );
+
+        let candidates = resolver.resolve_module(
+            "Services.Worker",
+            "lib/my_app.ex",
+            Path::new("."),
+            &index,
+        );
+        assert!(
+            candidates.contains(&"src/services/worker.ex".to_string()),
+            "Expected src/services/worker.ex via prefix fallback, got {:?}",
+            candidates
+        );
+    }
+
+    #[test]
+    fn test_elixir_resolver_resolve_module_no_index() {
+        let resolver = ElixirResolver;
+        let index = ModuleIndex::empty();
+
+        let candidates = resolver.resolve_module(
+            "MyApp.Services.User",
+            "lib/my_app.ex",
+            Path::new("."),
+            &index,
+        );
+        // Should generate candidate paths as fallback
+        assert!(!candidates.is_empty(), "Should generate candidate paths");
+        // Should include common prefixes
+        assert!(
+            candidates.iter().any(|c| c.contains("my_app/services/user")),
+            "Should contain snake_case path, got {:?}",
+            candidates
+        );
+    }
+
+    #[test]
+    fn test_elixir_resolver_resolve_module_empty() {
+        let resolver = ElixirResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module("", "lib/test.ex", Path::new("."), &index);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_camel_to_snake() {
+        assert_eq!(camel_to_snake("MyApp"), "my_app");
+        assert_eq!(camel_to_snake("User"), "user");
+        assert_eq!(camel_to_snake("Services"), "services");
+        assert_eq!(camel_to_snake("HTTPClient"), "http_client");
+        assert_eq!(camel_to_snake("MyAppServices"), "my_app_services");
+        assert_eq!(camel_to_snake(""), "");
+    }
+
+    #[test]
+    fn test_language_registry_get_elixir() {
+        let resolver = LanguageRegistry::get("elixir");
+        assert!(resolver.is_some(), "Expected ElixirResolver in LanguageRegistry");
+        assert_eq!(resolver.unwrap().language(), "elixir");
     }
 }

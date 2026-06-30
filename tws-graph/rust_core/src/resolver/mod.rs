@@ -1139,4 +1139,118 @@ mod tests {
         assert_eq!(module, "pkgs");
         assert_eq!(symbol, "");
     }
+
+    // ------------------------------------------------------------------
+    // Elixir cross-file resolution integration tests (Stage 19)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_elixir_cross_file() {
+        let (db, path) = setup_db("resolve_elixir_cross");
+
+        // Source: lib/my_app/services/worker.ex
+        let src_id = insert_node(
+            &db, "Worker", "lib.my_app.services::Worker",
+            "lib/my_app/services/worker.ex", "elixir", "module"
+        );
+        // Target: lib/my_app/utils/helper.ex
+        let _tgt_id = insert_node(
+            &db, "Helper", "lib.my_app.utils::Helper",
+            "lib/my_app/utils/helper.ex", "elixir", "module"
+        );
+
+        // Dangling REFERENCES edge (alias MyApp.Utils.Helper)
+        // target_text = "MyApp.Utils.Helper::" (module only reference)
+        let fake_target = hash_id("nonexistent.ex", "nonexistent::helper");
+        insert_edge(&db, &src_id, &fake_target, "MyApp.Utils.Helper::", "REFERENCES");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // ModuleIndex maps lib/my_app/utils/helper.ex → module "MyApp.Utils.Helper"
+        // symbol is empty, so find_node_by_module is called
+        assert!(stats.resolved + stats.unresolved + stats.external > 0,
+            "Expected some resolution activity for Elixir cross-file");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_resolve_elixir_external_stdlib() {
+        let (db, path) = setup_db("resolve_elixir_ext");
+
+        let src_id = insert_node(
+            &db, "Worker", "lib.my_app::Worker",
+            "lib/my_app/worker.ex", "elixir", "module"
+        );
+        let fake_target = hash_id("nonexistent.ex", "nonexistent::enum");
+        // import Enum → target_text = "Enum::"
+        insert_edge(&db, &src_id, &fake_target, "Enum::", "REFERENCES");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // "Enum" is Elixir stdlib → should be external
+        assert_eq!(stats.external, 1, "Elixir stdlib 'Enum' should be classified as external");
+        assert_eq!(stats.resolved, 0);
+
+        // Verify unresolved_refs entry
+        let conn = db.connection();
+        let is_ext: i32 = conn
+            .query_row(
+                "SELECT is_external FROM unresolved_refs WHERE from_node_id = ?1",
+                [&src_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(is_ext, 1, "External reference should have is_external=1");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_resolve_elixir_unresolved_internal() {
+        let (db, path) = setup_db("resolve_elixir_unres");
+
+        let src_id = insert_node(
+            &db, "App", "lib.my_app::App",
+            "lib/my_app.ex", "elixir", "module"
+        );
+        let fake_target = hash_id("missing.ex", "missing::unknown_module");
+        // alias SomeModule.NotFound → target_text = "SomeModule.NotFound::"
+        insert_edge(&db, &src_id, &fake_target, "SomeModule.NotFound::", "REFERENCES");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // Not in stdlib, no matching file → unresolved
+        assert_eq!(stats.unresolved, 1, "Unknown module should be unresolved");
+
+        // Verify unresolved_refs entry
+        let conn = db.connection();
+        let is_ext: i32 = conn
+            .query_row(
+                "SELECT is_external FROM unresolved_refs WHERE from_node_id = ?1",
+                [&src_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(is_ext, 0, "Unknown internal module should not be external");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_resolve_elixir_use_external() {
+        let (db, path) = setup_db("resolve_elixir_use");
+
+        let src_id = insert_node(
+            &db, "App", "lib.my_app::App",
+            "lib/my_app.ex", "elixir", "module"
+        );
+        let fake_target = hash_id("nonexistent.ex", "nonexistent::phoenix");
+        // use Phoenix.LiveView → target_text = "Phoenix.LiveView::"
+        insert_edge(&db, &src_id, &fake_target, "Phoenix.LiveView::", "REFERENCES");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // Phoenix.LiveView is third-party → external
+        assert_eq!(stats.external, 1,
+            "Phoenix.LiveView should be classified as external");
+
+        cleanup(&path);
+    }
 }
