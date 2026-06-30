@@ -102,6 +102,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "go" => infer_go_module(file_path),
         "rust" => infer_rust_module(file_path),
         "php" => infer_php_module(file_path),
+        "ruby" => infer_ruby_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -493,6 +494,52 @@ fn strip_php_source_root(path: &str) -> String {
     path.to_string()
 }
 
+/// Ruby module name inference.
+///
+/// Rules:
+/// 1. Only handle `.rb` files.
+/// 2. Strip the `.rb` extension.
+/// 3. Strip common source root prefixes (`lib/`, `src/`, `app/`).
+/// 4. Replace path separators with `/` (Ruby require convention).
+///
+/// Examples:
+/// - `lib/foo/bar.rb` → `foo/bar`
+/// - `src/models/user.rb` → `models/user`
+/// - `app/services/auth.rb` → `services/auth`
+/// - `helper.rb` → `helper`
+fn infer_ruby_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle .rb files
+    if !path.ends_with(".rb") {
+        return None;
+    }
+
+    // Strip .rb extension
+    let without_ext = &path[..path.len() - 3];
+
+    // Strip common Ruby source root prefixes
+    let stripped = strip_ruby_source_root(without_ext);
+    let module = stripped.replace('\\', "/");
+
+    if module.is_empty() {
+        None
+    } else {
+        Some(module)
+    }
+}
+
+/// Strip common Ruby source root prefixes.
+fn strip_ruby_source_root(path: &str) -> String {
+    let prefixes = &["lib/", "src/", "app/"];
+    for prefix in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+    path.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -586,8 +633,10 @@ mod tests {
         assert_eq!(infer_module_name("src/foo/bar.go", "go"), Some("foo".to_string()));
         // Rust is now supported — should return the module path
         assert_eq!(infer_module_name("src/foo/bar.rs", "rust"), Some("foo::bar".to_string()));
-        // Still unknown languages should return None
+        // Ruby now has a resolver — only .rb files are recognized, .hpp returns None
         assert_eq!(infer_module_name("src/foo/bar.hpp", "ruby"), None);
+        // Other unknown languages still return None
+        assert_eq!(infer_module_name("src/foo/bar.rb", "haskell"), None);
     }
 
     // ------------------------------------------------------------------
@@ -1001,5 +1050,65 @@ mod tests {
         assert_eq!(infer_module_name("src/foo.py", "php"), None);
         assert_eq!(infer_module_name("src/foo.java", "php"), None);
         assert_eq!(infer_module_name("src/foo.ts", "php"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // Ruby module name inference
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_ruby_module_lib() {
+        assert_eq!(
+            infer_module_name("lib/foo.rb", "ruby"),
+            Some("foo".to_string())
+        );
+        assert_eq!(
+            infer_module_name("lib/services/auth.rb", "ruby"),
+            Some("services/auth".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_ruby_module_src() {
+        assert_eq!(
+            infer_module_name("src/models/user.rb", "ruby"),
+            Some("models/user".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_ruby_module_app() {
+        assert_eq!(
+            infer_module_name("app/controllers/home_controller.rb", "ruby"),
+            Some("controllers/home_controller".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_ruby_module_no_prefix() {
+        assert_eq!(
+            infer_module_name("helper.rb", "ruby"),
+            Some("helper".to_string())
+        );
+        assert_eq!(
+            infer_module_name("my_gem.rb", "ruby"),
+            Some("my_gem".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_ruby_module_non_ruby() {
+        assert_eq!(infer_module_name("lib/foo.py", "ruby"), None);
+        assert_eq!(infer_module_name("lib/foo.java", "ruby"), None);
+        assert_eq!(infer_module_name("lib/foo.ts", "ruby"), None);
+        assert_eq!(infer_module_name("lib/foo.go", "ruby"), None);
+    }
+
+    #[test]
+    fn test_strip_ruby_source_root_mi() {
+        assert_eq!(strip_ruby_source_root("lib/foo"), "foo");
+        assert_eq!(strip_ruby_source_root("src/models/user"), "models/user");
+        assert_eq!(strip_ruby_source_root("app/controllers"), "controllers");
+        assert_eq!(strip_ruby_source_root("foo/bar"), "foo/bar");
     }
 }

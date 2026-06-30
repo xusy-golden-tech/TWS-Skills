@@ -18,6 +18,7 @@
 //! - `imports`: require/require_relative/load calls
 //! - `implements`: include calls (mixin inclusion)
 //! - `extends`: extend calls (class-level extension)
+//! - `references`: references to imported modules/symbols (cross-file resolution)
 
 use crate::db::hash_id;
 use crate::indexer::context::ExtractionContext;
@@ -92,11 +93,17 @@ impl Extractor for RubyExtractor {
 struct Walker {
     /// Track whether we are inside a class scope (for method context).
     in_class: bool,
+    /// Map of imported names: local reference name → qualified module path.
+    /// Populated from `require`, `require_relative`, `include`, and `extend`.
+    imported_names: HashMap<String, String>,
 }
 
 impl Walker {
     fn new() -> Self {
-        Self { in_class: false }
+        Self {
+            in_class: false,
+            imported_names: HashMap::new(),
+        }
     }
 
     /// Walk the program node (top-level).
@@ -378,15 +385,38 @@ impl Walker {
                     let text = get_text(source, Some(sn));
                     let module_name = text.trim_matches(|c| c == '\'' || c == '"');
                     if !module_name.is_empty() {
-                        let target_qn = build_qualified_target(&ctx.file_path, module_name);
+                        // Build the target with full qualified format for IMPORTS edge
+                        let reference_target = if method_name == "require_relative" {
+                            resolve_require_relative_path(&ctx.file_path, module_name)
+                        } else {
+                            module_name.to_string()
+                        };
+                        let target_qn = build_qualified_target(&ctx.file_path, &reference_target);
                         let target = hash_id(&ctx.file_path, &target_qn);
                         ctx.add_edge(
                             parent_id,
                             &target,
                             EdgeKind::Imports,
                             line,
-                            Some(module_name),
+                            Some(&reference_target),
                         );
+
+                        // REFERENCES edge for cross-file resolution
+                        // Format: "module_path::" to signal module-level reference
+                        let ref_text = format!("{}::", reference_target);
+                        let ref_qn = build_qualified_target(&ctx.file_path, &ref_text);
+                        let ref_target = hash_id(&ctx.file_path, &ref_qn);
+                        ctx.add_edge(
+                            parent_id,
+                            &ref_target,
+                            EdgeKind::References,
+                            line,
+                            Some(&ref_text),
+                        );
+
+                        // Track in imported_names: basename → module reference
+                        let basename = extract_basename(&reference_target);
+                        self.imported_names.insert(basename, reference_target.clone());
                     }
                 }
                 // Also check for string_content inside interpolated strings
@@ -394,15 +424,34 @@ impl Walker {
                 if let Some(sc) = str_content {
                     let module_name = get_text(source, Some(sc));
                     if !module_name.is_empty() {
-                        let target_qn = build_qualified_target(&ctx.file_path, &module_name);
+                        let reference_target = if method_name == "require_relative" {
+                            resolve_require_relative_path(&ctx.file_path, &module_name)
+                        } else {
+                            module_name.to_string()
+                        };
+                        let target_qn = build_qualified_target(&ctx.file_path, &reference_target);
                         let target = hash_id(&ctx.file_path, &target_qn);
                         ctx.add_edge(
                             parent_id,
                             &target,
                             EdgeKind::Imports,
                             line,
-                            Some(&module_name),
+                            Some(&reference_target),
                         );
+
+                        let ref_text = format!("{}::", reference_target);
+                        let ref_qn = build_qualified_target(&ctx.file_path, &ref_text);
+                        let ref_target = hash_id(&ctx.file_path, &ref_qn);
+                        ctx.add_edge(
+                            parent_id,
+                            &ref_target,
+                            EdgeKind::References,
+                            line,
+                            Some(&ref_text),
+                        );
+
+                        let basename = extract_basename(&reference_target);
+                        self.imported_names.insert(basename, reference_target.clone());
                     }
                 }
             }
@@ -438,6 +487,16 @@ impl Walker {
                         line,
                         Some(&const_name),
                     );
+                    // REFERENCES edge for cross-file resolution
+                    ctx.add_edge(
+                        parent_id,
+                        &target,
+                        EdgeKind::References,
+                        line,
+                        Some(&const_name),
+                    );
+                    // Track in imported_names: constant name → qualified target
+                    self.imported_names.insert(const_name.clone(), const_name.clone());
                 }
             }
             for i in 0..node.named_child_count() {
@@ -471,6 +530,16 @@ impl Walker {
                         line,
                         Some(&const_name),
                     );
+                    // REFERENCES edge for cross-file resolution
+                    ctx.add_edge(
+                        parent_id,
+                        &target,
+                        EdgeKind::References,
+                        line,
+                        Some(&const_name),
+                    );
+                    // Track in imported_names
+                    self.imported_names.insert(const_name.clone(), const_name.clone());
                 }
             }
             for i in 0..node.named_child_count() {
@@ -536,14 +605,16 @@ impl Walker {
         if !is_ruby_builtin(&method_name) {
             let callee_name = resolve_call_target(source, node, &method_name);
             if !callee_name.is_empty() {
-                let target_qn = build_qualified_target(&ctx.file_path, &callee_name);
+                // Check if the call is to an imported module/symbol
+                let enhanced_name = qualify_ruby_call(&callee_name, &self.imported_names);
+                let target_qn = build_qualified_target(&ctx.file_path, &enhanced_name);
                 let target = hash_id(&ctx.file_path, &target_qn);
                 ctx.add_edge(
                     parent_id,
                     &target,
                     EdgeKind::Calls,
                     line,
-                    Some(&callee_name),
+                    Some(&enhanced_name),
                 );
             }
         }
@@ -703,6 +774,93 @@ fn resolve_call_target(source: &[u8], node: Node, first_ident: &str) -> String {
         Some(recv) => format!("{}.{}", recv, method_name),
         None => method_name,
     }
+}
+
+/// Resolve a `require_relative` path against the source file location.
+///
+/// For example, if the source file is `src/app.rb` and the require is
+/// `require_relative '../lib/helper'`, the result is `lib/helper`.
+fn resolve_require_relative_path(source_file: &str, relative_path: &str) -> String {
+    let source_dir = std::path::Path::new(source_file)
+        .parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or(".");
+
+    let joined = if source_dir == "." {
+        relative_path.to_string()
+    } else {
+        std::path::Path::new(source_dir)
+            .join(relative_path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+
+    // Normalize ../ and ./ segments
+    simplify_ruby_path(&joined)
+}
+
+/// Simplify a path by resolving `.` and `..` segments.
+fn simplify_ruby_path(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let mut result: Vec<&str> = Vec::new();
+
+    for part in parts {
+        match part {
+            "." => {}
+            ".." => {
+                if !result.is_empty() && result.last() != Some(&"..") {
+                    result.pop();
+                } else {
+                    result.push(part);
+                }
+            }
+            _ => result.push(part),
+        }
+    }
+    result.join("/")
+}
+
+/// Extract the basename from a module path (last segment without extension).
+/// `lib/helper` → `helper`
+/// `net/http` → `http`
+/// `json` → `json`
+fn extract_basename(module_path: &str) -> String {
+    let basename = module_path.rsplit('/').next().unwrap_or(module_path);
+    // Also handle dot-separated paths like "net/http"
+    let basename = basename.rsplit('/').last().unwrap_or(basename);
+    basename.to_string()
+}
+
+/// Qualify a Ruby call target using the imported_names map.
+///
+/// If the receiver (first part of a chained call) matches a known import,
+/// prepend the module path with `::` separator so the resolver can parse it.
+///
+/// Examples:
+/// - `JSON.parse` with imported_names {"json" → "json"} → `json::JSON.parse`
+/// - `Helper.do_stuff` with imported_names {"Helper" → "Helper"} → `Helper::Helper.do_stuff`
+/// - `my_func` (no receiver) → `my_func` (unchanged)
+fn qualify_ruby_call(callee_name: &str, imported_names: &HashMap<String, String>) -> String {
+    // Check if the receiver part matches any imported name
+    if let Some(dot_pos) = callee_name.find('.') {
+        let receiver = &callee_name[..dot_pos];
+        let rest = &callee_name[dot_pos..]; // includes the dot
+
+        // Check exact match first
+        if let Some(module_path) = imported_names.get(receiver) {
+            return format!("{}::{}{}", module_path, receiver, rest);
+        }
+
+        // Check lowercased match (Ruby `require 'json'` makes `JSON` available)
+        let receiver_lower = receiver.to_lowercase();
+        for (import_key, module_path) in imported_names.iter() {
+            if import_key.to_lowercase() == receiver_lower {
+                return format!("{}::{}{}", module_path, receiver, rest);
+            }
+        }
+    }
+
+    callee_name.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,6 +1223,176 @@ mod tests {
         let ctx = extract("# just a comment\n", "src/comments.rb");
         let files = find_nodes(&ctx, NodeKind::File);
         assert_eq!(files.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-file resolution: REFERENCES edges (require, include, extend)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_require_creates_references_edge() {
+        let ctx = extract("require 'helper'\n", "src/app.rb");
+        let references = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = references
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.iter().any(|t| t.contains("helper")),
+            "Expected 'helper' in REFERENCES edges: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn test_require_relative_creates_references_edge() {
+        let ctx = extract("require_relative '../lib/helper'\n", "src/app.rb");
+        let references = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = references
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.iter().any(|t| t.contains("lib/helper")),
+            "Expected resolved path 'lib/helper' in REFERENCES: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn test_include_creates_references_edge() {
+        let ctx = extract(
+            "class MyClass\n  include Enumerable\nend\n",
+            "src/my_class.rb",
+        );
+        let references = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = references
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.contains(&"Enumerable"),
+            "Expected 'Enumerable' in REFERENCES: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn test_extend_creates_references_edge() {
+        let ctx = extract(
+            "class MyClass\n  extend ActiveSupport::Concern\nend\n",
+            "src/my_class.rb",
+        );
+        let references = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = references
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.iter().any(|t| t.contains("ActiveSupport") || t.contains("Concern")),
+            "Expected ActiveSupport::Concern in REFERENCES: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn test_require_imports_edge_still_created() {
+        let ctx = extract("require 'json'\nrequire_relative 'helper'\n", "src/app.rb");
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        let targets: Vec<&str> = imports
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"json"), "Expected 'json' in IMPORTS");
+        assert!(
+            targets.iter().any(|t| t.contains("helper")),
+            "Expected 'helper' in IMPORTS"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-file resolution: qualified call targets
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_imported_module_call_uses_qualified_target() {
+        // require 'json' → JSON.parse should use qualified target_text
+        // But extraction is per-file, and imported_names is per-walker.
+        // We test that the qualification helper works.
+        let mut names = HashMap::new();
+        names.insert("json".to_string(), "json".to_string());
+        let result = qualify_ruby_call("JSON.parse", &names);
+        assert_eq!(result, "json::JSON.parse");
+    }
+
+    #[test]
+    fn test_imported_module_call_with_nested_module() {
+        let mut names = HashMap::new();
+        names.insert("helper".to_string(), "lib/helper".to_string());
+        // Helper.do_stuff should map to lib/helper::Helper.do_stuff
+        let result = qualify_ruby_call("Helper.do_stuff", &names);
+        assert_eq!(result, "lib/helper::Helper.do_stuff");
+    }
+
+    #[test]
+    fn test_non_imported_call_stays_bare() {
+        let mut names = HashMap::new();
+        names.insert("json".to_string(), "json".to_string());
+        let result = qualify_ruby_call("my_func", &names);
+        assert_eq!(result, "my_func");
+    }
+
+    #[test]
+    fn test_non_imported_receiver_call_stays_bare() {
+        let mut names = HashMap::new();
+        names.insert("json".to_string(), "json".to_string());
+        // local_obj.method → not in imported_names → stays as-is
+        let result = qualify_ruby_call("local_obj.method", &names);
+        assert_eq!(result, "local_obj.method");
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-file resolution: require_relative path resolution
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_require_relative_same_dir() {
+        let result = resolve_require_relative_path("src/app.rb", "helper");
+        assert_eq!(result, "src/helper");
+    }
+
+    #[test]
+    fn test_resolve_require_relative_parent() {
+        let result = resolve_require_relative_path("src/app.rb", "../lib/helper");
+        assert_eq!(result, "lib/helper");
+    }
+
+    #[test]
+    fn test_resolve_require_relative_sibling_dir() {
+        let result = resolve_require_relative_path("src/models/user.rb", "../services/auth");
+        assert_eq!(result, "src/services/auth");
+    }
+
+    #[test]
+    fn test_resolve_require_relative_dot_slash() {
+        let result = resolve_require_relative_path("src/app.rb", "./utils");
+        assert_eq!(result, "src/utils");
+    }
+
+    #[test]
+    fn test_extract_basename_simple() {
+        assert_eq!(extract_basename("json"), "json");
+        assert_eq!(extract_basename("lib/helper"), "helper");
+        assert_eq!(extract_basename("net/http"), "http");
+    }
+
+    #[test]
+    fn test_simplify_ruby_path() {
+        assert_eq!(simplify_ruby_path("a/b/c"), "a/b/c");
+        assert_eq!(simplify_ruby_path("a/./b"), "a/b");
+        assert_eq!(simplify_ruby_path("a/b/../c"), "a/c");
+        assert_eq!(simplify_ruby_path("./a"), "a");
+        assert_eq!(simplify_ruby_path("a/../b/../c"), "c");
     }
 
     #[test]

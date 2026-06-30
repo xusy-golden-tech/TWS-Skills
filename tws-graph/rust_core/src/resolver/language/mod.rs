@@ -23,13 +23,14 @@ impl LanguageRegistry {
             "go" => Some(Box::new(GoResolver)),
             "rust" => Some(Box::new(RustResolver)),
             "php" => Some(Box::new(PhpResolver)),
+            "ruby" => Some(Box::new(RubyResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin", "go", "rust", "php"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "go", "rust", "php", "ruby"]
     }
 }
 
@@ -1173,6 +1174,211 @@ pub fn is_php_external(module_name: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Ruby module resolver
+// ---------------------------------------------------------------------------
+
+/// Ruby module resolver.
+///
+/// Handles Ruby's module system:
+/// - `require 'foo'` → loads `foo.rb` from $LOAD_PATH / common source roots
+/// - `require_relative 'foo'` → loads relative to source file
+/// - `include Foo` / `extend Foo` → constant reference (resolved as symbol)
+///
+/// ModuleIndex maps .rb files to module names based on file paths.
+/// Source roots: `lib/`, `src/`, `app/`, `./`
+pub struct RubyResolver;
+
+impl ModuleResolver for RubyResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        if module_name.is_empty() {
+            return Vec::new();
+        }
+
+        // 1. Direct ModuleIndex lookup
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Try with common source root prefixes
+        for prefix in &["lib/", "src/", "app/", ""] {
+            let candidate = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&candidate) {
+                return files.clone();
+            }
+        }
+
+        // 3. Generate candidate paths based on module_name
+        // `require 'foo'` → candidate: foo.rb
+        // `require 'foo/bar'` → candidate: foo/bar.rb
+        let mut candidates = Vec::new();
+
+        for prefix in &["lib/", "src/", "app/", ""] {
+            let file_candidate = format!("{}{}.rb", prefix, module_name);
+            candidates.push(file_candidate);
+        }
+
+        // 4. For require_relative (path starts with .), resolve against source file
+        if module_name.starts_with('.') {
+            let source_dir = Path::new(source_file)
+                .parent()
+                .and_then(|p| p.to_str())
+                .unwrap_or(".");
+
+            let resolved = if source_dir == "." {
+                module_name.to_string()
+            } else {
+                Path::new(source_dir)
+                    .join(module_name)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            };
+
+            let normalized = simplify_ruby_path_resolver(&resolved);
+            let rb_candidate = format!("{}.rb", normalized);
+            // Try ModuleIndex for this specific path
+            let stripped = strip_ruby_source_root(&normalized);
+            if let Some(files) = module_index.lookup(&stripped) {
+                candidates.extend(files.clone());
+            }
+            candidates.push(rb_candidate);
+        }
+
+        candidates
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "ruby")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_ruby_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "ruby"
+    }
+}
+
+/// Check if a module name is a known Ruby standard library or common gem.
+///
+/// Ruby stdlib modules and popular gems are classified as external.
+/// Internal project paths (starting with project directories) are NOT external.
+pub fn is_ruby_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    // Relative paths are always local
+    if module_name.starts_with('.') {
+        return false;
+    }
+
+    let root = module_name.split('/').next().unwrap_or(module_name);
+
+    // Ruby standard library (core + stdlib)
+    let ruby_stdlib: &[&str] = &[
+        // Core libraries
+        "abbrev", "base64", "benchmark", "bigdecimal", "bundler",
+        "cgi", "cmath", "csv", "date", "dbm", "debug", "delegate",
+        "digest", "drb", "english", "erb", "etc", "fcntl", "fiddle",
+        "fileutils", "find", "forwardable", "getoptlong", "io",
+        "ipaddr", "irb", "json", "logger", "matrix", "mkmf", "monitor",
+        "mutex_m", "net", "nkf", "objspace", "observer", "open-uri",
+        "open3", "openssl", "optparse", "ostruct", "pathname", "pp",
+        "prettyprint", "prime", "pstore", "psych", "racc", "rbconfig",
+        "rdoc", "readline", "reline", "resolv", "resolv-replace",
+        "rinda", "ripper", "rss", "rubygems", "securerandom", "set",
+        "shellwords", "singleton", "socker", "stringio", "strscan",
+        "syslog", "tempfile", "time", "timeout", "tmpdir", "tracer",
+        "tsort", "un", "uri", "weakref", "yaml", "zlib",
+    ];
+
+    if ruby_stdlib.contains(&root) {
+        return true;
+    }
+
+    // Common third-party gems
+    let third_party_gems: &[&str] = &[
+        "rails", "activerecord", "activesupport", "actionpack",
+        "actionmailer", "actionview", "activejob", "actioncable",
+        "activestorage", "actiontext", "actionmailbox",
+        "sinatra", "rack", "puma", "unicorn", "thin", "webrick",
+        "rspec", "minitest", "capybara", "factory_bot", "faker",
+        "devise", "cancancan", "pundit", "omniauth",
+        "sidekiq", "resque", "delayed_job",
+        "nokogiri", "httparty", "faraday", "rest-client",
+        "pg", "mysql2", "sqlite3", "redis", "mongo",
+        "graphql", "grpc",
+        "dotenv", "pry", "byebug",
+        "rubocop", "reek", "flog", "simplecov",
+        "sass", "webpacker", "sprockets",
+        "bcrypt", "jwt",
+        "aws-sdk", "google-cloud",
+        "stripe", "twilio-ruby", "sendgrid-ruby",
+    ];
+
+    if third_party_gems.contains(&root) {
+        return true;
+    }
+
+    // Known gem paths (e.g. active_support/core_ext/object)
+    // Check if the root with underscores maps to a known gem (canonical name w/o underscores)
+    // Also check hyphenated form (rest-client → rest_client gem match)
+    let root_underscore = root.replace('-', "_");
+    let root_no_underscore = root.replace('_', "");
+    if third_party_gems.contains(&root_underscore.as_str()) {
+        return true;
+    }
+    if third_party_gems.contains(&root_no_underscore.as_str()) {
+        return true;
+    }
+
+    false
+}
+
+/// Simplify a Ruby-style path by resolving `.` and `..` segments.
+fn simplify_ruby_path_resolver(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let mut result: Vec<&str> = Vec::new();
+
+    for part in parts {
+        match part {
+            "." => {}
+            ".." => {
+                if !result.is_empty() && result.last() != Some(&"..") {
+                    result.pop();
+                } else {
+                    result.push(part);
+                }
+            }
+            _ => result.push(part),
+        }
+    }
+    result.join("/")
+}
+
+/// Strip common Ruby source root prefixes.
+fn strip_ruby_source_root(path: &str) -> String {
+    let prefixes = &["lib/", "src/", "app/"];
+    for prefix in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+    path.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1241,7 +1447,7 @@ mod tests {
 
     #[test]
     fn test_language_registry_get_unsupported() {
-        let r = LanguageRegistry::get("ruby");
+        let r = LanguageRegistry::get("haskell");
         assert!(r.is_none());
     }
 
@@ -2032,5 +2238,198 @@ mod tests {
         assert!(!is_php_external("App\\Controllers\\HomeController"));
         assert!(!is_php_external("src\\utils\\helpers"));
         assert!(!is_php_external("MyProject\\Domain\\Entity"));
+    }
+
+    // ------------------------------------------------------------------
+    // Ruby resolver tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_ruby_resolver_is_external_stdlib() {
+        let resolver = RubyResolver;
+        assert!(resolver.is_external("json"));
+        assert!(resolver.is_external("csv"));
+        assert!(resolver.is_external("yaml"));
+        assert!(resolver.is_external("net/http"));
+        assert!(resolver.is_external("uri"));
+        assert!(resolver.is_external("set"));
+        assert!(resolver.is_external("logger"));
+        assert!(resolver.is_external("openssl"));
+        assert!(resolver.is_external("tempfile"));
+    }
+
+    #[test]
+    fn test_ruby_resolver_is_external_third_party() {
+        let resolver = RubyResolver;
+        assert!(resolver.is_external("rails"));
+        assert!(resolver.is_external("activesupport"));
+        assert!(resolver.is_external("rspec"));
+        assert!(resolver.is_external("devise"));
+        assert!(resolver.is_external("nokogiri"));
+        assert!(resolver.is_external("sidekiq"));
+        assert!(resolver.is_external("pg"));
+        assert!(resolver.is_external("redis"));
+    }
+
+    #[test]
+    fn test_ruby_resolver_is_external_gem_with_dashes() {
+        // Gems like 'rest-client' or 'google-cloud' should be recognized
+        let resolver = RubyResolver;
+        assert!(resolver.is_external("rest-client"));
+        // Also check same gem referenced without extension name
+        assert!(is_ruby_external("rest-client/request"));
+    }
+
+    #[test]
+    fn test_ruby_resolver_not_external_project() {
+        let resolver = RubyResolver;
+        assert!(!resolver.is_external("lib/helper"));
+        assert!(!resolver.is_external("src/models/user"));
+        assert!(!resolver.is_external("app/services/auth"));
+        assert!(!resolver.is_external("myapp/utils"));
+    }
+
+    #[test]
+    fn test_ruby_resolver_not_external_relative() {
+        let resolver = RubyResolver;
+        assert!(!resolver.is_external("./utils"));
+        assert!(!resolver.is_external("../shared/helper"));
+    }
+
+    #[test]
+    fn test_ruby_resolver_empty_module_name() {
+        let resolver = RubyResolver;
+        assert!(!resolver.is_external(""));
+    }
+
+    #[test]
+    fn test_ruby_resolver_language() {
+        let resolver = RubyResolver;
+        assert_eq!(resolver.language(), "ruby");
+    }
+
+    #[test]
+    fn test_ruby_resolver_file_to_module_name() {
+        let resolver = RubyResolver;
+        assert_eq!(
+            resolver.file_to_module_name("lib/foo.rb", Path::new(".")),
+            Some("foo".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("src/models/user.rb", Path::new(".")),
+            Some("models/user".to_string())
+        );
+        // Non-Ruby files return None
+        assert_eq!(
+            resolver.file_to_module_name("lib/foo.py", Path::new(".")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_ruby_resolver_resolve_module_empty_index() {
+        let resolver = RubyResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "helper",
+            "src/app.rb",
+            Path::new("."),
+            &index,
+        );
+        // Should generate candidate files: lib/helper.rb, src/helper.rb, app/helper.rb, helper.rb
+        assert!(!candidates.is_empty());
+        assert!(candidates.contains(&"lib/helper.rb".to_string()));
+        assert!(candidates.contains(&"src/helper.rb".to_string()));
+        assert!(candidates.contains(&"helper.rb".to_string()));
+    }
+
+    #[test]
+    fn test_ruby_resolver_resolve_module_nested_path() {
+        let resolver = RubyResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "foo/bar",
+            "src/main.rb",
+            Path::new("."),
+            &index,
+        );
+        assert!(!candidates.is_empty());
+        assert!(candidates.contains(&"lib/foo/bar.rb".to_string()));
+    }
+
+    #[test]
+    fn test_ruby_resolver_resolve_module_relative() {
+        let resolver = RubyResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "../shared/helper",
+            "src/models/user.rb",
+            Path::new("."),
+            &index,
+        );
+        assert!(!candidates.is_empty());
+        // Resolved to src/shared/helper.rb
+        assert!(candidates.iter().any(|c| c == "src/shared/helper.rb"));
+    }
+
+    #[test]
+    fn test_ruby_resolver_resolve_empty_module() {
+        let resolver = RubyResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "",
+            "src/main.rb",
+            Path::new("."),
+            &index,
+        );
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_language_registry_get_ruby() {
+        let r = LanguageRegistry::get("ruby");
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().language(), "ruby");
+    }
+
+    #[test]
+    fn test_supported_languages_includes_ruby() {
+        let langs = LanguageRegistry::supported_languages();
+        assert!(langs.contains(&"ruby"));
+    }
+
+    #[test]
+    fn test_is_ruby_external_stdlib_variants() {
+        assert!(is_ruby_external("json"));
+        assert!(is_ruby_external("json/pure"));
+        assert!(is_ruby_external("net/http"));
+        assert!(is_ruby_external("net/smtp"));
+        assert!(is_ruby_external("uri"));
+        assert!(is_ruby_external("open-uri"));
+        assert!(is_ruby_external("open3"));
+    }
+
+    #[test]
+    fn test_is_ruby_external_gems_variants() {
+        assert!(is_ruby_external("active_support/core_ext/object"));
+        assert!(is_ruby_external("active_record/validations"));
+        assert!(is_ruby_external("rspec/mocks"));
+        assert!(is_ruby_external("devise/strategies"));
+    }
+
+    #[test]
+    fn test_simplify_ruby_path_resolver() {
+        assert_eq!(simplify_ruby_path_resolver("lib/foo/bar"), "lib/foo/bar");
+        assert_eq!(simplify_ruby_path_resolver("src/./models"), "src/models");
+        assert_eq!(simplify_ruby_path_resolver("src/../lib/helper"), "lib/helper");
+        assert_eq!(simplify_ruby_path_resolver("./utils"), "utils");
+    }
+
+    #[test]
+    fn test_strip_ruby_source_root() {
+        assert_eq!(strip_ruby_source_root("lib/foo"), "foo");
+        assert_eq!(strip_ruby_source_root("src/models/user"), "models/user");
+        assert_eq!(strip_ruby_source_root("app/services"), "services");
+        assert_eq!(strip_ruby_source_root("foo"), "foo");
     }
 }
