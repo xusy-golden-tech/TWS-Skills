@@ -28,13 +28,14 @@ impl LanguageRegistry {
             "c" | "cpp" | "c++" => Some(Box::new(CppResolver)),
             "csharp" => Some(Box::new(CSharpResolver)),
             "dart" => Some(Box::new(DartResolver)),
+            "swift" => Some(Box::new(SwiftResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift"]
     }
 }
 
@@ -2245,6 +2246,165 @@ pub fn is_dart_external(module_name: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Swift module resolver (Stage 13)
+// ---------------------------------------------------------------------------
+
+/// Swift module resolver.
+///
+/// Handles Swift's import system:
+/// - `import UIKit` → module = UIKit
+/// - `import class UIKit.UIViewController` → module = UIKit, symbol = UIViewController
+/// - `import struct Foundation.Data` → module = Foundation, symbol = Data
+///
+/// Key design decisions:
+/// - Within the same Xcode target/Swift Package, all files share a namespace;
+///   cross-file references within a target do NOT require imports.  The
+///   `ModuleIndex` uses the directory-based module name for these references.
+/// - Frameworks and other modules require `import`, and are looked up via
+///   `ModuleIndex` first (for project-internal modules), then checked as
+///   external.
+/// - External frameworks: Foundation, UIKit, SwiftUI, AppKit, Combine, etc.
+pub struct SwiftResolver;
+
+impl ModuleResolver for SwiftResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        _source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        if module_name.is_empty() {
+            return Vec::new();
+        }
+
+        // 1. Direct ModuleIndex lookup by module name
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Try with common source root prefixes
+        for prefix in &["", "Sources.", "src.", "lib."] {
+            let candidate = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&candidate) {
+                return files.clone();
+            }
+        }
+
+        // 3. Try splitting dotted names and look up last segment
+        //    e.g., "UIKit.UIViewController" → try "UIViewController"
+        if let Some(dot_pos) = module_name.rfind('.') {
+            let last_segment = &module_name[dot_pos + 1..];
+            if let Some(files) = module_index.lookup(last_segment) {
+                return files.clone();
+            }
+        }
+
+        Vec::new()
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "swift")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_swift_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "swift"
+    }
+}
+
+/// Check if a module name is a known Apple system framework or common
+/// Swift third-party dependency.
+///
+/// A module is considered external if it is:
+/// - An Apple system framework (Foundation, UIKit, SwiftUI, AppKit, etc.)
+/// - The Swift standard library (Swift)
+/// - A common third-party Swift package (Alamofire, Kingfisher, etc.)
+pub fn is_swift_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    let lower = module_name.to_lowercase();
+
+    // Apple system frameworks + Swift standard library
+    let apple_frameworks: &[&str] = &[
+        // Swift core
+        "swift", "dispatch", "darwin", "objectivec", "os",
+        // Core frameworks
+        "foundation", "uikit", "appkit", "watchkit",
+        "swiftui", "combine", "swiftdata",
+        // Extended frameworks
+        "coregraphics", "coreanimation", "coreimage", "corevideo",
+        "coremedia", "coreaudiocore", "coreaudio", "corelocation",
+        "corebluetooth", "coremotion", "coreml", "corenfc",
+        "coretext", "coredata", "coreservices", "corewlan",
+        "avfoundation", "avkit", "arkit", "realitykit",
+        "mapkit", "webkit", "scenekit", "spritekit",
+        "gamekit", "gamecontroller", "metal", "metalkit",
+        "storekit", "cloudkit",
+        "photos", "photosui", "contacts", "contactsui",
+        "eventkit", "eventkitui", "healthkit", "homekit",
+        "usernotifications", "notificationcenter",
+        "safariservices", "authenticationservices",
+        "widgetkit", "vision", "visionkit",
+        "accelerate", "cfnetwork", "fileprovider",
+        "carplay", "callkit",
+        "swiftcharts", "chart",
+        "cryptokit", "naturallanguage", "speech",
+        "network", "networkextension",
+        "pdfkit", "quicklook", "quicklookthumbnailing",
+        "pushkit", "iokit",
+        "intents", "intentsui",
+        "mediaplayer", "messages",
+        "metalperformanceshaders", "metalperformanceshadersgraph",
+        "metricskit",
+        "multipeerconnectivity",
+        "localauthentication", "devicecheck",
+        "screenplay", "shareplay",
+        "swiftnio",
+    ];
+
+    // Check exact matches (case-insensitive)
+    if apple_frameworks.contains(&lower.as_str()) {
+        return true;
+    }
+
+    // Check if the first segment (before any dot) is a known framework
+    let first_segment = lower.split('.').next().unwrap_or(&lower);
+    if apple_frameworks.contains(&first_segment) {
+        return true;
+    }
+
+    // Common third-party Swift packages
+    let third_party: &[&str] = &[
+        "alamofire", "kingfisher", "snapkit", "moya", "rxswift",
+        "swiftyjson", "sdwebimage", "realm", "lottie", "iglistkit",
+        "rxdatasources", "promisekit", "nvactivityindicatorview",
+        "hero", "pop", "chameleonframework",
+        "swiftlint", "quick", "nimble",
+        "firebase", "facebook", "twitter", "google",
+        "socket.io", "starscream",
+        "grpc-swift", "swift-protobuf",
+        "apollo", "vapor", "fluent",
+        "carthage", "cocoapods",
+    ];
+
+    if third_party.contains(&first_segment) {
+        return true;
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3961,5 +4121,181 @@ mod tests {
         assert_eq!(simplify_dart_path("lib/./models/user.dart"), "lib/models/user.dart");
         assert_eq!(simplify_dart_path("lib/src/../models/user.dart"), "lib/models/user.dart");
         assert_eq!(simplify_dart_path("./utils.dart"), "utils.dart");
+    }
+
+    // ------------------------------------------------------------------
+    // Swift resolver tests (Stage 13)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_swift_resolver_is_external_apple_frameworks() {
+        let resolver = SwiftResolver;
+        assert!(resolver.is_external("UIKit"));
+        assert!(resolver.is_external("Foundation"));
+        assert!(resolver.is_external("SwiftUI"));
+        assert!(resolver.is_external("AppKit"));
+        assert!(resolver.is_external("Combine"));
+        assert!(resolver.is_external("Swift"));
+        assert!(resolver.is_external("CoreData"));
+        assert!(resolver.is_external("AVFoundation"));
+        assert!(resolver.is_external("MapKit"));
+        assert!(resolver.is_external("Metal"));
+        assert!(resolver.is_external("WebKit"));
+        assert!(resolver.is_external("SceneKit"));
+    }
+
+    #[test]
+    fn test_swift_resolver_is_external_third_party() {
+        let resolver = SwiftResolver;
+        assert!(resolver.is_external("Alamofire"));
+        assert!(resolver.is_external("Kingfisher"));
+        assert!(resolver.is_external("SnapKit"));
+        assert!(resolver.is_external("RxSwift"));
+        assert!(resolver.is_external("Lottie"));
+        assert!(resolver.is_external("Firebase"));
+    }
+
+    #[test]
+    fn test_swift_resolver_not_external_project_module() {
+        let resolver = SwiftResolver;
+        assert!(!resolver.is_external("MyApp"));
+        assert!(!resolver.is_external("Models.User"));
+        assert!(!resolver.is_external("Services.AuthManager"));
+        assert!(!resolver.is_external("AppDelegate"));
+    }
+
+    #[test]
+    fn test_swift_resolver_empty_module_name() {
+        let resolver = SwiftResolver;
+        assert!(!resolver.is_external(""));
+    }
+
+    #[test]
+    fn test_swift_resolver_language() {
+        let resolver = SwiftResolver;
+        assert_eq!(resolver.language(), "swift");
+    }
+
+    #[test]
+    fn test_swift_resolver_file_to_module_name() {
+        let resolver = SwiftResolver;
+        let result = resolver.file_to_module_name("Sources/Models/User.swift", Path::new("."));
+        assert_eq!(result, Some("Models.User".to_string()));
+        let result2 = resolver.file_to_module_name("src/main.swift", Path::new("."));
+        assert_eq!(result2, Some("main".to_string()));
+    }
+
+    #[test]
+    fn test_swift_resolver_resolve_module_empty_index() {
+        let index = ModuleIndex::empty();
+        let resolver = SwiftResolver;
+        // Module not in index → no candidate files
+        let result = resolver.resolve_module("Models.User", "src/main.swift", Path::new("."), &index);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_swift_resolver_resolve_module_with_index() {
+        use crate::db::Database;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use crate::db::hash_id;
+
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let db_path = std::env::temp_dir().join("tws_swift_resolver_test.db");
+        let _ = std::fs::remove_file(&db_path);
+        let db = Database::initialize(&db_path).unwrap();
+
+        // Insert Swift nodes
+        let paths = vec![
+            ("Sources/Models/User.swift", "Models.User"),
+            ("Sources/Services/AuthManager.swift", "Services.AuthManager"),
+        ];
+        for (file_path, module_name) in &paths {
+            let id = hash_id(file_path, &format!("{}::{}", file_path, module_name));
+            db.connection().execute(
+                "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, start_line, end_line, updated_at) VALUES (?1, 'class', ?2, ?3, ?4, 'swift', 1, 1, ?5)",
+                rusqlite::params![id, module_name, format!("{}::{}", file_path, module_name), file_path, ts],
+            ).unwrap();
+        }
+
+        let index = ModuleIndex::build(&db).unwrap();
+        let resolver = SwiftResolver;
+
+        // Look up by module name
+        let result = resolver.resolve_module("Models.User", "src/main.swift", Path::new("."), &index);
+        assert!(!result.is_empty(), "Should find Sources/Models/User.swift");
+        assert!(result.iter().any(|f| f.contains("User.swift")));
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_swift_resolver_resolve_module_with_prefix_variants() {
+        use crate::db::Database;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use crate::db::hash_id;
+
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let db_path = std::env::temp_dir().join("tws_swift_prefix_test.db");
+        let _ = std::fs::remove_file(&db_path);
+        let db = Database::initialize(&db_path).unwrap();
+
+        // Insert node
+        let file_path = "Sources/Features/Auth/Login.swift";
+        let module_name = "Features.Auth.Login";
+        let id = hash_id(file_path, &format!("{}::{}", file_path, module_name));
+        db.connection().execute(
+            "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, start_line, end_line, updated_at) VALUES (?1, 'class', ?2, ?3, ?4, 'swift', 1, 1, ?5)",
+            rusqlite::params![id, module_name, format!("{}::{}", file_path, module_name), file_path, ts],
+        ).unwrap();
+
+        let index = ModuleIndex::build(&db).unwrap();
+        let resolver = SwiftResolver;
+
+        // Try without Sources prefix
+        let result = resolver.resolve_module("Features.Auth.Login", "src/main.swift", Path::new("."), &index);
+        assert!(!result.is_empty(), "Should find with Sources prefix");
+        assert!(result.iter().any(|f| f.contains("Login.swift")));
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_swift_resolver_resolve_empty_module() {
+        let index = ModuleIndex::empty();
+        let resolver = SwiftResolver;
+        let result = resolver.resolve_module("", "src/main.swift", Path::new("."), &index);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_swift_resolver_apple_framework_module_segments() {
+        // Test first-segment matching for dotted module names
+        let resolver = SwiftResolver;
+        assert!(resolver.is_external("UIKit.UIViewController"));
+        assert!(resolver.is_external("Foundation.NSObject"));
+        assert!(resolver.is_external("SwiftUI.View"));
+        assert!(resolver.is_external("Combine.Publisher"));
+    }
+
+    #[test]
+    fn test_language_registry_get_swift() {
+        let r = LanguageRegistry::get("swift");
+        assert!(r.is_some(), "Expected Swift resolver to be registered");
+        assert_eq!(r.unwrap().language(), "swift");
+    }
+
+    #[test]
+    fn test_supported_languages_includes_swift() {
+        let langs = LanguageRegistry::supported_languages();
+        assert!(langs.contains(&"swift"), "Expected 'swift' in supported languages");
     }
 }

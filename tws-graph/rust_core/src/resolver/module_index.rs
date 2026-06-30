@@ -109,6 +109,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "c" | "cpp" | "c++" => infer_c_module(file_path),
         "csharp" => infer_csharp_module(file_path),
         "dart" => infer_dart_module(file_path),
+        "swift" => infer_swift_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -757,6 +758,64 @@ fn strip_dart_source_root(path: &str) -> String {
         "test/",
         "bin/",
         "web/",
+    ];
+
+    for prefix in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+
+    path.to_string()
+}
+
+/// Swift module name inference.
+///
+/// Rules:
+/// 1. Only handle `.swift` files.
+/// 2. Strip the `.swift` extension.
+/// 3. Strip common source root prefixes (`Sources/`, `src/`, `lib/`).
+/// 4. Replace path separators with dots.
+///
+/// For Swift projects (SPM/Xcode):
+/// - Within the same target, module names derive from directory structure.
+/// - Cross-target references use Framework/target names.
+///
+/// Examples:
+/// - `Sources/Models/User.swift` → `Models.User`
+/// - `src/services/auth.swift` → `services.auth`
+/// - `MyLib/Sources/Core/Engine.swift` → `Sources.Core.Engine`
+/// - `main.swift` → `main`
+fn infer_swift_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle .swift files
+    if !path.ends_with(".swift") {
+        return None;
+    }
+
+    // Strip .swift extension
+    let without_ext = &path[..path.len() - 6];
+
+    // Strip common Swift source root prefixes
+    let stripped = strip_swift_source_root(without_ext);
+
+    // Replace / with . for module convention
+    let module = stripped.replace('/', ".");
+
+    if module.is_empty() {
+        None
+    } else {
+        Some(module)
+    }
+}
+
+/// Strip common Swift source root prefixes.
+fn strip_swift_source_root(path: &str) -> String {
+    let prefixes = &[
+        "Sources/",
+        "src/",
+        "lib/",
     ];
 
     for prefix in prefixes {
@@ -1606,5 +1665,65 @@ mod tests {
             infer_module_name("lib/features/auth/data/repositories/auth_repository.dart", "dart"),
             Some("features.auth.data.repositories.auth_repository".to_string())
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Swift module name inference (Stage 13)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_swift_module_sources() {
+        assert_eq!(
+            infer_module_name("Sources/Models/User.swift", "swift"),
+            Some("Models.User".to_string())
+        );
+        assert_eq!(
+            infer_module_name("Sources/App.swift", "swift"),
+            Some("App".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_swift_module_src() {
+        assert_eq!(
+            infer_module_name("src/services/auth.swift", "swift"),
+            Some("services.auth".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_swift_module_no_prefix() {
+        assert_eq!(
+            infer_module_name("main.swift", "swift"),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            infer_module_name("Models/User.swift", "swift"),
+            Some("Models.User".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_swift_module_non_swift() {
+        assert_eq!(infer_module_name("Sources/foo.py", "swift"), None);
+        assert_eq!(infer_module_name("Sources/foo.java", "swift"), None);
+        assert_eq!(infer_module_name("Sources/foo.ts", "swift"), None);
+        assert_eq!(infer_module_name("Sources/foo.dart", "swift"), None);
+    }
+
+    #[test]
+    fn test_infer_swift_module_nested() {
+        assert_eq!(
+            infer_module_name("Sources/Features/Auth/Login.swift", "swift"),
+            Some("Features.Auth.Login".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_swift_source_root() {
+        assert_eq!(strip_swift_source_root("Sources/foo"), "foo");
+        assert_eq!(strip_swift_source_root("src/models"), "models");
+        assert_eq!(strip_swift_source_root("lib/core"), "core");
+        assert_eq!(strip_swift_source_root("no_prefix"), "no_prefix");
     }
 }
