@@ -1,6 +1,6 @@
 ﻿---
 name: flow-refactor
-description: 重构流程。现状分析 → 目标设计 → 迁移计划 → 增量重构(先确认测试基线再改代码) → 对等验证 → 同步
+description: 重构流程。现状分析 → 目标设计 → 迁移计划 → 增量重构(基线测试→重构→审查→跑测试) → 对等验证 → 同步
 ---
 
 <SUBAGENT-STOP>
@@ -12,7 +12,7 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 ## 流程
 
 ```
-① 现状分析 → ② 方案构思 → ③ 目标设计 → ④ 迁移计划 → ⑤ 增量重构 → ⑥ 对等验证 → ⑦ 同步
+① 现状分析 → ② 方案构思 → ③ 目标设计 → ④ 迁移计划 → ⑤ 增量重构(基线→重构→审查→测试) → ⑥ 对等验证 → ⑦ 同步
 ```
 
 ## ① 现状分析
@@ -57,8 +57,10 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 1. 跑现有测试确认基线（子 agent 通过 Skill 工具加载 `comp-test`）——必须 0 failures 才能开始重构
 2. 可选：涉及 UI 重构时（子 agent 通过 Skill 工具加载 `comp-frontend-ui-design`，确认设计系统）
 3. 重构代码（子 agent 通过 Skill 工具加载 `comp-implementation`）
-4. 跑测试（子 agent 通过 Skill 工具加载 `comp-test`，确保行为一致，没改坏）
-5. 进入下一个模块
+4. 代码审查（主 agent 按 comp-code-review 编排层执行三阶段并行审查）
+   审查发现问题先修再进测试——重构中的 bug 往往比新代码更隐蔽
+5. 跑测试（子 agent 通过 Skill 工具加载 `comp-test`，确保行为一致，没改坏）
+6. 进入下一个模块
 ```
 
 ## ⑥ 对等验证

@@ -1,6 +1,6 @@
 ﻿---
 name: flow-new-project
-description: 从零搭建项目。需求 → 架构 → 模块划分 → 逐模块开发 → 集成 → 部署
+description: 从零搭建项目。需求 → 架构 → 模块划分 → 逐模块开发(设计书→测试设计→编码→审查→测试执行→同步) → 集成 → 部署
 ---
 
 <SUBAGENT-STOP>
@@ -72,9 +72,11 @@ If you were dispatched as a subagent for a specific task, skip this skill.
 2. 可选：前端 UI 设计（涉及 UI 时加载 `comp-frontend-ui-design`，生成设计系统）
 3. 测试设计（子 agent 通过 Skill 工具加载 `comp-test`，设计阶段：基于设计书推导测试用例，编写测试脚本）
 4. 编码（子 agent 通过 Skill 工具加载 `comp-implementation`，以通过步骤 3 编写的测试为目标）
-5. 测试执行（子 agent 通过 Skill 工具加载 `comp-test`，执行阶段：运行测试、检查边界、确认通过）
+5. 代码审查（主 agent 按 comp-code-review 编排层执行三阶段并行审查）
+   审查发现问题先修再进测试——避免在已知有问题的代码上浪费测试时间
+6. 测试执行（子 agent 通过 Skill 工具加载 `comp-test`，执行阶段：运行测试、检查边界、确认通过）
    如测试失败：子 agent 按 comp-test 中的「先分类再行动」判定方向，不得直接改测试代码
-6. 设计书同步（子 agent 通过 Skill 工具加载 `comp-design-sync`）
+7. 设计书同步（子 agent 通过 Skill 工具加载 `comp-design-sync`）
 ```
 每模块完成后进入下一个。
 
