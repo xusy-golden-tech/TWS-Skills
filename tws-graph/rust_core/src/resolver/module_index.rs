@@ -98,6 +98,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "python" => infer_python_module(file_path),
         "typescript" | "javascript" | "tsx" | "jsx" => infer_typescript_module(file_path),
         "java" => infer_java_module(file_path),
+        "kotlin" => infer_kotlin_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -246,6 +247,60 @@ fn strip_java_source_root(path: &str) -> String {
     }
 
     // No prefix matched, return as-is
+    path.to_string()
+}
+
+/// Kotlin module name inference.
+///
+/// Rules:
+/// 1. Strip `.kt` or `.kts` extension.
+/// 2. Strip common source root prefixes (same as Java, plus `src/main/kotlin/`).
+/// 3. Replace path separators with dots.
+///
+/// Examples:
+/// - `src/main/kotlin/com/foo/bar/MyClass.kt` → `com.foo.bar.MyClass`
+/// - `src/main/java/com/foo/bar/Utils.kt` → `com.foo.bar.Utils`
+/// - `src/com/example/App.kt` → `com.example.App`
+fn infer_kotlin_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Handle .kt and .kts files
+    let without_ext = if path.ends_with(".kt") && !path.ends_with(".kts") {
+        &path[..path.len() - 3]
+    } else if path.ends_with(".kts") {
+        &path[..path.len() - 4]
+    } else {
+        return None;
+    };
+
+    // Strip common Kotlin/Java source root prefixes
+    let stripped = strip_kotlin_source_root(without_ext);
+
+    // Replace / with . to get dotted package notation
+    let module = stripped.replace('/', ".");
+    Some(module)
+}
+
+/// Strip Kotlin source root prefixes.  Kotlin can live in standard Maven/Gradle
+/// directory layouts for either `kotlin` or `java` source sets.
+fn strip_kotlin_source_root(path: &str) -> String {
+    let prefixes = &[
+        ("src/main/kotlin/", "src/main/kotlin/"),
+        ("src/test/kotlin/", "src/test/kotlin/"),
+        ("src/main/java/", "src/main/java/"),
+        ("src/test/java/", "src/test/java/"),
+        ("src/main/", "src/main/"),
+        ("src/test/", "src/test/"),
+        ("src/", "src/"),
+        ("lib/", "lib/"),
+    ];
+
+    for (_name, prefix) in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+
     path.to_string()
 }
 
@@ -414,6 +469,57 @@ mod tests {
     #[test]
     fn test_infer_typescript_module_non_ts() {
         assert_eq!(infer_module_name("src/foo.py", "typescript"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // Kotlin module name inference
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_kotlin_module_maven_src() {
+        assert_eq!(
+            infer_module_name("src/main/kotlin/com/foo/bar/MyClass.kt", "kotlin"),
+            Some("com.foo.bar.MyClass".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_kotlin_module_simple_src() {
+        assert_eq!(
+            infer_module_name("src/com/example/Utils.kt", "kotlin"),
+            Some("com.example.Utils".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_kotlin_module_test_src() {
+        assert_eq!(
+            infer_module_name("src/test/kotlin/com/foo/BarTest.kt", "kotlin"),
+            Some("com.foo.BarTest".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_kotlin_module_script_file() {
+        assert_eq!(
+            infer_module_name("src/main/kotlin/com/example/script.kts", "kotlin"),
+            Some("com.example.script".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_kotlin_module_non_kotlin() {
+        assert_eq!(infer_module_name("src/foo/bar.java", "kotlin"), None);
+        assert_eq!(infer_module_name("src/foo/bar.py", "kotlin"), None);
+    }
+
+    #[test]
+    fn test_infer_kotlin_module_in_java_src_tree() {
+        // Kotlin files can coexist in src/main/java/
+        assert_eq!(
+            infer_module_name("src/main/java/com/foo/bar/Utils.kt", "kotlin"),
+            Some("com.foo.bar.Utils".to_string())
+        );
     }
 
     #[test]

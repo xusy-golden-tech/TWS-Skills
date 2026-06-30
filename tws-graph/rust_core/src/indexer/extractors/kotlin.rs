@@ -20,7 +20,8 @@
 //! - `contains`: containment (file -> class -> method)
 //! - `extends`: class/interface inheritance (supertype_list)
 //! - `implements`: interface implementation (via delegation_specifier)
-//! - `imports`: import_header
+//! - `imports`: wildcard import (import com.foo.*)
+//! - `references`: class/function import (import com.foo.MyClass)
 
 use crate::db::hash_id;
 use crate::indexer::context::ExtractionContext;
@@ -86,17 +87,40 @@ impl Extractor for KotlinExtractor {
 
 struct Walker {
     class_stack: Vec<String>,
+    /// Map from imported simple class name to fully qualified name.
+    /// e.g. `import com.foo.bar.MyClass` populates `"MyClass" → "com.foo.bar.MyClass"`.
+    imported_names: HashMap<String, String>,
 }
 
 impl Walker {
     fn new() -> Self {
         Self {
             class_stack: Vec::new(),
+            imported_names: HashMap::new(),
         }
     }
 
     fn current_class(&self) -> Option<&str> {
         self.class_stack.last().map(|s| s.as_str())
+    }
+
+    /// Resolve a possibly-simple type name to its fully qualified form
+    /// using the imported_names map. Returns the qualified name if known,
+    /// otherwise returns the original name unchanged.
+    fn qualify_type(&self, simple_name: &str) -> String {
+        // Handle multi-segment names like "a.b.C" — try the first segment
+        if let Some(dot_pos) = simple_name.find('.') {
+            let first = &simple_name[..dot_pos];
+            if let Some(qualified) = self.imported_names.get(first) {
+                let rest = &simple_name[dot_pos + 1..];
+                return format!("{}.{}", qualified, rest);
+            }
+        }
+        // Try simple name directly
+        self.imported_names
+            .get(simple_name)
+            .cloned()
+            .unwrap_or_else(|| simple_name.to_string())
     }
 
     // ------------------------------------------------------------------
@@ -185,7 +209,7 @@ impl Walker {
             "property_declaration" => {
                 self.extract_property(source, node, ctx, parent_id)?;
             }
-            "import_header" => {
+            "import" => {
                 self.extract_import(source, node, ctx, parent_id)?;
             }
             "enum_class" => {
@@ -571,9 +595,15 @@ impl Walker {
     // ------------------------------------------------------------------
     // Import extraction
     // ------------------------------------------------------------------
+    ///
+    /// Handles three forms of Kotlin import:
+    /// 1. Class import: `import com.foo.bar.MyClass` → REFERENCES edge
+    /// 2. Wildcard import: `import com.foo.bar.*` → IMPORTS edge
+    /// 3. Alias import: `import com.foo.bar.Baz as Alias` → REFERENCES edge
+    ///    (target_text uses original path; Alias is mapped in imported_names)
 
     fn extract_import(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -581,11 +611,46 @@ impl Walker {
     ) -> anyhow::Result<()> {
         let line = node.start_position().row as u32 + 1;
 
+        // Extract the qualified_identifier path (e.g., "com.foo.bar.MyClass")
         let import_path = build_import_path_kotlin(source, node);
-        if !import_path.is_empty() && !is_kotlin_stdlib(&import_path) {
-            let target_qn = build_qualified_target(&ctx.file_path, &import_path);
-            let target = hash_id(&ctx.file_path, &target_qn);
-            ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&import_path));
+        if import_path.is_empty() {
+            return Ok(());
+        }
+
+        // Check for wildcard: unnamed child "*" is present
+        let is_wildcard = has_asterisk_kotlin(node);
+
+        // Check for alias: unnamed child "as" is present
+        let alias_name = get_alias_name(source, node);
+
+        if is_wildcard {
+            // `import com.foo.bar.*` — IMPORTS edge (package level)
+            if !is_kotlin_stdlib(&import_path) {
+                let target_qn = build_qualified_target(&ctx.file_path, &import_path);
+                let target = hash_id(&ctx.file_path, &target_qn);
+                ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&import_path));
+            }
+        } else {
+            // Class/function import: `import com.foo.bar.MyClass` or `import com.foo.bar.Baz as Alias`
+            if !is_kotlin_stdlib(&import_path) {
+                let target_qn = build_qualified_target(&ctx.file_path, &import_path);
+                let target = hash_id(&ctx.file_path, &target_qn);
+                ctx.add_edge(parent_id, &target, EdgeKind::References, line, Some(&import_path));
+
+                // Populate imported_names: simple name → fully qualified name
+                if let Some(simple_name) = import_path.rsplit('.').next() {
+                    if !simple_name.is_empty() {
+                        self.imported_names
+                            .insert(simple_name.to_string(), import_path.clone());
+                    }
+                }
+
+                // If alias present, also map the alias
+                if !alias_name.is_empty() {
+                    self.imported_names
+                        .insert(alias_name, import_path);
+                }
+            }
         }
 
         Ok(())
@@ -604,33 +669,105 @@ impl Walker {
     ) {
         let line = node.start_position().row as u32 + 1;
 
-        // supertype_list or delegation_specifier
+        // tree-sitter-kotlin-ng uses `delegation_specifiers` (plural) as the wrapper
+        // for supertype declarations. Each specifier can contain:
+        // - constructor_invocation (e.g., Base() or Base(arg))
+        // - type (e.g., just the type name)
+        // - explicit_delegation
         for i in 0..node.named_child_count() {
             if let Some(child) = node.named_child(i) {
                 match child.kind() {
+                    "delegation_specifiers" => {
+                        // delegation_specifiers contains delegation_specifier children
+                        for j in 0..child.named_child_count() {
+                            if let Some(spec) = child.named_child(j) {
+                                // Each delegation_specifier can have constructor_invocation or type
+                                for k in 0..spec.named_child_count() {
+                                    if let Some(inner) = spec.named_child(k) {
+                                        self.extract_supertype_from_node(source, inner, target_node_id, ctx, line);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     "supertype_list" | "delegation_specifier" | "super_interfaces" => {
-                        // Walk all named subtypes
+                        // Legacy / alternative grammar support
                         for j in 0..child.named_child_count() {
                             if let Some(st) = child.named_child(j) {
                                 let type_name = resolve_kotlin_type(source, st);
                                 if !type_name.is_empty() && !is_kotlin_stdlib(&type_name) {
-                                    let target_qn = build_qualified_target(&ctx.file_path, &type_name);
+                                    let qualified = self.qualify_type(&type_name);
+                                    let target_qn = build_qualified_target(&ctx.file_path, &qualified);
                                     let target = hash_id(&ctx.file_path, &target_qn);
-                                    ctx.add_edge(target_node_id, &target, EdgeKind::Extends, line, Some(&type_name));
+                                    ctx.add_edge(target_node_id, &target, EdgeKind::Extends, line, Some(&qualified));
                                 }
                             }
                         }
                     }
                     "type_identifier" | "identifier" | "user_type" | "nullable_type" => {
-                        // Direct supertype as named child of class_declaration
-                        let type_name = resolve_kotlin_type(source, child);
-                        if !type_name.is_empty() && !is_kotlin_stdlib(&type_name) {
-                            let target_qn = build_qualified_target(&ctx.file_path, &type_name);
-                            let target = hash_id(&ctx.file_path, &target_qn);
-                            ctx.add_edge(target_node_id, &target, EdgeKind::Extends, line, Some(&type_name));
+                        // Direct supertype as named child — exclude the own class name
+                        let is_name_field = node
+                            .child_by_field_name("name")
+                            .map(|n| n.id() == child.id())
+                            .unwrap_or(false);
+                        if !is_name_field {
+                            let type_name = resolve_kotlin_type(source, child);
+                            if !type_name.is_empty() && !is_kotlin_stdlib(&type_name) {
+                                let qualified = self.qualify_type(&type_name);
+                                let target_qn = build_qualified_target(&ctx.file_path, &qualified);
+                                let target = hash_id(&ctx.file_path, &target_qn);
+                                ctx.add_edge(target_node_id, &target, EdgeKind::Extends, line, Some(&qualified));
+                            }
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+    }
+
+    /// Extract a supertype name from a node inside a delegation_specifier.
+    /// Handles constructor_invocation (e.g., Base() or Base(arg)) and type nodes.
+    fn extract_supertype_from_node(
+        &self,
+        source: &[u8],
+        node: Node,
+        target_node_id: &str,
+        ctx: &mut ExtractionContext,
+        line: u32,
+    ) {
+        match node.kind() {
+            "constructor_invocation" => {
+                // constructor_invocation has named children with the user_type or type_identifier
+                for i in 0..node.named_child_count() {
+                    if let Some(child) = node.named_child(i) {
+                        let type_name = resolve_kotlin_type(source, child);
+                        if !type_name.is_empty() && !is_kotlin_stdlib(&type_name) {
+                            let qualified = self.qualify_type(&type_name);
+                            let target_qn = build_qualified_target(&ctx.file_path, &qualified);
+                            let target = hash_id(&ctx.file_path, &target_qn);
+                            ctx.add_edge(target_node_id, &target, EdgeKind::Extends, line, Some(&qualified));
+                        }
+                    }
+                }
+            }
+            "type" | "user_type" | "type_identifier" | "nullable_type" => {
+                let type_name = resolve_kotlin_type(source, node);
+                if !type_name.is_empty() && !is_kotlin_stdlib(&type_name) {
+                    let qualified = self.qualify_type(&type_name);
+                    let target_qn = build_qualified_target(&ctx.file_path, &qualified);
+                    let target = hash_id(&ctx.file_path, &target_qn);
+                    ctx.add_edge(target_node_id, &target, EdgeKind::Extends, line, Some(&qualified));
+                }
+            }
+            _ => {
+                // Try to extract type name from any node
+                let type_name = resolve_kotlin_type(source, node);
+                if !type_name.is_empty() && !is_kotlin_stdlib(&type_name) {
+                    let qualified = self.qualify_type(&type_name);
+                    let target_qn = build_qualified_target(&ctx.file_path, &qualified);
+                    let target = hash_id(&ctx.file_path, &target_qn);
+                    ctx.add_edge(target_node_id, &target, EdgeKind::Extends, line, Some(&qualified));
                 }
             }
         }
@@ -766,35 +903,81 @@ impl Walker {
     ) -> anyhow::Result<()> {
         let line = node.start_position().row as u32 + 1;
 
-        // The callee is usually a simple_identifier or navigation_expression child
+        // The callee is usually a simple_identifier or navigation_expression child.
+        // In tree-sitter-kotlin-ng, it may be wrapped in an `expression` node.
         for i in 0..node.named_child_count() {
             if let Some(child) = node.named_child(i) {
                 match child.kind() {
                     "simple_identifier" | "identifier" => {
                         let name = get_text(source, Some(child));
                         if !name.is_empty() && !is_kotlin_stdlib(&name) {
+                            let call_target_text = self.qualify_type(&name);
                             let target_qn = build_call_target(
                                 &ctx.file_path,
                                 &self.class_stack,
-                                &name,
+                                &call_target_text,
                             );
                             let target = hash_id(&ctx.file_path, &target_qn);
-                            ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&name));
+                            ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&call_target_text));
                         }
                     }
                     "navigation_expression" => {
-                        // obj.method() — extract the final method name
+                        // obj.method() — extract the full chain
                         let full = resolve_navigation_chain(source, child);
                         if !full.is_empty() {
                             let callee = full.rsplitn(2, '.').next().unwrap_or(&full);
                             if !is_kotlin_stdlib(callee) {
+                                // Qualify the first segment if it's imported
+                                let qualified_full = self.qualify_full_navigation(&full);
+                                let qualified_callee = qualified_full.rsplitn(2, '.').next().unwrap_or(&qualified_full).to_string();
                                 let target_qn = build_call_target(
                                     &ctx.file_path,
                                     &self.class_stack,
-                                    callee,
+                                    &qualified_callee,
                                 );
                                 let target = hash_id(&ctx.file_path, &target_qn);
-                                ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&full));
+                                ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&qualified_full));
+                            }
+                        }
+                    }
+                    "expression" => {
+                        // tree-sitter-kotlin-ng wraps the callee in an expression node.
+                        // Recurse into it to find navigation_expression or identifier.
+                        for j in 0..child.named_child_count() {
+                            if let Some(inner) = child.named_child(j) {
+                                match inner.kind() {
+                                    "navigation_expression" => {
+                                        let full = resolve_navigation_chain(source, inner);
+                                        if !full.is_empty() {
+                                            let callee = full.rsplitn(2, '.').next().unwrap_or(&full);
+                                            if !is_kotlin_stdlib(callee) {
+                                                let qualified_full = self.qualify_full_navigation(&full);
+                                                let qualified_callee = qualified_full.rsplitn(2, '.').next().unwrap_or(&qualified_full).to_string();
+                                                let target_qn = build_call_target(
+                                                    &ctx.file_path,
+                                                    &self.class_stack,
+                                                    &qualified_callee,
+                                                );
+                                                let target = hash_id(&ctx.file_path, &target_qn);
+                                                ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&qualified_full));
+                                            }
+                                        }
+                                    }
+                                    "identifier" | "simple_identifier" => {
+                                        let name = get_text(source, Some(inner));
+                                        if !name.is_empty() && !is_kotlin_stdlib(&name) {
+                                            let call_target_text = self.qualify_type(&name);
+                                            let target_qn = build_call_target(
+                                                &ctx.file_path,
+                                                &self.class_stack,
+                                                &call_target_text,
+                                            );
+                                            let target = hash_id(&ctx.file_path, &target_qn);
+                                            ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&call_target_text));
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                     }
@@ -807,6 +990,19 @@ impl Walker {
         }
 
         Ok(())
+    }
+
+    /// Qualify a full navigation chain like "obj.method()" by resolving
+    /// the first segment through imported_names.
+    fn qualify_full_navigation(&self, full: &str) -> String {
+        if let Some(dot_pos) = full.find('.') {
+            let first = &full[..dot_pos];
+            let rest = &full[dot_pos + 1..];
+            if let Some(qualified) = self.imported_names.get(first) {
+                return format!("{}.{}", qualified, rest);
+            }
+        }
+        full.to_string()
     }
 }
 
@@ -896,8 +1092,27 @@ fn resolve_kotlin_type(source: &[u8], node: Node) -> String {
     }
 }
 
-/// Build import path from import_header node.
+/// Build import path from import node.
+/// In tree-sitter-kotlin-ng, the import node contains a qualified_identifier
+/// whose children are identifier nodes forming the dotted path.
 fn build_import_path_kotlin(source: &[u8], node: Node) -> String {
+    // Find the qualified_identifier child
+    for i in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(i) {
+            if child.kind() == "qualified_identifier" {
+                let mut parts: Vec<String> = Vec::new();
+                for j in 0..child.named_child_count() {
+                    if let Some(id) = child.named_child(j) {
+                        if id.kind() == "identifier" || id.kind() == "simple_identifier" {
+                            parts.push(get_text(source, Some(id)));
+                        }
+                    }
+                }
+                return parts.join(".");
+            }
+        }
+    }
+    // Fallback: collect identifier/simple_identifier directly
     let mut parts: Vec<String> = Vec::new();
     for i in 0..node.named_child_count() {
         if let Some(child) = node.named_child(i) {
@@ -912,61 +1127,183 @@ fn build_import_path_kotlin(source: &[u8], node: Node) -> String {
     parts.join(".")
 }
 
-/// Resolve a navigation_expression chain like `obj.property.method()`.
-fn resolve_navigation_chain(source: &[u8], node: Node) -> String {
-    let mut parts: Vec<String> = Vec::new();
+/// Check if an import node has an asterisk (wildcard import).
+fn has_asterisk_kotlin(node: Node) -> bool {
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if !child.is_named() && child.kind() == "*" {
+                return true;
+            }
+        }
+    }
+    false
+}
 
-    match node.kind() {
-        "simple_identifier" | "identifier" => return get_text(source, Some(node)),
-        "navigation_expression" => {
-            // Find the navigation_suffix which contains simple_identifier
-            for i in 0..node.named_child_count() {
-                if let Some(child) = node.named_child(i) {
-                    if child.kind() == "navigation_suffix" {
-                        for j in 0..child.named_child_count() {
-                            if let Some(sub) = child.named_child(j) {
-                                if sub.kind() == "simple_identifier" || sub.kind() == "identifier" {
-                                    parts.push(get_text(source, Some(sub)));
-                                }
-                            }
-                        }
-                    }
+/// Get the alias name from an import with `as` keyword.
+/// e.g. `import com.foo.bar.Baz as Alias` → "Alias"
+fn get_alias_name(source: &[u8], node: Node) -> String {
+    // Check if there's an unnamed "as" child
+    let mut has_as = false;
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if !child.is_named() {
+                if child.kind() == "as" {
+                    has_as = true;
                 }
             }
-            // Recurse into the expression part
-            for i in 0..node.named_child_count() {
-                if let Some(child) = node.named_child(i) {
-                    match child.kind() {
-                        "simple_identifier" | "identifier" => {
-                            parts.push(get_text(source, Some(child)));
-                        }
-                        "navigation_expression" => {
-                            parts.push(resolve_navigation_chain(source, child));
-                        }
-                        "call_expression" => {
-                            // Intermediate call in chain
-                            let mut call_parts = Vec::new();
-                            for j in 0..child.named_child_count() {
-                                if let Some(sub) = child.named_child(j) {
-                                    if sub.kind() == "simple_identifier" || sub.kind() == "identifier" {
-                                        call_parts.push(format!("{}()", get_text(source, Some(sub))));
-                                    }
-                                }
-                            }
-                            if !call_parts.is_empty() {
-                                parts.push(call_parts.join(""));
-                            }
-                        }
-                        _ => {}
+        }
+    }
+    if !has_as {
+        return String::new();
+    }
+    // Find the named identifier child (the alias name)
+    // In tree-sitter-kotlin-ng: import qualified_identifier "as" identifier
+    for i in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(i) {
+            if child.kind() == "identifier" || child.kind() == "simple_identifier" {
+                let text = get_text(source, Some(child));
+                // Skip the qualified_identifier (it's also named)
+                if child.kind() == "identifier" && text != get_text(source, node.named_child(0)) {
+                    // This is the alias — it follows the qualified_identifier
+                    // Check if it's not the first named child (which is the qualified_identifier)
+                    if !is_qualified_identifier_child(source, node, child) {
+                        return text;
                     }
                 }
             }
         }
-        _ => return get_text(source, Some(node)),
     }
+    String::new()
+}
 
-    parts.reverse();
-    parts.join(".")
+/// Check if a given child node is the qualified_identifier child of the import node.
+fn is_qualified_identifier_child(_source: &[u8], parent: Node, target: Node) -> bool {
+    // The first named child should be the qualified_identifier
+    if let Some(first) = parent.named_child(0) {
+        if first.kind() == "qualified_identifier" {
+            // qualified_identifier contains identifier children
+            for i in 0..first.named_child_count() {
+                if let Some(id_child) = first.named_child(i) {
+                    if id_child.id() == target.id() {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+    false
+}
+
+/// Resolve a navigation_expression chain like `obj.property.method()`.
+///
+/// tree-sitter-kotlin-ng models navigation_expression with children:
+/// [expression, identifier] — where the first element is the receiver (left side)
+/// and following identifier elements are the accessed properties (right side).
+/// For simple chains like `Utils.helper`, both children are identifiers.
+fn resolve_navigation_chain(source: &[u8], node: Node) -> String {
+    match node.kind() {
+        "simple_identifier" | "identifier" => return get_text(source, Some(node)),
+        "navigation_expression" => {
+            let mut receiver_parts: Vec<String> = Vec::new();
+            let mut property_parts: Vec<String> = Vec::new();
+
+            for i in 0..node.named_child_count() {
+                if let Some(child) = node.named_child(i) {
+                    match child.kind() {
+                        "identifier" | "simple_identifier" => {
+                            // First identifier is the receiver; subsequent ones are properties
+                            if receiver_parts.is_empty() {
+                                receiver_parts.push(get_text(source, Some(child)));
+                            } else {
+                                property_parts.push(get_text(source, Some(child)));
+                            }
+                        }
+                        "navigation_expression" => {
+                            // Nested navigation — entire sub-chain becomes the receiver
+                            receiver_parts.push(resolve_navigation_chain(source, child));
+                        }
+                        "call_expression" => {
+                            // Method call on object — extract method name for the receiver
+                            let mut call_text = String::new();
+                            for j in 0..child.named_child_count() {
+                                if let Some(sub) = child.named_child(j) {
+                                    if sub.kind() == "simple_identifier" || sub.kind() == "identifier" {
+                                        call_text = format!("{}()", get_text(source, Some(sub)));
+                                    }
+                                }
+                            }
+                            if !call_text.is_empty() {
+                                receiver_parts.push(call_text);
+                            }
+                        }
+                        "expression" => {
+                            // Expression wrapping a receiver
+                            let text = resolve_expression_chain(source, child);
+                            if !text.is_empty() && receiver_parts.is_empty() {
+                                receiver_parts.push(text);
+                            }
+                        }
+                        _ => {
+                            // Try as generic identifier
+                            let text = resolve_expression_chain(source, child);
+                            if !text.is_empty() {
+                                if receiver_parts.is_empty() {
+                                    receiver_parts.push(text);
+                                } else {
+                                    property_parts.push(text);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let receiver = receiver_parts.join(".");
+            let property = property_parts.join(".");
+
+            if receiver.is_empty() {
+                property
+            } else if property.is_empty() {
+                receiver
+            } else {
+                format!("{}.{}", receiver, property)
+            }
+        }
+        _ => get_text(source, Some(node)),
+    }
+}
+
+/// Resolve an expression child to its text representation.
+/// Recurses into nested expressions (identifier, navigation_expression, call_expression).
+fn resolve_expression_chain(source: &[u8], node: Node) -> String {
+    match node.kind() {
+        "identifier" | "simple_identifier" => get_text(source, Some(node)),
+        "navigation_expression" => resolve_navigation_chain(source, node),
+        "call_expression" => {
+            // Extract method name from call expression
+            for i in 0..node.named_child_count() {
+                if let Some(child) = node.named_child(i) {
+                    if child.kind() == "simple_identifier" || child.kind() == "identifier" {
+                        return get_text(source, Some(child));
+                    }
+                }
+            }
+            get_text(source, Some(node))
+        }
+        _ => {
+            // Try named children for identifier
+            for i in 0..node.named_child_count() {
+                if let Some(child) = node.named_child(i) {
+                    let text = resolve_expression_chain(source, child);
+                    if !text.is_empty() {
+                        return text;
+                    }
+                }
+            }
+            get_text(source, Some(node))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1292,35 +1629,155 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Import statements (NB: tree-sitter-kotlin-ng uses "import" node kind
-    // but the extractor currently matches "import_header" — imports are
-    // NOT captured. These tests verify the file+class exist without error.)
+    // Import statement extraction (enhanced in v7.3.0)
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_extract_file_with_imports() {
+    fn test_extract_class_import_creates_references_edge() {
         let ctx = extract(
-            "package com.example\n\nimport com.example.foo.Bar\nimport com.example.baz.Qux\n\nclass Foo {}\n",
-            "src/Foo.kt",
+            "package com.example\n\nimport com.foo.bar.MyClass\n\nclass App {}\n",
+            "src/com/example/App.kt",
         );
-        // Verify file + class exist; imports are not captured due to node kind mismatch
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 1, "Expected 1 REFERENCES edge for class import");
+        assert_eq!(
+            refs[0].target_text.as_deref().unwrap_or(""),
+            "com.foo.bar.MyClass"
+        );
+
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        assert_eq!(imports.len(), 0, "No IMPORTS edge for class import (uses REFERENCES)");
+
         let classes = find_nodes(&ctx, NodeKind::Class);
         assert_eq!(classes.len(), 1);
-        assert_eq!(classes[0].name, "Foo");
-        let files = find_nodes(&ctx, NodeKind::File);
-        assert_eq!(files.len(), 1);
     }
 
     #[test]
-    fn test_extract_with_import_no_crash() {
+    fn test_extract_multiple_class_imports_create_references_edges() {
         let ctx = extract(
-            "package com.example\n\nimport kotlin.collections.List\nimport com.example.MyClass\n\nclass Foo {}\n",
-            "src/Foo.kt",
+            "package com.example\n\nimport com.foo.bar.MyClass\nimport com.foo.baz.OtherClass\n\nclass App {}\n",
+            "src/com/example/App.kt",
         );
-        // Just verify no crash
-        let classes = find_nodes(&ctx, NodeKind::Class);
-        assert_eq!(classes.len(), 1);
-        assert_eq!(classes[0].name, "Foo");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 2, "Expected 2 REFERENCES edges");
+        let targets: Vec<&str> = refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(targets.contains(&"com.foo.bar.MyClass"));
+        assert!(targets.contains(&"com.foo.baz.OtherClass"));
+    }
+
+    #[test]
+    fn test_extract_wildcard_import_creates_imports_edge() {
+        let ctx = extract(
+            "package com.example\n\nimport com.foo.bar.*\n\nclass App {}\n",
+            "src/com/example/App.kt",
+        );
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        assert_eq!(imports.len(), 1, "Expected 1 IMPORTS edge for wildcard import");
+        assert_eq!(
+            imports[0].target_text.as_deref().unwrap_or(""),
+            "com.foo.bar"
+        );
+
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 0, "No REFERENCES edge for wildcard import");
+    }
+
+    #[test]
+    fn test_extract_alias_import_creates_references_edge() {
+        let ctx = extract(
+            "package com.example\n\nimport com.foo.bar.MyClass as AliasClass\n\nclass App {}\n",
+            "src/com/example/App.kt",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 1, "Expected 1 REFERENCES edge for alias import");
+        assert_eq!(
+            refs[0].target_text.as_deref().unwrap_or(""),
+            "com.foo.bar.MyClass",
+            "Target text should be original path (not alias)"
+        );
+    }
+
+    #[test]
+    fn test_extract_imported_call_uses_qualified_target_text() {
+        // Test that an imported class name qualifies call targets.
+        // When Utils is imported from com.foo.Utils, calls to Utils.helper()
+        // should use the qualified name in target_text.
+        let ctx = extract(
+            "package com.example\n\nimport com.foo.Utils\n\nclass App {\n    fun doWork() {\n        Utils.helper()\n    }\n}\n",
+            "src/com/example/App.kt",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        // There should be at least one call edge
+        assert!(!calls.is_empty(), "Expected call edges for Utils.helper()");
+        let targets: Vec<&str> = calls.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        // The target_text should contain the qualified import path
+        assert!(
+            targets.iter().any(|t| t.contains("com.foo")),
+            "Expected qualified call target_text containing 'com.foo': {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_extract_stdlib_import_not_recorded() {
+        let ctx = extract(
+            "package com.example\n\nimport kotlin.collections.List\nimport com.example.MyClass\n\nclass App {}\n",
+            "src/com/example/App.kt",
+        );
+        // kotlin.collections.List is stdlib → filtered
+        // com.example.MyClass is project → REFERENCES
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 1, "Only 1 REFERENCES edge (not stdlib)");
+        assert_eq!(
+            refs[0].target_text.as_deref().unwrap_or(""),
+            "com.example.MyClass"
+        );
+    }
+
+    #[test]
+    fn test_extract_supertype_uses_qualified_name() {
+        let ctx = extract(
+            "package com.example\n\nimport com.foo.BaseModel\n\nclass MyModel : BaseModel() {}\n",
+            "src/com/example/MyModel.kt",
+        );
+        let extends = find_edges(&ctx, EdgeKind::Extends);
+        let targets: Vec<&str> = extends.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(
+            targets.iter().any(|t| *t == "com.foo.BaseModel"),
+            "Expected qualified supertype name: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_extract_top_level_function_import_is_call() {
+        // Kotlin allows importing top-level functions.
+        // `import com.foo.HelpersKt.helper` creates REFERENCES edge and
+        // populates imported_names["helper"] = "com.foo.HelpersKt.helper".
+        // When `helper()` is called, qualify_type resolves it to the qualified name.
+        let ctx = extract(
+            "package com.example\n\nimport com.foo.HelpersKt.helper\n\nclass App {\n    fun doWork() {\n        helper()\n    }\n}\n",
+            "src/com/example/App.kt",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(
+            targets.iter().any(|t| t.contains("com.foo")),
+            "Expected qualified call target for imported top-level function: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_extract_import_with_semicolon() {
+        // Kotlin allows optional semicolons after imports
+        let ctx = extract(
+            "package com.example\n\nimport com.foo.bar.MyClass;\n\nclass App {}\n",
+            "src/com/example/App.kt",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 1, "Expected 1 REFERENCES edge");
+        assert_eq!(
+            refs[0].target_text.as_deref().unwrap_or(""),
+            "com.foo.bar.MyClass"
+        );
     }
 
     // ------------------------------------------------------------------

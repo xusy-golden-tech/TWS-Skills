@@ -19,13 +19,14 @@ impl LanguageRegistry {
             "python" => Some(Box::new(PythonResolver)),
             "typescript" | "javascript" | "tsx" | "jsx" => Some(Box::new(TypeScriptResolver)),
             "java" => Some(Box::new(JavaResolver)),
+            "kotlin" => Some(Box::new(KotlinResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java"]
+        vec!["python", "typescript", "javascript", "java", "kotlin"]
     }
 }
 
@@ -496,6 +497,137 @@ pub fn is_java_external(module_name: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Kotlin module resolver
+// ---------------------------------------------------------------------------
+
+/// Kotlin module resolver.
+///
+/// Uses the same JVM package conventions as Java:
+/// - `import com.foo.bar.MyClass` → module = `com.foo.bar.MyClass` → file = `com/foo/bar/MyClass.kt`
+/// - `import com.foo.bar.*` → module = `com.foo.bar` → files = `com/foo/bar/*.kt`
+/// - ModuleIndex lookup: dotted package.declaration → file_path mapping
+/// - Source root prefixes: `src/main/kotlin/`, `src/main/java/`, `src/test/kotlin/`, etc.
+///
+/// Kotlin files can coexist with Java in the same source tree; known stdlib
+/// and third-party JVM packages are classified as external.
+pub struct KotlinResolver;
+
+impl ModuleResolver for KotlinResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        _source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        // 1. Direct ModuleIndex lookup
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Try removing the class/function name to get package name
+        if let Some(last_dot) = module_name.rfind('.') {
+            let package_name = &module_name[..last_dot];
+            let class_name = &module_name[last_dot + 1..];
+
+            // Look up the package in ModuleIndex
+            if let Some(files) = module_index.lookup(package_name) {
+                return files.clone();
+            }
+
+            // 3. Try standard source root prefixes (Maven/Gradle conventions)
+            let package_path = package_name.replace('.', "/");
+            let candidates = vec![
+                format!("src/main/kotlin/{}/{}.kt", package_path, class_name),
+                format!("src/test/kotlin/{}/{}.kt", package_path, class_name),
+                format!("src/main/java/{}/{}.kt", package_path, class_name),
+                format!("src/test/java/{}/{}.kt", package_path, class_name),
+                format!("src/{}/{}.kt", package_path, class_name),
+            ];
+
+            let mut result = Vec::new();
+            for candidate in &candidates {
+                if let Some(files) = module_index.lookup(candidate) {
+                    result.extend(files.clone());
+                }
+            }
+
+            // Also try as dotted name
+            for candidate in &candidates {
+                let dotted = candidate.replace('/', ".").trim_end_matches(".kt").to_string();
+                if let Some(files) = module_index.lookup(&dotted) {
+                    result.extend(files.clone());
+                }
+            }
+
+            if !result.is_empty() {
+                return result;
+            }
+
+            return candidates;
+        }
+
+        // 4. Handle package-only module_name (from wildcard imports)
+        let package_path = module_name.replace('.', "/");
+        let candidates = vec![
+            format!("src/main/kotlin/{}", package_path),
+            format!("src/test/kotlin/{}", package_path),
+            format!("src/main/java/{}", package_path),
+            format!("src/test/java/{}", package_path),
+            format!("src/{}", package_path),
+        ];
+
+        // Try ModuleIndex lookup with various prefixes
+        for prefix in &["src.main.kotlin.", "src.test.kotlin.", "src.main.java.", "src.test.java.", "src."] {
+            let with_prefix = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&with_prefix) {
+                return files.clone();
+            }
+        }
+
+        candidates
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "kotlin")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_kotlin_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "kotlin"
+    }
+}
+
+/// Check if a module name is a known Kotlin/JVM standard library or common
+/// third-party framework.  Kotlin shares the JVM ecosystem so this is
+/// identical to Java's `is_java_external`, plus Kotlin stdlib prefixes.
+pub fn is_kotlin_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    // Kotlin-specific stdlib prefixes
+    let kotlin_prefixes: &[&str] = &[
+        "kotlin.", "kotlinx.", "android.", "androidx.",
+    ];
+    for prefix in kotlin_prefixes {
+        if module_name.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    // All Java stdlib / third-party prefixes also apply to Kotlin
+    is_java_external(module_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -759,5 +891,116 @@ mod tests {
     fn test_java_resolver_empty_module_name() {
         let resolver = JavaResolver;
         assert!(!resolver.is_external(""));
+    }
+
+    // ------------------------------------------------------------------
+    // Kotlin resolver tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_kotlin_resolver_is_external_stdlib() {
+        let resolver = KotlinResolver;
+        assert!(resolver.is_external("kotlin.collections.List"));
+        assert!(resolver.is_external("kotlinx.coroutines.flow.Flow"));
+        assert!(resolver.is_external("java.util.ArrayList"));
+        assert!(resolver.is_external("javax.servlet.http.HttpServlet"));
+    }
+
+    #[test]
+    fn test_kotlin_resolver_is_external_third_party() {
+        let resolver = KotlinResolver;
+        assert!(resolver.is_external("org.springframework.boot.Application"));
+        assert!(resolver.is_external("com.google.common.collect.Lists"));
+        assert!(resolver.is_external("org.jetbrains.kotlin.idea"));
+    }
+
+    #[test]
+    fn test_kotlin_resolver_is_external_android() {
+        let resolver = KotlinResolver;
+        assert!(resolver.is_external("android.widget.TextView"));
+        assert!(resolver.is_external("androidx.compose.ui.Modifier"));
+    }
+
+    #[test]
+    fn test_kotlin_resolver_not_external_project_package() {
+        let resolver = KotlinResolver;
+        assert!(!resolver.is_external("com.mycompany.myapp.MyClass"));
+        assert!(!resolver.is_external("myapp.utils.Helper"));
+        assert!(!resolver.is_external("com.example.internal.Module"));
+    }
+
+    #[test]
+    fn test_kotlin_resolver_language() {
+        let resolver = KotlinResolver;
+        assert_eq!(resolver.language(), "kotlin");
+    }
+
+    #[test]
+    fn test_kotlin_resolver_file_to_module_name() {
+        let resolver = KotlinResolver;
+        assert_eq!(
+            resolver.file_to_module_name(
+                "src/main/kotlin/com/foo/bar/MyClass.kt",
+                Path::new(".")
+            ),
+            Some("com.foo.bar.MyClass".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name(
+                "src/main/java/com/foo/bar/MyClass.kt",
+                Path::new(".")
+            ),
+            Some("com.foo.bar.MyClass".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name(
+                "src/com/example/Utils.kt",
+                Path::new(".")
+            ),
+            Some("com.example.Utils".to_string())
+        );
+    }
+
+    #[test]
+    fn test_kotlin_resolver_resolve_module_with_class() {
+        let resolver = KotlinResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "com.foo.bar.MyClass",
+            "src/main/kotlin/com/foo/bar/MyClass.kt",
+            Path::new("."),
+            &index,
+        );
+        assert!(!candidates.is_empty());
+        assert!(candidates.contains(
+            &"src/main/kotlin/com/foo/bar/MyClass.kt".to_string()
+        ));
+    }
+
+    #[test]
+    fn test_language_registry_get_kotlin() {
+        let r = LanguageRegistry::get("kotlin");
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().language(), "kotlin");
+    }
+
+    #[test]
+    fn test_supported_languages_includes_kotlin() {
+        let langs = LanguageRegistry::supported_languages();
+        assert!(langs.contains(&"kotlin"));
+    }
+
+    #[test]
+    fn test_kotlin_resolver_empty_module_name() {
+        let resolver = KotlinResolver;
+        assert!(!resolver.is_external(""));
+    }
+
+    #[test]
+    fn test_is_kotlin_external_stdlib_prefixes() {
+        assert!(is_kotlin_external("kotlin.io.path.ExperimentalPathApi"));
+        assert!(is_kotlin_external("kotlinx.serialization.Serializable"));
+        assert!(is_kotlin_external("android.os.Bundle"));
+        assert!(is_kotlin_external("androidx.lifecycle.ViewModel"));
     }
 }
