@@ -147,11 +147,14 @@ pub(crate) fn compile_glob(raw: &str) -> Result<Vec<glob::Pattern>, anyhow::Erro
         let contents = glob::Pattern::new(&format!("**/{}/**", s))?;
         Ok(vec![entry, contents])
     } else {
-        // Full-path pattern: use as-is, plus a directory-contents
-        // variant so that "src/foo" also matches "src/foo/bar/baz.py".
+        // Full-path pattern: use as-is, plus directory-contents variant,
+        // plus a **/-prefixed variant so that "plugins/foo" also matches
+        // "g_assistant_backend/plugins/foo/bar.py" (subpath matching).
         let exact = glob::Pattern::new(s)?;
         let contents = glob::Pattern::new(&format!("{}/**", s))?;
-        Ok(vec![exact, contents])
+        let subpath = glob::Pattern::new(&format!("**/{}", s))?;
+        let subpath_contents = glob::Pattern::new(&format!("**/{}/**", s))?;
+        Ok(vec![exact, contents, subpath, subpath_contents])
     }
 }
 

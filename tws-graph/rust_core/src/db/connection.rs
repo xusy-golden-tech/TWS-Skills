@@ -155,7 +155,10 @@ impl Database {
     /// behaviour of Python's `_build_fts_query()` exactly, avoiding the
     /// case-sensitive exact-phrase behaviour of FTS5 double-quoting.
     pub fn fts5_escape_query(text: &str) -> String {
+        // Replace `|` with ` OR ` — users often write `foo|bar` for OR
+        let text = text.replace('|', " OR ");
         let terms: Vec<&str> = text.split_whitespace().collect();
+        const KEYWORDS: &[&str] = &["AND", "OR", "NOT"];
         let escaped: Vec<String> = terms
             .into_iter()
             .filter_map(|t| {
@@ -170,6 +173,9 @@ impl Database {
                 let t = t.replace('"', "\"\"");
                 if t.is_empty() {
                     None
+                } else if KEYWORDS.contains(&t.as_str()) {
+                    // Don't add * to FTS5 boolean operators
+                    Some(t)
                 } else {
                     // Prefix match: `term*` triggers FTS5 prefix queries.
                     Some(format!("{}*", t))
@@ -180,7 +186,7 @@ impl Database {
             // If all terms were filtered out, return the original (sanitized)
             text.replace('"', "\"\"")
         } else {
-            escaped.join(" AND ")
+            escaped.join(" ")
         }
     }
 

@@ -552,7 +552,28 @@ def search(
       tws-graph search tax --semantic --limit 10
       tws-graph search auth --semantic --weights '{"BM25":2.0}'
     """
-    query_str = " ".join(query)
+    # Sanitize: bash glob expansion on Windows may expand quoted
+    # --include patterns into positional args, polluting the query with
+    # file paths that contain backslashes (which break FTS5).
+    real_terms = []
+    leaked_paths = []
+    for t in query:
+        # qualifier terms (kind:, lang:, path:) are legitimate query syntax
+        if t.startswith(("kind:", "lang:", "path:")):
+            real_terms.append(t)
+            continue
+        # terms containing path separators are likely shell-expanded globs
+        if "/" in t or "\\" in t:
+            leaked_paths.append(t)
+        else:
+            real_terms.append(t)
+
+    if leaked_paths:
+        inc = list(include_paths) if include_paths else []
+        inc.extend(leaked_paths)
+        include_paths = inc
+
+    query_str = " ".join(real_terms)
 
     # ------------------------------------------------------------------
     # Semantic search path
