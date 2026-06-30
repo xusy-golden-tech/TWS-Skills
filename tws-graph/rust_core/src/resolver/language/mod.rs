@@ -18,13 +18,14 @@ impl LanguageRegistry {
         match language {
             "python" => Some(Box::new(PythonResolver)),
             "typescript" | "javascript" | "tsx" | "jsx" => Some(Box::new(TypeScriptResolver)),
+            "java" => Some(Box::new(JavaResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript"]
+        vec!["python", "typescript", "javascript", "java"]
     }
 }
 
@@ -349,6 +350,152 @@ fn simplify_ts_path(path: &str) -> String {
     result.join("/")
 }
 
+// ---------------------------------------------------------------------------
+// Java module resolver
+// ---------------------------------------------------------------------------
+
+/// Java module resolver.
+///
+/// Uses Java package conventions:
+/// - `import com.foo.bar.MyClass;` → module = `com.foo.bar.MyClass` → file = `com/foo/bar/MyClass.java`
+/// - `import com.foo.bar.*;` → module = `com.foo.bar` → files = `com/foo/bar/*.java`
+/// - ModuleIndex lookup: dotted package.declaration → file_path mapping
+/// - Source root prefixes: `src/main/java/`, `src/test/java/`, `src/`
+pub struct JavaResolver;
+
+impl ModuleResolver for JavaResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        _source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        // 1. Direct ModuleIndex lookup (module_name as dotted package)
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Try removing the class name (last dot-segment) to get package name
+        // e.g., "com.foo.bar.MyClass" → module_name "com.foo.bar"
+        if let Some(last_dot) = module_name.rfind('.') {
+            let package_name = &module_name[..last_dot];
+            let class_name = &module_name[last_dot + 1..];
+
+            // Look up the package in ModuleIndex
+            if let Some(files) = module_index.lookup(package_name) {
+                return files.clone();
+            }
+
+            // 3. Try standard source root prefixes (Maven/Gradle conventions)
+            // Convert package to path: com/foo/bar → look for files
+            let package_path = package_name.replace('.', "/");
+            let candidates = vec![
+                format!("src/main/java/{}/{}.java", package_path, class_name),
+                format!("src/test/java/{}/{}.java", package_path, class_name),
+                format!("src/{}/{}.java", package_path, class_name),
+            ];
+
+            let mut result = Vec::new();
+            for candidate in &candidates {
+                if let Some(files) = module_index.lookup(candidate) {
+                    result.extend(files.clone());
+                }
+            }
+
+            // Add candidates as potential file paths even if not in index
+            // (the resolver will check if they actually exist)
+            for candidate in &candidates {
+                let dotted = candidate.replace('/', ".").trim_end_matches(".java").to_string();
+                if let Some(files) = module_index.lookup(&dotted) {
+                    result.extend(files.clone());
+                }
+            }
+
+            if !result.is_empty() {
+                return result;
+            }
+
+            // Return candidate paths for further matching
+            return candidates;
+        }
+
+        // 4. Handle package-only module_name (from wildcard imports)
+        let package_path = module_name.replace('.', "/");
+        let candidates = vec![
+            format!("src/main/java/{}", package_path),
+            format!("src/test/java/{}", package_path),
+            format!("src/{}", package_path),
+        ];
+
+        // Try ModuleIndex lookup with various prefixes
+        for prefix in &["src.main.java.", "src.test.java.", "src."] {
+            let with_prefix = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&with_prefix) {
+                return files.clone();
+            }
+        }
+
+        candidates
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "java")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_java_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "java"
+    }
+}
+
+/// Check if a module name is a known Java standard library or common
+/// third-party framework.
+///
+/// A module is considered external if it starts with a Java stdlib prefix
+/// or a known third-party framework prefix.
+pub fn is_java_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    // Java standard library / JDK internal prefixes (full prefix matching)
+    let stdlib_prefixes: &[&str] = &[
+        "java.", "javax.", "jakarta.", "org.w3c.", "org.xml.", "org.omg.",
+        "org.ietf.", "com.sun.", "sun.",
+    ];
+    for prefix in stdlib_prefixes {
+        if module_name.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    // Common third-party frameworks
+    let third_party_prefixes: &[&str] = &[
+        "org.springframework.", "org.hibernate.", "org.apache.", "org.junit.",
+        "org.slf4j.", "org.mockito.", "org.assertj.", "org.testng.",
+        "org.eclipse.", "org.jetbrains.", "org.jboss.", "org.glassfish.",
+        "com.google.", "com.fasterxml.", "io.netty.", "io.grpc.",
+        "ch.qos.logback.", "lombok.", "javax.persistence.",
+        "reactor.", "reactor.core.", "kafka.", "redis.clients.",
+    ];
+
+    for prefix in third_party_prefixes {
+        if module_name.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,5 +676,88 @@ mod tests {
         assert!(files.contains(&"src/utils/index.ts".to_string()));
         // Should be ordered with direct files first, then index files
         assert_eq!(files[0], "src/utils.ts");
+    }
+
+    // ------------------------------------------------------------------
+    // Java resolver tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_java_resolver_is_external_stdlib() {
+        let resolver = JavaResolver;
+        assert!(resolver.is_external("java.util.List"));
+        assert!(resolver.is_external("javax.servlet.http.HttpServlet"));
+        assert!(resolver.is_external("com.sun.management"));
+    }
+
+    #[test]
+    fn test_java_resolver_is_external_third_party() {
+        let resolver = JavaResolver;
+        assert!(resolver.is_external("org.springframework.boot.Application"));
+        assert!(resolver.is_external("com.google.common.collect.Lists"));
+        assert!(resolver.is_external("org.apache.commons.lang3.StringUtils"));
+        assert!(resolver.is_external("org.junit.jupiter.api.Test"));
+    }
+
+    #[test]
+    fn test_java_resolver_not_external_project_package() {
+        let resolver = JavaResolver;
+        assert!(!resolver.is_external("com.mycompany.myproject.MyClass"));
+        assert!(!resolver.is_external("myapp.utils.Helper"));
+        assert!(!resolver.is_external("com.example.internal.Module"));
+    }
+
+    #[test]
+    fn test_java_resolver_language() {
+        let resolver = JavaResolver;
+        assert_eq!(resolver.language(), "java");
+    }
+
+    #[test]
+    fn test_java_resolver_file_to_module_name() {
+        let resolver = JavaResolver;
+        assert_eq!(
+            resolver.file_to_module_name(
+                "src/main/java/com/foo/bar/MyClass.java",
+                Path::new(".")
+            ),
+            Some("com.foo.bar.MyClass".to_string())
+        );
+    }
+
+    #[test]
+    fn test_java_resolver_resolve_module_with_class() {
+        let resolver = JavaResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "com.foo.bar.MyClass",
+            "src/main/java/com/foo/bar/MyClass.java",
+            Path::new("."),
+            &index,
+        );
+        // Should return candidate file paths
+        assert!(!candidates.is_empty());
+        assert!(candidates.contains(
+            &"src/main/java/com/foo/bar/MyClass.java".to_string()
+        ));
+    }
+
+    #[test]
+    fn test_language_registry_get_java() {
+        let r = LanguageRegistry::get("java");
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().language(), "java");
+    }
+
+    #[test]
+    fn test_supported_languages_includes_java() {
+        let langs = LanguageRegistry::supported_languages();
+        assert!(langs.contains(&"java"));
+    }
+
+    #[test]
+    fn test_java_resolver_empty_module_name() {
+        let resolver = JavaResolver;
+        assert!(!resolver.is_external(""));
     }
 }

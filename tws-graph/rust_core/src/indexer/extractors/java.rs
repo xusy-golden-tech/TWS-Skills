@@ -92,17 +92,41 @@ impl Extractor for JavaExtractor {
 
 struct Walker {
     class_stack: Vec<String>,
+    /// Map from imported simple class name to fully qualified name.
+    /// e.g. `import com.foo.bar.MyClass;` populates `"MyClass" → "com.foo.bar.MyClass"`.
+    /// e.g. `import static com.foo.bar.Utils.helper;` populates `"helper" → "com.foo.bar.Utils.helper"`.
+    imported_names: HashMap<String, String>,
 }
 
 impl Walker {
     fn new() -> Self {
         Self {
             class_stack: Vec::new(),
+            imported_names: HashMap::new(),
         }
     }
 
     fn current_class(&self) -> Option<&str> {
         self.class_stack.last().map(|s| s.as_str())
+    }
+
+    /// Resolve a possibly-simple type name to its fully qualified form
+    /// using the imported_names map. Returns the qualified name if known,
+    /// otherwise returns the original name unchanged.
+    fn qualify_type(&self, simple_name: &str) -> String {
+        // Handle multi-segment names like "a.b.C" — try the first segment
+        if let Some(dot_pos) = simple_name.find('.') {
+            let first = &simple_name[..dot_pos];
+            if let Some(qualified) = self.imported_names.get(first) {
+                let rest = &simple_name[dot_pos + 1..];
+                return format!("{}.{}", qualified, rest);
+            }
+        }
+        // Try simple name directly
+        self.imported_names
+            .get(simple_name)
+            .cloned()
+            .unwrap_or_else(|| simple_name.to_string())
     }
 
     // ------------------------------------------------------------------
@@ -278,9 +302,10 @@ impl Walker {
                 if let Some(sc) = superclass.named_child(i) {
                     let type_name = resolve_type_name(source, sc);
                     if !type_name.is_empty() && !is_java_stdlib(&type_name) {
-                        let target_qn = build_qualified_target(&ctx.file_path, &type_name);
+                        let qualified = self.qualify_type(&type_name);
+                        let target_qn = build_qualified_target(&ctx.file_path, &qualified);
                         let target = hash_id(&ctx.file_path, &target_qn);
-                        ctx.add_edge(&class_id, &target, EdgeKind::Extends, line, Some(&type_name));
+                        ctx.add_edge(&class_id, &target, EdgeKind::Extends, line, Some(&qualified));
                     }
                 }
             }
@@ -295,18 +320,20 @@ impl Walker {
                             if let Some(typ) = iface.named_child(j) {
                                 let iface_name = resolve_type_name(source, typ);
                                 if !iface_name.is_empty() && !is_java_stdlib(&iface_name) {
-                                    let target_qn = build_qualified_target(&ctx.file_path, &iface_name);
+                                    let qualified = self.qualify_type(&iface_name);
+                                    let target_qn = build_qualified_target(&ctx.file_path, &qualified);
                                     let target = hash_id(&ctx.file_path, &target_qn);
-                                    ctx.add_edge(&class_id, &target, EdgeKind::Implements, line, Some(&iface_name));
+                                    ctx.add_edge(&class_id, &target, EdgeKind::Implements, line, Some(&qualified));
                                 }
                             }
                         }
                     } else {
                         let iface_name = resolve_type_name(source, iface);
                         if !iface_name.is_empty() && !is_java_stdlib(&iface_name) {
-                            let target_qn = build_qualified_target(&ctx.file_path, &iface_name);
+                            let qualified = self.qualify_type(&iface_name);
+                            let target_qn = build_qualified_target(&ctx.file_path, &qualified);
                             let target = hash_id(&ctx.file_path, &target_qn);
-                            ctx.add_edge(&class_id, &target, EdgeKind::Implements, line, Some(&iface_name));
+                            ctx.add_edge(&class_id, &target, EdgeKind::Implements, line, Some(&qualified));
                         }
                     }
                 }
@@ -826,19 +853,49 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_import(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
         parent_id: &str,
     ) -> anyhow::Result<()> {
         let line = node.start_position().row as u32 + 1;
+
+        // Check if this is a wildcard import (ends with *)
+        let is_wildcard = has_asterisk(node);
+
+        // Build the full import path
         let import_path = build_import_path(source, node);
-        if !import_path.is_empty() {
+
+        if import_path.is_empty() {
+            return Ok(());
+        }
+
+        if is_wildcard {
+            // Wildcard import: `import com.foo.bar.*;` or `import static com.foo.bar.MyClass.*;`
+            // Create IMPORTS edge to the package (no per-symbol REFERENCES since we don't know which symbols are used)
             let target_qn = build_qualified_target(&ctx.file_path, &import_path);
             let target = hash_id(&ctx.file_path, &target_qn);
             ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&import_path));
+        } else {
+            // Class import: `import com.foo.bar.MyClass;`
+            // or static method import: `import static com.foo.bar.Utils.helper;`
+            // Create REFERENCES edge with the fully qualified name
+            let target_qn = build_qualified_target(&ctx.file_path, &import_path);
+            let target = hash_id(&ctx.file_path, &target_qn);
+            ctx.add_edge(parent_id, &target, EdgeKind::References, line, Some(&import_path));
+
+            // Populate imported_names: simple name → fully qualified name
+            // For class imports, the last segment is the class name
+            // For static imports, the last segment is the method/field name
+            if let Some(simple_name) = import_path.rsplit('.').next() {
+                if !simple_name.is_empty() && !is_java_stdlib(&import_path) {
+                    self.imported_names
+                        .insert(simple_name.to_string(), import_path.clone());
+                }
+            }
         }
+
         Ok(())
     }
 
@@ -1006,10 +1063,47 @@ impl Walker {
                 };
 
                 if !is_stdlib {
+                    // Check if the object part refers to an imported class
+                    // e.g., `Utils.helper()` where Utils was imported from `com.foo.Utils`
+                    let call_target_text = if let Some(object) = node.child_by_field_name("object") {
+                        let obj_text = get_text(source, Some(object));
+                        // Resolve the object through imported_names to get fully qualified name
+                        let obj_base = obj_text.split('.').next().unwrap_or(&obj_text);
+                        if let Some(qualified) = self.imported_names.get(obj_base) {
+                            // Replace the first segment with the fully qualified name
+                            // e.g., obj_text="Utils.helper" → "com.foo.Utils.helper"
+                            let suffix = if obj_text.len() > obj_base.len() {
+                                // Multi-segment object like "obj.inner"
+                                &obj_text[obj_base.len() + 1..]
+                            } else {
+                                ""
+                            };
+                            if suffix.is_empty() {
+                                format!("{}.{}", qualified, method_name)
+                            } else {
+                                format!("{}.{}.{}", qualified, suffix, method_name)
+                            }
+                        } else {
+                            // Check if method name itself is a static import
+                            if let Some(qualified_static) = self.imported_names.get(&method_name) {
+                                qualified_static.clone()
+                            } else {
+                                method_name.clone()
+                            }
+                        }
+                    } else {
+                        // No object — check if method name is a static import
+                        if let Some(qualified_static) = self.imported_names.get(&method_name) {
+                            qualified_static.clone()
+                        } else {
+                            method_name.clone()
+                        }
+                    };
+
                     let target_qn = build_call_target(
                         &ctx.file_path,
                         &self.class_stack,
-                        &method_name,
+                        &call_target_text,
                     );
                     let target = hash_id(&ctx.file_path, &target_qn);
                     ctx.add_edge(
@@ -1017,7 +1111,7 @@ impl Walker {
                         &target,
                         EdgeKind::Calls,
                         line,
-                        Some(&method_name),
+                        Some(&call_target_text),
                     );
                 }
             }
@@ -1051,14 +1145,21 @@ impl Walker {
         if let Some(type_node) = node.child_by_field_name("type") {
             let type_name = resolve_type_name(source, type_node);
             if !type_name.is_empty() && !is_java_stdlib(&type_name) {
-                let target_qn = build_qualified_target(&ctx.file_path, &type_name);
+                // Check if the type name is imported (use fully qualified name)
+                let qualified_name = self
+                    .imported_names
+                    .get(&type_name)
+                    .cloned()
+                    .unwrap_or_else(|| type_name.clone());
+
+                let target_qn = build_qualified_target(&ctx.file_path, &qualified_name);
                 let target = hash_id(&ctx.file_path, &target_qn);
                 ctx.add_edge(
                     parent_id,
                     &target,
                     EdgeKind::Instantiates,
                     line,
-                    Some(&type_name),
+                    Some(&qualified_name),
                 );
             }
         }
@@ -1356,6 +1457,25 @@ fn resolve_attribute_chain_java(source: &[u8], node: Node) -> String {
     }
 }
 
+/// Recursively collect identifiers from a scoped_identifier or identifier node.
+/// Tree-sitter-java represents dotted names as nested scoped_identifier nodes:
+/// `com.foo.bar.MyClass` = scoped_identifier(scoped_identifier("com.foo.bar"), identifier("MyClass"))
+fn collect_scoped_ids(source: &[u8], node: Node, parts: &mut Vec<String>) {
+    match node.kind() {
+        "identifier" => {
+            parts.push(get_text(source, Some(node)));
+        }
+        "scoped_identifier" => {
+            for i in 0..node.named_child_count() {
+                if let Some(child) = node.named_child(i) {
+                    collect_scoped_ids(source, child, parts);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Build import path from import_declaration node.
 fn build_import_path(source: &[u8], node: Node) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -1364,13 +1484,7 @@ fn build_import_path(source: &[u8], node: Node) -> String {
             match child.kind() {
                 "identifier" => parts.push(get_text(source, Some(child))),
                 "scoped_identifier" => {
-                    for j in 0..child.named_child_count() {
-                        if let Some(sub) = child.named_child(j) {
-                            if sub.kind() == "identifier" {
-                                parts.push(get_text(source, Some(sub)));
-                            }
-                        }
-                    }
+                    collect_scoped_ids(source, child, &mut parts);
                 }
                 "asterisk" => {} // `import foo.*` — skip asterisk
                 _ => {}
@@ -1378,6 +1492,32 @@ fn build_import_path(source: &[u8], node: Node) -> String {
         }
     }
     parts.join(".")
+}
+
+/// Check if an import_declaration node includes the `static` keyword.
+/// In tree-sitter-java, `static` is an unnamed child (not a named modifier node).
+#[allow(dead_code)]
+fn has_static_keyword(node: Node) -> bool {
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if !child.is_named() && child.kind() == "static" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if an import_declaration node has an asterisk child (wildcard import).
+fn has_asterisk(node: Node) -> bool {
+    for i in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(i) {
+            if child.kind() == "asterisk" {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Check if text is a System call (System.out / System.err).
@@ -1657,8 +1797,143 @@ mod tests {
             "package com.example;\n\nimport java.util.List;\nimport java.util.Map;\nclass Foo {}\n",
             "src/Foo.java",
         );
+        // Both imports are class imports → REFERENCES edges
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert!(refs.len() >= 2, "Expected at least 2 REFERENCES edges for class imports");
+        let targets: Vec<&str> = refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(targets.contains(&"java.util.List"), "Expected 'java.util.List' REFERENCE: {:?}", targets);
+        assert!(targets.contains(&"java.util.Map"), "Expected 'java.util.Map' REFERENCE: {:?}", targets);
+    }
+
+    #[test]
+    fn test_extract_class_import_creates_references_edge() {
+        let ctx = extract(
+            "package com.example;\n\nimport com.foo.bar.MyClass;\nclass App {}\n",
+            "src/App.java",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 1, "Expected 1 REFERENCES edge for class import");
+        assert_eq!(
+            refs[0].target_text.as_deref().unwrap_or(""),
+            "com.foo.bar.MyClass"
+        );
+
         let imports = find_edges(&ctx, EdgeKind::Imports);
-        assert!(imports.len() >= 2, "Expected at least 2 import edges");
+        assert_eq!(imports.len(), 0, "No IMPORTS edge for class import (uses REFERENCES)");
+    }
+
+    #[test]
+    fn test_extract_wildcard_import_creates_imports_edge() {
+        let ctx = extract(
+            "package com.example;\n\nimport com.foo.bar.*;\nclass App {}\n",
+            "src/App.java",
+        );
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        assert_eq!(imports.len(), 1, "Expected 1 IMPORTS edge for wildcard import");
+        assert_eq!(
+            imports[0].target_text.as_deref().unwrap_or(""),
+            "com.foo.bar"
+        );
+
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 0, "No REFERENCES edge for wildcard import");
+    }
+
+    #[test]
+    fn test_extract_static_import_creates_references_edge() {
+        let ctx = extract(
+            "package com.example;\n\nimport static com.foo.Utils.helper;\nclass App {}\n",
+            "src/App.java",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 1, "Expected 1 REFERENCES edge for static import");
+        assert_eq!(
+            refs[0].target_text.as_deref().unwrap_or(""),
+            "com.foo.Utils.helper"
+        );
+    }
+
+    #[test]
+    fn test_extract_static_wildcard_import_creates_imports_edge() {
+        let ctx = extract(
+            "package com.example;\n\nimport static com.foo.Utils.*;\nclass App {}\n",
+            "src/App.java",
+        );
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        assert_eq!(imports.len(), 1, "Expected 1 IMPORTS edge for static wildcard import");
+        assert!(imports[0].target_text.as_deref().unwrap_or("").contains("com.foo.Utils"));
+
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 0, "No REFERENCES edge for static wildcard import");
+    }
+
+    #[test]
+    fn test_extract_imported_call_uses_qualified_target_text() {
+        let ctx = extract(
+            r#"package com.example;
+
+import com.foo.Utils;
+
+class App {
+    void doWork() {
+        Utils.helper();
+    }
+}
+"#,
+            "src/com/example/App.java",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(
+            targets.iter().any(|t| t.contains("com.foo.Utils.helper")),
+            "Expected qualified call target_text for imported method: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_extract_static_import_call_uses_qualified_target() {
+        let ctx = extract(
+            r#"package com.example;
+
+import static com.foo.Utils.helper;
+
+class App {
+    void doWork() {
+        helper();
+    }
+}
+"#,
+            "src/com/example/App.java",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(
+            targets.iter().any(|t| t.contains("com.foo.Utils.helper")),
+            "Expected qualified call target for static imported method: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_extract_imported_type_instantiation_uses_qualified_name() {
+        let ctx = extract(
+            r#"package com.example;
+
+import com.foo.MyService;
+
+class App {
+    void doWork() {
+        new MyService();
+    }
+}
+"#,
+            "src/com/example/App.java",
+        );
+        let instantiates = find_edges(&ctx, EdgeKind::Instantiates);
+        let targets: Vec<&str> = instantiates.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(
+            targets.iter().any(|t| t.contains("com.foo.MyService")),
+            "Expected qualified instantiation target: {:?}", targets
+        );
     }
 
     // ------------------------------------------------------------------

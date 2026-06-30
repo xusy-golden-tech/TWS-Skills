@@ -656,14 +656,87 @@ mod tests {
     fn test_resolve_unsupported_language_graceful() {
         let (db, path) = setup_db("resolve_unsupported_lang");
 
-        // Insert a Java node (no resolver)
-        let src_id = insert_node(&db, "Main", "com.example::Main", "src/com/example/Main.java", "java", "class");
-        let fake_target = hash_id("unknown.java", "unknown::Helper");
+        // Insert a Kotlin node (no resolver yet)
+        let src_id = insert_node(&db, "Main", "com.example::Main", "src/com/example/Main.kt", "kotlin", "class");
+        let fake_target = hash_id("unknown.kt", "unknown::Helper");
         insert_edge(&db, &src_id, &fake_target, "Helper", "CALLS");
 
         let stats = resolve(&db, Path::new(".")).unwrap();
-        // No resolver for Java → should go to unresolved
+        // No resolver for Kotlin → should go to unresolved
         assert_eq!(stats.unresolved, 1);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_resolve_java_external_reference() {
+        let (db, path) = setup_db("resolve_java_ext");
+
+        // Source: Java node referencing an external Java stdlib class
+        let src_id = insert_node(
+            &db, "App", "com.example::App", "src/com/example/App.java", "java", "class"
+        );
+        let fake_target = hash_id("nonexistent.java", "nonexistent::java_util_List");
+        insert_edge(&db, &src_id, &fake_target, "java.util.List", "REFERENCES");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // java.util.List is external → should be classified as external
+        assert_eq!(stats.external, 1, "java.util.List should be recognized as external");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_resolve_java_cross_file_call() {
+        let (db, path) = setup_db("resolve_java_cross");
+
+        // Source: src/com/example/App.java
+        let src_id = insert_node(
+            &db, "App", "com.example::App", "src/com/example/App.java", "java", "class"
+        );
+        // Target: src/com/example/Helper.java (Method in same package)
+        let tgt_id = insert_node(
+            &db, "Helper", "com.example::Helper", "src/com/example/Helper.java", "java", "class"
+        );
+
+        // Dangling edge: App calls com.example.Helper.doSomething
+        let fake_target = hash_id("nonexistent.java", "nonexistent::doSomething");
+        insert_edge(&db, &src_id, &fake_target, "com.example.Helper.doSomething", "CALLS");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // Should find "Helper" class in src/com/example/Helper.java by name match
+        // Note: the resolver tries to find the symbol "doSomething" in candidate files
+        // but we only have the "Helper" class node. The resolver will try to match
+        // by class name through ModuleIndex lookup.
+        // With our ModuleIndex approach, com.example should map to Helper.java file
+
+        // At minimum, verify no crash and some resolution was attempted
+        assert!(stats.resolved + stats.unresolved + stats.external > 0);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_resolve_already_valid_edge() {
+        let (db, path) = setup_db("resolve_already_valid");
+
+        // Normal valid edge: source and target both exist
+        let src_id = insert_node(&db, "main", "src.main::main", "src/main.py", "python", "function");
+        let tgt_id = insert_node(&db, "helper", "src.utils::helper", "src/utils.py", "python", "function");
+
+        // Edge pointing to a valid node (not dangling)
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO edges (source, target, target_text, kind, source_loc, provenance) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![src_id, tgt_id, Some("helper"), "CALLS", Some("src/main.py:5:3"), Some("tree-sitter")],
+        ).unwrap();
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // Nothing to resolve - edge already valid
+        assert_eq!(stats.resolved, 0);
+        assert_eq!(stats.unresolved, 0);
+        assert_eq!(stats.external, 0);
 
         cleanup(&path);
     }

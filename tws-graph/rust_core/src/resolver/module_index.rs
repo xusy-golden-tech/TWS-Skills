@@ -93,12 +93,11 @@ impl ModuleIndex {
 /// | Java         | `src/com/foo/Bar.java` → `com.foo.Bar`                       |
 /// | Go           | `pkg/foo/bar.go` → `foo` (package name, not implemented yet) |
 /// | Rust         | crate-based, not implemented yet                             |
-///
-/// Phase 0: only Python is implemented. Other languages return `None`.
 pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
     match language {
         "python" => infer_python_module(file_path),
         "typescript" | "javascript" | "tsx" | "jsx" => infer_typescript_module(file_path),
+        "java" => infer_java_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -199,6 +198,57 @@ fn strip_src_prefix(module: &str) -> String {
     module.to_string()
 }
 
+/// Java module name inference.
+///
+/// Rules:
+/// 1. Strip `.java` extension.
+/// 2. Strip common source root prefixes: `src/main/java/`, `src/test/java/`, `src/`.
+/// 3. Replace path separators with dots.
+///
+/// Examples:
+/// - `src/main/java/com/foo/bar/MyClass.java` → `com.foo.bar.MyClass`
+/// - `src/com/example/Utils.java` → `com.example.Utils`
+fn infer_java_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle .java files
+    if !path.ends_with(".java") {
+        return None;
+    }
+
+    // Strip .java extension
+    let without_ext = &path[..path.len() - 5];
+
+    // Strip common Java source root prefixes
+    let stripped = strip_java_source_root(without_ext);
+
+    // Replace / with . to get dotted package notation
+    let module = stripped.replace('/', ".");
+    Some(module)
+}
+
+/// Strip Java source root prefixes like `src/main/java/`, `src/test/java/`, `src/`.
+fn strip_java_source_root(path: &str) -> String {
+    // Try specific Java Maven/Gradle conventions first (longest match)
+    let prefixes = &[
+        ("src/main/java/", "src/main/java/"),
+        ("src/test/java/", "src/test/java/"),
+        ("src/main/", "src/main/"),
+        ("src/test/", "src/test/"),
+        ("src/", "src/"),
+        ("lib/", "lib/"),
+    ];
+
+    for (_name, prefix) in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+
+    // No prefix matched, return as-is
+    path.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -288,7 +338,41 @@ mod tests {
 
     #[test]
     fn test_infer_module_unknown_lang_graceful() {
-        assert_eq!(infer_module_name("src/foo/bar.java", "java"), None);
+        assert_eq!(infer_module_name("src/foo/bar.go", "go"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // Java module name inference
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_java_module_maven_src() {
+        assert_eq!(
+            infer_module_name("src/main/java/com/foo/bar/MyClass.java", "java"),
+            Some("com.foo.bar.MyClass".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_java_module_simple_src() {
+        assert_eq!(
+            infer_module_name("src/com/example/Utils.java", "java"),
+            Some("com.example.Utils".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_java_module_test_src() {
+        assert_eq!(
+            infer_module_name("src/test/java/com/foo/BarTest.java", "java"),
+            Some("com.foo.BarTest".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_java_module_non_java() {
+        assert_eq!(infer_module_name("src/foo/bar.py", "java"), None);
+        assert_eq!(infer_module_name("src/foo/bar.kt", "java"), None);
     }
 
     // ------------------------------------------------------------------
