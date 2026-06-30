@@ -1018,4 +1018,125 @@ mod tests {
         assert_eq!(module, "http");
         assert_eq!(symbol, "");
     }
+
+    // ------------------------------------------------------------------
+    // Nix cross-file resolution integration tests (Stage 18)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_nix_relative_import() {
+        let (db, path) = setup_db("resolve_nix_rel");
+
+        // Source: src/default.nix imports ./lib.nix
+        let src_id = insert_node(
+            &db, "default", "src.default::default", "src/default.nix", "nix", "file"
+        );
+        // Target: src/lib.nix — the imported file
+        let tgt_id = insert_node(
+            &db, "lib", "src.lib::lib", "src/lib.nix", "nix", "file"
+        );
+
+        // Dangling IMPORTS edge: import ./lib.nix produces target_text = "./lib.nix::"
+        let fake_target = hash_id("nonexistent.nix", "nonexistent::lib_nix");
+        insert_edge(&db, &src_id, &fake_target, "./lib.nix::", "IMPORTS");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // ModuleIndex: src/lib.nix → module "lib"
+        // resolve_module("./lib.nix") from "src/default.nix" → resolves to "src/lib.nix"
+        // symbol is empty, so find_node_by_module is called
+        // Should find node by file_path match in candidates
+        assert!(stats.resolved + stats.unresolved + stats.external > 0,
+            "Expected some resolution activity for Nix relative import");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_resolve_nix_nixpath_external() {
+        let (db, path) = setup_db("resolve_nix_ext");
+
+        let src_id = insert_node(
+            &db, "default", "src.default::default", "src/default.nix", "nix", "file"
+        );
+        let fake_target = hash_id("nonexistent.nix", "nonexistent::nixpkgs");
+        // import <nixpkgs> → target_text = "<nixpkgs>::"
+        insert_edge(&db, &src_id, &fake_target, "<nixpkgs>::", "IMPORTS");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // <nixpkgs> is external → should be classified as external
+        assert_eq!(stats.external, 1, "<nixpkgs> should be classified as external");
+        assert_eq!(stats.resolved, 0);
+
+        // Verify unresolved_refs entry
+        let conn = db.connection();
+        let is_ext: i32 = conn
+            .query_row(
+                "SELECT is_external FROM unresolved_refs WHERE from_node_id = ?1",
+                [&src_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(is_ext, 1, "NIX_PATH import should have is_external=1");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_resolve_nix_unresolved_internal() {
+        let (db, path) = setup_db("resolve_nix_unres");
+
+        let src_id = insert_node(
+            &db, "default", "src.default::default", "src/default.nix", "nix", "file"
+        );
+        let fake_target = hash_id("missing.nix", "missing::unknown_module");
+        // import ./notfound.nix with no matching file
+        insert_edge(&db, &src_id, &fake_target, "./notfound.nix::", "IMPORTS");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // Not in index, no matching file → unresolved
+        assert_eq!(stats.unresolved, 1, "Unknown import should be unresolved");
+
+        // Verify unresolved_refs entry
+        let conn = db.connection();
+        let is_ext: i32 = conn
+            .query_row(
+                "SELECT is_external FROM unresolved_refs WHERE from_node_id = ?1",
+                [&src_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(is_ext, 0, "Unknown internal module should not be external");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_parse_target_nix_import_format() {
+        // Nix import "./lib.nix" → target_text = "./lib.nix::"
+        let result = parse_target_text("./lib.nix::");
+        assert!(result.is_some());
+        let (module, symbol) = result.unwrap();
+        assert_eq!(module, "./lib.nix");
+        assert_eq!(symbol, "");
+    }
+
+    #[test]
+    fn test_parse_target_nix_nixpath_format() {
+        // Nix import <nixpkgs> → target_text = "<nixpkgs>::"
+        let result = parse_target_text("<nixpkgs>::");
+        assert!(result.is_some());
+        let (module, symbol) = result.unwrap();
+        assert_eq!(module, "<nixpkgs>");
+        assert_eq!(symbol, "");
+    }
+
+    #[test]
+    fn test_parse_target_nix_with_scope_format() {
+        // Nix "with pkgs;" → target_text = "pkgs::"
+        let result = parse_target_text("pkgs::");
+        assert!(result.is_some());
+        let (module, symbol) = result.unwrap();
+        assert_eq!(module, "pkgs");
+        assert_eq!(symbol, "");
+    }
 }

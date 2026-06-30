@@ -33,13 +33,14 @@ impl LanguageRegistry {
             "bash" => Some(Box::new(BashResolver)),
             "groovy" => Some(Box::new(GroovyResolver)),
             "zig" => Some(Box::new(ZigResolver)),
+            "nix" => Some(Box::new(NixResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift", "lua", "bash", "groovy", "zig"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift", "lua", "bash", "groovy", "zig", "nix"]
     }
 }
 
@@ -2958,6 +2959,250 @@ fn simplify_zig_path(path: &str) -> String {
     stack.join("/")
 }
 
+// ---------------------------------------------------------------------------
+// Nix module resolver (Stage 18)
+// ---------------------------------------------------------------------------
+
+/// Nix module resolver.
+///
+/// Nix uses `import ./path.nix` for relative file imports and
+/// `import <nixpkgs>` for NIX_PATH lookups.  Import paths are file paths
+/// (not dotted module names).
+///
+/// Key import patterns:
+/// - `import ./lib.nix` → relative to source file directory
+/// - `import <nixpkgs>` → NIX_PATH search path (external)
+/// - `import "${var}/file.nix"` → dynamic path (skipped by extractor)
+/// - `callPackage ./foo.nix { }` → same as import for the path arg
+/// - `with pkgs;` → scope import from attrset (external)
+/// - `inherit (pkgs.stdenv) mkDerivation;` → scope import (external)
+///
+/// Module names are file paths with `/` separators (e.g. `pkgs/default`).
+pub struct NixResolver;
+
+impl ModuleResolver for NixResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        if module_name.is_empty() {
+            return Vec::new();
+        }
+
+        // 1. Handle NIX_PATH angle-bracket syntax: <nixpkgs>, <nixpkgs/nixos>
+        //    These are external and cannot be resolved to local files.
+        if module_name.starts_with('<') {
+            return Vec::new(); // external, no local candidates
+        }
+
+        // 2. Handle relative paths (./foo.nix, ../bar.nix)
+        if module_name.starts_with('.') {
+            let source_dir = Path::new(source_file)
+                .parent()
+                .unwrap_or(Path::new("."));
+            let resolved = source_dir.join(module_name);
+            let resolved_str = resolved.to_string_lossy().replace('\\', "/");
+
+            // Normalize the path (resolve .. and .)
+            let normalized = simplify_nix_path(&resolved_str);
+
+            // Try the resolved path directly in ModuleIndex
+            // First try with the .nix extension
+            let with_ext = if normalized.ends_with(".nix") {
+                normalized.clone()
+            } else {
+                format!("{}.nix", normalized)
+            };
+
+            // Check ModuleIndex for the resolved path
+            if let Some(files) = module_index.lookup(&with_ext) {
+                return files.clone();
+            }
+
+            // Also try without .nix extension (ModuleIndex strips extensions)
+            let without_ext = if with_ext.ends_with(".nix") {
+                with_ext[..with_ext.len() - 4].to_string()
+            } else {
+                with_ext.clone()
+            };
+            if let Some(files) = module_index.lookup(&without_ext) {
+                return files.clone();
+            }
+
+            // Try without src/ prefix (if the index has stripped it)
+            for prefix in &["src/", "lib/", "nix/"] {
+                if without_ext.starts_with(prefix) {
+                    let stripped = &without_ext[prefix.len()..];
+                    if let Some(files) = module_index.lookup(stripped) {
+                        return files.clone();
+                    }
+                }
+            }
+
+            // Return the resolved path as candidate file path
+            return vec![with_ext];
+        }
+
+        // 3. Direct ModuleIndex lookup by module name
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 4. Try with common source root prefixes
+        for prefix in &["", "src/", "lib/", "nix/"] {
+            let candidate = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&candidate) {
+                return files.clone();
+            }
+            // Also try with .nix extension
+            let with_nix = if candidate.ends_with(".nix") {
+                candidate.clone()
+            } else {
+                format!("{}.nix", candidate)
+            };
+            if let Some(files) = module_index.lookup(&with_nix) {
+                return files.clone();
+            }
+            // Also try without .nix extension
+            let without_nix = if with_nix.ends_with(".nix") {
+                with_nix[..with_nix.len() - 4].to_string()
+            } else {
+                with_nix
+            };
+            if let Some(files) = module_index.lookup(&without_nix) {
+                return files.clone();
+            }
+        }
+
+        // 5. Generate candidate file paths as fallback
+        let mut candidates = Vec::new();
+        let module_path = module_name;
+        for prefix in &["src/", "lib/", "nix/", ""] {
+            let without_ext = if module_path.ends_with(".nix") {
+                module_path[..module_path.len() - 4].to_string()
+            } else {
+                module_path.to_string()
+            };
+            candidates.push(format!("{}{}.nix", prefix, without_ext));
+        }
+        candidates
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "nix")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_nix_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "nix"
+    }
+}
+
+/// Check if a module name refers to an external Nix entity.
+///
+/// Nix has the concept of "channels" (nixpkgs) and a handful of builtins.
+/// Module names in angle brackets (`<nixpkgs>`, `<home-manager>`) are always
+/// external since they refer to NIX_PATH entries.  Top-level attrset names
+/// commonly used in `with` statements (like `pkgs`, `lib`, `builtins`,
+/// `stdenv`) are also external because they come from the nixpkgs channel.
+pub fn is_nix_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    // Angle-bracket NIX_PATH references are always external
+    if module_name.starts_with('<') {
+        return true;
+    }
+
+    // File paths (containing / or .nix extension) are internal
+    // Must check this BEFORE checking against external names like "pkgs"
+    if module_name.ends_with(".nix") || module_name.contains('/') {
+        return false;
+    }
+
+    // Dotted paths referencing nixpkgs attrsets (pkgs.xxx, lib.xxx)
+    if module_name.starts_with("pkgs.") || module_name.starts_with("lib.") {
+        return true;
+    }
+
+    // Known Nix builtins and nixpkgs top-level scopes
+    let nix_external: &[&str] = &[
+        // Nix builtins
+        "builtins",
+        "derivation",
+        "import",
+        "abort",
+        "throw",
+        "toString",
+        "baseNameOf",
+        "dirOf",
+        "fetchTarball",
+        "fetchGit",
+        "fetchurl",
+        // nixpkgs top-level attrset names (commonly used with `with`)
+        "pkgs",
+        "lib",
+        "stdenv",
+        "nixpkgs",
+        // nixpkgs package scopes
+        "python3",
+        "python3Packages",
+        "haskellPackages",
+        "nodePackages",
+        "perlPackages",
+        // Other common channels / flakes
+        "home-manager",
+        "nixos",
+        "nix-darwin",
+        "flake-utils",
+        "flake-parts",
+        // Call package helpers
+        "callPackage",
+        "callPackages",
+    ];
+
+    let root = module_name;
+    let root_no_bracket = root.trim_start_matches('<').trim_end_matches('>');
+
+    if nix_external.contains(&root_no_bracket) {
+        return true;
+    }
+
+    false
+}
+
+/// Simplify a Nix file path by resolving `.` and `..` segments.
+fn simplify_nix_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let parts: Vec<&str> = normalized.split('/').collect();
+    let mut stack: Vec<&str> = Vec::new();
+
+    for part in parts {
+        match part {
+            "." | "" => continue,
+            ".." => {
+                stack.pop();
+            }
+            _ => {
+                stack.push(part);
+            }
+        }
+    }
+
+    stack.join("/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5425,5 +5670,157 @@ mod tests {
     fn test_simplify_zig_path_with_dot() {
         assert_eq!(simplify_zig_path("src/./utils.zig"), "src/utils.zig");
         assert_eq!(simplify_zig_path("./utils.zig"), "utils.zig");
+    }
+
+    // ------------------------------------------------------------------
+    // Nix resolver tests (Stage 18)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_nix_resolver_language() {
+        let resolver = NixResolver;
+        assert_eq!(resolver.language(), "nix");
+    }
+
+    #[test]
+    fn test_nix_resolver_is_external_angle_bracket() {
+        assert!(is_nix_external("<nixpkgs>"));
+        assert!(is_nix_external("<nixpkgs/nixos>"));
+        assert!(is_nix_external("<home-manager>"));
+        assert!(is_nix_external("<nix-darwin>"));
+    }
+
+    #[test]
+    fn test_nix_resolver_is_external_builtins() {
+        assert!(is_nix_external("builtins"));
+        assert!(is_nix_external("pkgs"));
+        assert!(is_nix_external("lib"));
+        assert!(is_nix_external("stdenv"));
+        assert!(is_nix_external("nixpkgs"));
+    }
+
+    #[test]
+    fn test_nix_resolver_is_external_dotted_scopes() {
+        assert!(is_nix_external("pkgs.stdenv"));
+        assert!(is_nix_external("pkgs.python3"));
+        assert!(is_nix_external("lib.lists"));
+        assert!(is_nix_external("lib.attrsets"));
+    }
+
+    #[test]
+    fn test_nix_resolver_is_external_file_paths() {
+        // File paths (with .nix extension or /) are internal
+        assert!(!is_nix_external("./lib.nix"));
+        assert!(!is_nix_external("../utils.nix"));
+        assert!(!is_nix_external("pkgs/default.nix"));
+        assert!(!is_nix_external("modules/services/nginx.nix"));
+    }
+
+    #[test]
+    fn test_nix_resolver_is_external_empty() {
+        assert!(!is_nix_external(""));
+    }
+
+    #[test]
+    fn test_nix_resolver_file_to_module_name() {
+        let resolver = NixResolver;
+        assert_eq!(
+            resolver.file_to_module_name("src/pkgs/default.nix", Path::new(".")),
+            Some("pkgs/default".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("lib/helpers.nix", Path::new(".")),
+            Some("helpers".to_string())
+        );
+    }
+
+    #[test]
+    fn test_nix_resolver_resolve_relative_path() {
+        let resolver = NixResolver;
+        let mut index = ModuleIndex::empty();
+
+        // Registration: "src/lib.nix" → module "lib"
+        index.insert("lib", "src/lib.nix".to_string());
+
+        // resolve_module("./lib.nix") from "src/default.nix"
+        let candidates = resolver.resolve_module(
+            "./lib.nix",
+            "src/default.nix",
+            Path::new("."),
+            &index,
+        );
+        // Should find src/lib.nix
+        assert!(candidates.contains(&"src/lib.nix".to_string()),
+            "Expected src/lib.nix in candidates, got {:?}", candidates);
+    }
+
+    #[test]
+    fn test_nix_resolver_resolve_angle_bracket_external() {
+        let resolver = NixResolver;
+        let index = ModuleIndex::empty();
+
+        // <nixpkgs> style imports return empty candidates (external)
+        let candidates = resolver.resolve_module(
+            "<nixpkgs>",
+            "src/default.nix",
+            Path::new("."),
+            &index,
+        );
+        assert!(candidates.is_empty(),
+            "Angle-bracket imports should have no local candidates");
+    }
+
+    #[test]
+    fn test_nix_resolver_resolve_direct_module_name() {
+        let resolver = NixResolver;
+        let mut index = ModuleIndex::empty();
+
+        // Registration: "pkgs/default.nix" → module "pkgs/default"
+        index.insert("pkgs/default", "pkgs/default.nix".to_string());
+
+        // resolve_module("pkgs/default") directly
+        let candidates = resolver.resolve_module(
+            "pkgs/default",
+            "src/default.nix",
+            Path::new("."),
+            &index,
+        );
+        assert!(candidates.contains(&"pkgs/default.nix".to_string()),
+            "Expected pkgs/default.nix in candidates, got {:?}", candidates);
+    }
+
+    #[test]
+    fn test_nix_resolver_resolve_with_prefix_fallback() {
+        let resolver = NixResolver;
+        let mut index = ModuleIndex::empty();
+
+        // Registration: "src/modules/test.nix" → module "modules/test"
+        index.insert("modules/test", "src/modules/test.nix".to_string());
+
+        // resolve_module("src/modules/test") should find it via prefix fallback
+        let candidates = resolver.resolve_module(
+            "src/modules/test",
+            "src/default.nix",
+            Path::new("."),
+            &index,
+        );
+        assert!(candidates.contains(&"src/modules/test.nix".to_string()) ||
+                candidates.contains(&"modules/test.nix".to_string()),
+            "Expected to find modules/test, got {:?}", candidates);
+    }
+
+    #[test]
+    fn test_language_registry_get_nix() {
+        let resolver = LanguageRegistry::get("nix");
+        assert!(resolver.is_some(), "Expected NixResolver in LanguageRegistry");
+        assert_eq!(resolver.unwrap().language(), "nix");
+    }
+
+    #[test]
+    fn test_simplify_nix_path_basic() {
+        assert_eq!(simplify_nix_path("src/./utils.nix"), "src/utils.nix");
+        assert_eq!(simplify_nix_path("src/../lib/utils.nix"), "lib/utils.nix");
+        assert_eq!(simplify_nix_path("./utils.nix"), "utils.nix");
+        assert_eq!(simplify_nix_path("src/lib/../default.nix"), "src/default.nix");
     }
 }

@@ -121,6 +121,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "groovy" => infer_groovy_module(file_path),
         "bash" => infer_bash_module(file_path),
         "zig" => infer_zig_module(file_path),
+        "nix" => infer_nix_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -1048,6 +1049,56 @@ fn infer_zig_module(file_path: &str) -> Option<String> {
 /// Strip common Zig source root prefixes.
 fn strip_zig_source_root(path: &str) -> String {
     let prefixes = &["src/", "lib/"];
+    for prefix in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+    path.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Nix module name inference (Stage 18)
+// ---------------------------------------------------------------------------
+
+/// Nix module name inference.
+///
+/// Rules:
+/// 1. Only handle `.nix` files.
+/// 2. Strip the `.nix` extension.
+/// 3. Strip common source root prefixes (`src/`, `lib/`, `nix/`).
+/// 4. Keep path separators as `/` (Nix import uses file paths).
+///
+/// Examples:
+/// - `src/pkgs/default.nix` → `pkgs/default`
+/// - `lib/helpers.nix` → `helpers`
+/// - `default.nix` → `default`
+/// - `nix/overlays/custom.nix` → `overlays/custom`
+/// - `modules/services/nginx.nix` → `modules/services/nginx`
+fn infer_nix_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle .nix files
+    if !path.ends_with(".nix") {
+        return None;
+    }
+
+    // Strip .nix extension
+    let without_ext = &path[..path.len() - 4];
+
+    // Strip common source root prefixes
+    let stripped = strip_nix_source_root(without_ext);
+
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(stripped.to_string())
+    }
+}
+
+/// Strip common Nix source root prefixes.
+fn strip_nix_source_root(path: &str) -> String {
+    let prefixes = &["src/", "lib/", "nix/"];
     for prefix in prefixes {
         if path.starts_with(prefix) {
             return path[prefix.len()..].to_string();
@@ -2238,5 +2289,65 @@ mod tests {
         assert_eq!(strip_zig_source_root("src/foo"), "foo");
         assert_eq!(strip_zig_source_root("lib/bar"), "bar");
         assert_eq!(strip_zig_source_root("no_prefix"), "no_prefix");
+    }
+
+    // ------------------------------------------------------------------
+    // Nix module name inference (Stage 18)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_nix_module_src() {
+        assert_eq!(
+            infer_module_name("src/pkgs/default.nix", "nix"),
+            Some("pkgs/default".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/lib.nix", "nix"),
+            Some("lib".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_nix_module_lib() {
+        assert_eq!(
+            infer_module_name("lib/helpers.nix", "nix"),
+            Some("helpers".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_nix_module_nix_prefix() {
+        assert_eq!(
+            infer_module_name("nix/overlays/custom.nix", "nix"),
+            Some("overlays/custom".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_nix_module_no_prefix() {
+        assert_eq!(
+            infer_module_name("default.nix", "nix"),
+            Some("default".to_string())
+        );
+        assert_eq!(
+            infer_module_name("modules/services/nginx.nix", "nix"),
+            Some("modules/services/nginx".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_nix_module_non_nix() {
+        assert_eq!(infer_module_name("src/foo.py", "nix"), None);
+        assert_eq!(infer_module_name("src/foo.nix", "nix"), Some("foo".to_string()));
+        assert_eq!(infer_module_name("src/foo.java", "nix"), None);
+        assert_eq!(infer_module_name("src/foo.rs", "nix"), None);
+    }
+
+    #[test]
+    fn test_strip_nix_source_root() {
+        assert_eq!(strip_nix_source_root("src/foo"), "foo");
+        assert_eq!(strip_nix_source_root("lib/bar"), "bar");
+        assert_eq!(strip_nix_source_root("nix/baz"), "baz");
+        assert_eq!(strip_nix_source_root("no_prefix"), "no_prefix");
     }
 }

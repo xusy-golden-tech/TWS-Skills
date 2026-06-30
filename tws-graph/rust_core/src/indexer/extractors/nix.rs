@@ -291,9 +291,10 @@ fn extract_inherit_from(
     // We want the scope path as an imports edge
     let scope = get_scope_path(source, node);
     if !scope.is_empty() {
+        let target_text = format!("{}::", scope);
         let target_qn = build_qualified_target(&ctx.file_path, &scope);
         let target = hash_id(&ctx.file_path, &target_qn);
-        ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&scope));
+        ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&target_text));
     }
 
     Ok(())
@@ -325,15 +326,33 @@ fn extract_apply(
 ) -> anyhow::Result<()> {
     let line = node.start_position().row as u32 + 1;
 
-    // Check if this is an import call
+    // Check if this is an import / callPackage call
     let callee_name = get_first_callee_name(source, node);
-    if callee_name == "import" {
+    if callee_name == "import" || callee_name == "callPackage" {
         // Find import path (spath_expression or path_expression)
         let import_path = find_arg_path(source, node);
         if !import_path.is_empty() {
+            // Use "path::" format so parse_target_text can split on ::
+            // → module_part = path, symbol_part = ""
+            let target_text = format!("{}::", import_path);
             let target_qn = build_qualified_target(&ctx.file_path, &import_path);
             let target = hash_id(&ctx.file_path, &target_qn);
-            ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&import_path));
+            ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&target_text));
+
+            // For relative file imports (./ or ../), also create a REFERENCES edge
+            // pointing at the file being imported, so the resolver can match it.
+            if import_path.starts_with("./") || import_path.starts_with("../") {
+                let ref_target_qn =
+                    build_qualified_target(&ctx.file_path, &format!("{}::file", import_path));
+                let ref_target = hash_id(&ctx.file_path, &ref_target_qn);
+                ctx.add_edge(
+                    parent_id,
+                    &ref_target,
+                    EdgeKind::References,
+                    line,
+                    Some(&target_text),
+                );
+            }
         }
     } else if !callee_name.is_empty() && !is_nix_builtin(&callee_name) {
         let target_qn = build_qualified_target(&ctx.file_path, &callee_name);
@@ -376,8 +395,12 @@ fn find_arg_path(source: &[u8], node: Node) -> String {
     for i in 0..node.named_child_count() {
         if let Some(child) = node.named_child(i) {
             match child.kind() {
-                "spath_expression" | "path_expression" | "hpath_expression"
-                | "uri_expression" => {
+                "spath_expression" | "hpath_expression" => {
+                    // Preserve angle brackets for NIX_PATH search paths
+                    // e.g. <nixpkgs> → "<nixpkgs>", <nixpkgs/nixos> → "<nixpkgs/nixos>"
+                    return get_text(source, Some(child));
+                }
+                "path_expression" | "uri_expression" => {
                     return get_text(source, Some(child))
                         .trim_matches('<')
                         .trim_matches('>')
@@ -414,9 +437,10 @@ fn extract_with(
             if child.kind() == "variable_expression" || child.kind() == "select_expression" {
                 let path = get_full_path(source, child);
                 if !path.is_empty() {
+                    let target_text = format!("{}::", path);
                     let target_qn = build_qualified_target(&ctx.file_path, &path);
                     let target = hash_id(&ctx.file_path, &target_qn);
-                    ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&path));
+                    ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&target_text));
                     // Only first variable expression is the scope
                     break;
                 }
@@ -437,7 +461,7 @@ fn extract_with(
 fn is_nix_builtin(name: &str) -> bool {
     matches!(
         name,
-        "builtins" | "true" | "false" | "null" | "import"
+        "builtins" | "true" | "false" | "null" | "import" | "callPackage" | "callPackageWith"
     )
 }
 
@@ -751,5 +775,119 @@ mod tests {
         let calls = find_edges(&ctx, EdgeKind::Calls);
         // import is a builtin, should not create a call edge
         assert!(calls.iter().all(|e| e.target_text.as_deref() != Some("import")));
+    }
+
+    // ------------------------------------------------------------------
+    // 15. callPackage creates IMPORTS edge (Stage 18)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_callpackage_creates_imports_edge() {
+        let ctx = extract(
+            "callPackage ./foo.nix { }\n",
+            "test/default.nix",
+        );
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        // callPackage should create IMPORTS edge
+        let has_callpackage = imports.iter().any(|e| {
+            e.target_text
+                .as_deref()
+                .map(|t| t.contains("./foo.nix"))
+                .unwrap_or(false)
+        });
+        assert!(has_callpackage, "Expected IMPORTS edge for callPackage");
+    }
+
+    // ------------------------------------------------------------------
+    // 16. Relative import creates REFERENCES edge (Stage 18)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_relative_import_creates_references() {
+        let ctx = extract(
+            "import ./lib.nix\n",
+            "test/default.nix",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        // Relative import should create a REFERENCES edge
+        assert!(
+            !refs.is_empty(),
+            "Expected REFERENCES edge for relative import"
+        );
+        let has_path = refs.iter().any(|e| {
+            e.target_text
+                .as_deref()
+                .map(|t| t.contains("lib.nix"))
+                .unwrap_or(false)
+        });
+        assert!(has_path, "Expected REFERENCES edge referencing lib.nix");
+    }
+
+    // ------------------------------------------------------------------
+    // 17. NIX_PATH import (<nixpkgs>) does NOT create REFERENCES (Stage 18)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_nixpath_import_no_references() {
+        let ctx = extract(
+            "import <nixpkgs> { }\n",
+            "test/default.nix",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        // <nixpkgs> is external, should not create REFERENCES
+        assert!(
+            refs.is_empty(),
+            "NIX_PATH import should not create REFERENCES edge"
+        );
+        // But IMPORTS edge should still exist
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        let has_nixpkgs = imports.iter().any(|e| {
+            e.target_text
+                .as_deref()
+                .map(|t| t.contains("<nixpkgs>"))
+                .unwrap_or(false)
+        });
+        assert!(has_nixpkgs, "Expected IMPORTS edge for <nixpkgs>");
+    }
+
+    // ------------------------------------------------------------------
+    // 18. Target_text uses :: format for resolver parsing (Stage 18)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_target_text_double_colon_format() {
+        let ctx = extract(
+            "let\n  pkgs = import <nixpkgs> {};\n  lib = import ./lib.nix;\nin\npkgs\n",
+            "test/default.nix",
+        );
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        // All import target_texts should use :: format for parse_target_text
+        for edge in &imports {
+            if let Some(ref tt) = edge.target_text {
+                assert!(
+                    tt.contains("::"),
+                    "Expected :: separator in target_text, got: {:?}",
+                    tt
+                );
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 19. callPackage shouldn't create CALLS edge (Stage 18)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_callpackage_not_called() {
+        let ctx = extract(
+            "callPackage ./foo.nix { }\n",
+            "test/default.nix",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        // callPackage is a builtin, should not create a call edge
+        assert!(
+            calls.iter().all(|e| e.target_text.as_deref() != Some("callPackage")),
+            "callPackage should not create CALLS edge"
+        );
     }
 }
