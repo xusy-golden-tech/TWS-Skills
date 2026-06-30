@@ -22,13 +22,14 @@ impl LanguageRegistry {
             "kotlin" => Some(Box::new(KotlinResolver)),
             "go" => Some(Box::new(GoResolver)),
             "rust" => Some(Box::new(RustResolver)),
+            "php" => Some(Box::new(PhpResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin", "go", "rust"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "go", "rust", "php"]
     }
 }
 
@@ -1006,6 +1007,172 @@ pub fn is_rust_external(module_name: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// PHP module resolver
+// ---------------------------------------------------------------------------
+
+/// PHP module resolver.
+///
+/// Uses PSR-4 autoloading conventions:
+/// - `use Foo\Bar\Baz` → class `Baz` in namespace `Foo\Bar` → file `Foo/Bar/Baz.php`
+/// - `use function Foo\Bar\func` → function `func` → file `Foo/Bar.php`
+/// - `use const Foo\Bar\MY_CONST` → constant → file `Foo/Bar.php`
+///
+/// Common source roots: `src/`, `lib/`, `app/`, `includes/`
+pub struct PhpResolver;
+
+impl ModuleResolver for PhpResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        _source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        if module_name.is_empty() {
+            return Vec::new();
+        }
+
+        // 1. Direct ModuleIndex lookup with full module name
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Try with common source root prefixes
+        for prefix in &["src.", "lib.", "app.", "includes."] {
+            let candidate = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&candidate) {
+                return files.clone();
+            }
+        }
+
+        // 3. Convert module name to file path and try candidate paths
+        let namespace_path = module_name.replace('\\', "/");
+
+        // Build candidate PHP file paths with common source roots
+        let roots = &["src", "lib", "app", "includes", ""];
+        let mut result = Vec::new();
+        for root in roots {
+            let candidate_file = if root.is_empty() {
+                format!("{}.php", namespace_path)
+            } else {
+                format!("{}/{}.php", root, namespace_path)
+            };
+            // Check if this file exists in ModuleIndex
+            if let Some(files) = module_index.lookup(&candidate_file.replace('/', ".").trim_end_matches(".php").to_string()) {
+                result.extend(files.clone());
+            }
+            result.push(candidate_file);
+        }
+
+        result
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "php")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_php_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "php"
+    }
+}
+
+/// Check if a module name is a known PHP built-in class or common
+/// third-party package.
+///
+/// PHP built-in classes and functions are always available without
+/// importing (PDO, Exception, DateTime, etc.).  Common frameworks
+/// (Laravel/Illuminate, Symfony, Doctrine, etc.) are classified as
+/// external dependencies.
+pub fn is_php_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    let lower = module_name.to_lowercase();
+
+    // PHP built-in classes and interfaces
+    let builtin_classes: &[&str] = &[
+        "pdo", "pdoexception", "pdostatement",
+        "exception", "error", "throwable", "typeerror",
+        "datetime", "datetimeimmutable", "datetimezone", "dateinterval",
+        "dateperiod",
+        "arrayobject", "arrayiterator", "recursivearrayiterator",
+        "closure", "generator", "fiber",
+        "stdclass", "splfileobject", "splfileinfo", "directoryiterator",
+        "recursivedirectoryiterator", "filesystemiterator",
+        "reflectionclass", "reflectionmethod", "reflectionfunction",
+        "reflectionproperty", "reflectionparameter",
+        "domdocument", "domxpath", "domelement", "domattr",
+        "simplexmlelement", "xmlreader", "xmlwriter",
+        "soapclient", "soapserver", "soapfault",
+        "phar", "phardata", "pharfileinfo",
+        "mysqli", "sqlite3", "sqlite3result", "sqlite3stmt",
+        "json", "jsonserializable",
+        "iterator", "iteratoraggregate", "countable",
+        "arrayaccess", "serializable",
+        "streamwrapper", "seekableiterator",
+        "recursiveiterator", "outeriterator",
+        "filteriterator", "callbackfilteriterator",
+        "limititerator", "infiniteiterator",
+        "appenditerator", "multipleiterator",
+        "cachingiterator", "regexiterator",
+        "weakmap", "weakreference",
+        "sensitiveparametervalue",
+        "stringable",
+        "unitenum", "backedenum",
+        "random\\randomizer", "random\\engine",
+        "random\\engine\\secure", "random\\engine\\mt19937",
+        "random\\engine\\pcgoneseq128xslrr64",
+        "random\\engine\\xoshiro256starstar",
+    ];
+
+    // Common PHP framework / third-party prefixes
+    let third_party_prefixes: &[&str] = &[
+        "illuminate\\", "laravel\\",
+        "symfony\\", "doctrine\\",
+        "monolog\\", "phpunit\\",
+        "mockery\\", "psr\\",
+        "league\\", "spatie\\",
+        "guzzlehttp\\", "carbon\\",
+        "phpseclib\\", "swiftmailer\\",
+        "twig\\", "slim\\",
+        "yii\\", "cakephp\\",
+        "zend\\", "laminas\\",
+        "wordpress\\", "drupal\\",
+        "joomla\\", "magento\\",
+        "shopware\\", "composer\\",
+        "ramsey\\", "vlucas\\",
+        "firebase\\", "aws\\",
+        "google\\cloud\\", "stripe\\",
+        "predis\\", "elasticsearch\\",
+        "react\\", "amphp\\",
+    ];
+
+    for prefix in third_party_prefixes {
+        if lower.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    // Direct class name match
+    let root = lower.split('\\').next().unwrap_or(&lower);
+    let lower_str: &str = &lower;
+    if builtin_classes.contains(&root) || builtin_classes.contains(&lower_str) {
+        return true;
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1473,7 +1640,7 @@ mod tests {
     #[test]
     fn test_go_resolver_resolve_module_directory_lookup() {
         let resolver = GoResolver;
-        let mut index = ModuleIndex::empty();
+        let index = ModuleIndex::empty();
         // We need to manually populate the index since empty() won't have any entries
         // For testing, create a temporary DB
         // Since ModuleIndex::empty() starts truly empty, test the path resolution logic
@@ -1721,5 +1888,149 @@ mod tests {
         assert!(!is_rust_external("super::utils"));
         assert!(!is_rust_external("self::helper"));
         assert!(!is_rust_external("my_crate::models"));
+    }
+
+    // ------------------------------------------------------------------
+    // PHP resolver tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_php_resolver_is_external_builtin() {
+        let resolver = PhpResolver;
+        assert!(resolver.is_external("PDO"));
+        assert!(resolver.is_external("Exception"));
+        assert!(resolver.is_external("DateTime"));
+        assert!(resolver.is_external("ArrayObject"));
+        assert!(resolver.is_external("Closure"));
+        assert!(resolver.is_external("stdClass"));
+    }
+
+    #[test]
+    fn test_php_resolver_is_external_third_party() {
+        let resolver = PhpResolver;
+        assert!(resolver.is_external("Illuminate\\Database\\Eloquent\\Model"));
+        assert!(resolver.is_external("Symfony\\Component\\HttpFoundation\\Request"));
+        assert!(resolver.is_external("Doctrine\\ORM\\EntityManager"));
+        assert!(resolver.is_external("Monolog\\Logger"));
+        assert!(resolver.is_external("GuzzleHttp\\Client"));
+    }
+
+    #[test]
+    fn test_php_resolver_is_external_psr() {
+        let resolver = PhpResolver;
+        assert!(resolver.is_external("Psr\\Log\\LoggerInterface"));
+        assert!(resolver.is_external("Psr\\Http\\Message\\RequestInterface"));
+    }
+
+    #[test]
+    fn test_php_resolver_not_external_project() {
+        let resolver = PhpResolver;
+        assert!(!resolver.is_external("App\\Services\\UserService"));
+        assert!(!resolver.is_external("MyApp\\Models\\User"));
+        assert!(!resolver.is_external("Foo\\Bar\\Baz"));
+    }
+
+    #[test]
+    fn test_php_resolver_empty_module_name() {
+        let resolver = PhpResolver;
+        assert!(!resolver.is_external(""));
+    }
+
+    #[test]
+    fn test_php_resolver_language() {
+        let resolver = PhpResolver;
+        assert_eq!(resolver.language(), "php");
+    }
+
+    #[test]
+    fn test_php_resolver_file_to_module_name() {
+        let resolver = PhpResolver;
+        assert_eq!(
+            resolver.file_to_module_name("src/Foo/Bar/Baz.php", Path::new(".")),
+            Some("Foo\\Bar\\Baz".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("app/Models/User.php", Path::new(".")),
+            Some("Models\\User".to_string())
+        );
+        // Non-PHP files return None
+        assert_eq!(
+            resolver.file_to_module_name("src/foo.py", Path::new(".")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_php_resolver_resolve_module_empty_index() {
+        let resolver = PhpResolver;
+        let index = ModuleIndex::empty();
+        // Empty index should still return candidate file paths
+        let candidates = resolver.resolve_module(
+            "Foo\\Bar\\Baz",
+            "src/test.php",
+            Path::new("."),
+            &index,
+        );
+        // Should return candidate paths based on PSR-4 conventions
+        assert!(!candidates.is_empty());
+        assert!(candidates.contains(&"src/Foo/Bar/Baz.php".to_string()));
+        assert!(candidates.contains(&"lib/Foo/Bar/Baz.php".to_string()));
+    }
+
+    #[test]
+    fn test_php_resolver_resolve_module_with_index() {
+        let resolver = PhpResolver;
+        let index = ModuleIndex::empty();
+        // ModuleIndex::empty() returns an empty index, so test the default
+        // path generation without any index data
+        let candidates = resolver.resolve_module(
+            "App\\Services\\UserService",
+            "src/test.php",
+            Path::new("."),
+            &index,
+        );
+        assert!(!candidates.is_empty());
+        assert!(candidates.contains(&"src/App/Services/UserService.php".to_string()));
+    }
+
+    #[test]
+    fn test_php_resolver_resolve_empty_module() {
+        let resolver = PhpResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "",
+            "src/test.php",
+            Path::new("."),
+            &index,
+        );
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_language_registry_get_php() {
+        let r = LanguageRegistry::get("php");
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().language(), "php");
+    }
+
+    #[test]
+    fn test_supported_languages_includes_php() {
+        let langs = LanguageRegistry::supported_languages();
+        assert!(langs.contains(&"php"));
+    }
+
+    #[test]
+    fn test_is_php_external_lowercase() {
+        // is_php_external is case-insensitive
+        assert!(is_php_external("pdo"));
+        assert!(is_php_external("datetime"));
+        assert!(is_php_external("illuminate\\support\\facades\\auth"));
+    }
+
+    #[test]
+    fn test_is_php_external_project_paths() {
+        assert!(!is_php_external("App\\Controllers\\HomeController"));
+        assert!(!is_php_external("src\\utils\\helpers"));
+        assert!(!is_php_external("MyProject\\Domain\\Entity"));
     }
 }

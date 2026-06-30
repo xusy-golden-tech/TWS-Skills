@@ -60,7 +60,7 @@ impl Extractor for PhpExtractor {
         };
         let file_id = ctx.add_node(NodeKind::File, &file_name, &root, HashMap::new());
 
-        let walker = Walker::new();
+        let mut walker = Walker::new();
         walker.walk_node(source, root, ctx, &file_id)?;
 
         Ok(())
@@ -71,17 +71,26 @@ impl Extractor for PhpExtractor {
 // Walker
 // ---------------------------------------------------------------------------
 
-struct Walker;
+struct Walker {
+    /// Maps imported symbol name → fully qualified name.
+    /// E.g. "Baz" → "Foo\\Bar\\Baz", "Alias" → "Foo\\Bar\\Baz"
+    imported_names: HashMap<String, String>,
+    /// Current namespace (from `namespace Foo\Bar;` declaration).
+    current_namespace: String,
+}
 
 impl Walker {
     fn new() -> Self {
-        Self
+        Self {
+            imported_names: HashMap::new(),
+            current_namespace: String::new(),
+        }
     }
 
     /// Main recursive dispatcher. Returns `true` if the node was handled and
     /// children should NOT be recursed by the caller.
     fn walk_node(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -147,7 +156,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_class(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -237,7 +246,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_interface(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -293,7 +302,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_trait(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -327,7 +336,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_namespace(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -387,7 +396,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_function(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -430,7 +439,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_method(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -470,7 +479,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_property(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -512,7 +521,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_use_import(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -520,35 +529,38 @@ impl Walker {
     ) -> anyhow::Result<()> {
         let line = node.start_position().row as u32 + 1;
 
+        // Detect use_type: "function" or "const" (class import is the default).
+        // In tree-sitter-php, 'function' and 'const' are unnamed tokens in the
+        // namespace_use_declaration node. We scan the source text for the keyword
+        // between "use" and the first namespace_use_clause.
+        let node_text = get_text(source, Some(node));
+        let use_type_text = if node_text.contains("function ") {
+            "function".to_string()
+        } else if node_text.contains("const ") {
+            "const".to_string()
+        } else {
+            String::new()
+        };
+
         // namespace_use_declaration → namespace_use_clause → qualified_name / name
         for i in 0..node.named_child_count() {
             if let Some(child) = node.named_child(i) {
                 if child.kind() == "namespace_use_clause" {
                     let qn = find_child_by_kind(child, "qualified_name");
-                    let module_name = get_text(source, qn);
-                    if !module_name.is_empty() {
-                        let target_qn = build_qualified_target(&ctx.file_path, &module_name);
-                        let target = hash_id(&ctx.file_path, &target_qn);
-                        ctx.add_edge(
-                            parent_id,
-                            &target,
-                            EdgeKind::Imports,
-                            line,
-                            Some(&module_name),
-                        );
+                    let full_name = get_text(source, qn);
+                    if !full_name.is_empty() {
+                        self.add_php_import(
+                            source, child, &full_name, &use_type_text,
+                            ctx, parent_id, line,
+                        )?;
                     } else {
                         let name_node = find_child_by_kind(child, "name");
                         let simple_name = get_text(source, name_node);
                         if !simple_name.is_empty() {
-                            let target_qn = build_qualified_target(&ctx.file_path, &simple_name);
-                            let target = hash_id(&ctx.file_path, &target_qn);
-                            ctx.add_edge(
-                                parent_id,
-                                &target,
-                                EdgeKind::Imports,
-                                line,
-                                Some(&simple_name),
-                            );
+                            self.add_php_import(
+                                source, child, &simple_name, &use_type_text,
+                                ctx, parent_id, line,
+                            )?;
                         }
                     }
                 }
@@ -558,12 +570,106 @@ impl Walker {
         Ok(())
     }
 
+    /// Add a single PHP import (class/function/const), creating IMPORTS and
+    /// REFERENCES edges, and populating imported_names.
+    fn add_php_import(
+        &mut self,
+        source: &[u8],
+        clause_node: Node,
+        full_name: &str,
+        use_type: &str,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+        line: u32,
+    ) -> anyhow::Result<()> {
+        // Extract alias if present: `use Foo\Bar as Baz` → alias = "Baz"
+        // In tree-sitter-php, `as` alias is a `name` node with field name "alias"
+        let alias_node = clause_node.child_by_field_name("alias");
+        let alias_name = get_text(source, alias_node);
+
+        // Determine local name (what the symbol is called locally)
+        let local_name = if !alias_name.is_empty() {
+            alias_name.clone()
+        } else {
+            // Last segment after last backslash
+            full_name
+                .rsplit('\\')
+                .next()
+                .unwrap_or(full_name)
+                .to_string()
+        };
+
+        // Determine the canonical symbol name (original name, not alias)
+        // Class:   Foo\Bar\Baz → symbol = "Baz"
+        // Func:    Foo\Bar\helper → symbol = "helper"
+        // Const:   Foo\Bar\MY_CONST → symbol = "MY_CONST"
+        let symbol_name = full_name
+            .rsplit('\\')
+            .next()
+            .unwrap_or(full_name)
+            .to_string();
+
+        // Determine module_part for REFERENCES edge
+        // Class:   Foo\Bar\Baz → module = "Foo\Bar\Baz" (the full FQN)
+        // Func:    Foo\Bar\helper → module = "Foo\Bar" (prefix before function name)
+        // Const:   Foo\Bar\MY_CONST → module = "Foo\Bar" (prefix before const name)
+        let module_part = if use_type == "function" || use_type == "const" {
+            // Function/const import: strip the last segment to get module path
+            if let Some(last_bs) = full_name.rfind('\\') {
+                full_name[..last_bs].to_string()
+            } else {
+                String::new()
+            }
+        } else {
+            // Class import: the full name IS the module
+            full_name.to_string()
+        };
+
+        // The full qualified reference text (used for both REFERENCES edge and
+        // call/type_ref lookups). Format: "module_part::symbol_name"
+        let ref_target_text = if module_part.is_empty() {
+            format!("{}::{}", full_name, symbol_name)
+        } else {
+            format!("{}::{}", module_part, symbol_name)
+        };
+
+        // Store in imported_names: local_name → full qualified reference text
+        // This ensures aliased imports (e.g. `use Foo\Bar\Baz as Alias`)
+        // still produce the correct qualified reference to the original symbol.
+        self.imported_names
+            .insert(local_name.clone(), ref_target_text.clone());
+
+        // Create IMPORTS edge
+        let target_qn = build_qualified_target(&ctx.file_path, full_name);
+        let target = hash_id(&ctx.file_path, &target_qn);
+        ctx.add_edge(
+            parent_id,
+            &target,
+            EdgeKind::Imports,
+            line,
+            Some(full_name),
+        );
+
+        // Create REFERENCES edge with :: separator for resolver parsing
+        let ref_target_qn = build_qualified_target(&ctx.file_path, &ref_target_text);
+        let ref_target = hash_id(&ctx.file_path, &ref_target_qn);
+        ctx.add_edge(
+            parent_id,
+            &ref_target,
+            EdgeKind::References,
+            line,
+            Some(&ref_target_text),
+        );
+
+        Ok(())
+    }
+
     // ------------------------------------------------------------------
     // Trait use extraction (use TraitName inside class body)
     // ------------------------------------------------------------------
 
     fn extract_trait_use(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -599,7 +705,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_attributes(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -639,7 +745,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_type_ref(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -652,14 +758,20 @@ impl Walker {
             .or_else(|| find_child_by_kind(node, "name"));
         let type_name = get_text(source, type_name_node);
         if !type_name.is_empty() {
-            let target_qn = build_qualified_target(&ctx.file_path, &type_name);
+            // Check if this type is imported — if so, use qualified target_text
+            let target_text = if let Some(qualified) = self.imported_names.get(&type_name) {
+                qualified.clone()
+            } else {
+                type_name.clone()
+            };
+            let target_qn = build_qualified_target(&ctx.file_path, &target_text);
             let target = hash_id(&ctx.file_path, &target_qn);
             ctx.add_edge(
                 parent_id,
                 &target,
                 EdgeKind::TypeRef,
                 line,
-                Some(&type_name),
+                Some(&target_text),
             );
         }
 
@@ -671,7 +783,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_call(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -713,14 +825,20 @@ impl Walker {
                     let name_node = find_child_by_kind(node, "name");
                     let simple_name = get_text(source, name_node);
                     if !simple_name.is_empty() && simple_name != "argument_list" {
-                        let target_qn = build_qualified_target(&ctx.file_path, &simple_name);
+                        // Check if this function is imported — use qualified target_text
+                        let target_text = if let Some(qualified) = self.imported_names.get(&simple_name) {
+                            qualified.clone()
+                        } else {
+                            simple_name.clone()
+                        };
+                        let target_qn = build_qualified_target(&ctx.file_path, &target_text);
                         let target = hash_id(&ctx.file_path, &target_qn);
                         ctx.add_edge(
                             parent_id,
                             &target,
                             EdgeKind::Calls,
                             line,
-                            Some(&simple_name),
+                            Some(&target_text),
                         );
                     }
                 }
@@ -761,7 +879,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn walk_all_children(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -780,7 +898,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_require_include(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -1270,5 +1388,235 @@ function helper(): string
 
         let namespaces = find_nodes(&ctx, NodeKind::Namespace);
         assert_eq!(namespaces.len(), 1, "Expected 1 namespace");
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-file import resolution tests (Stage 7: PHP)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_class_import_creates_references() {
+        let ctx = extract(
+            "<?php\nuse Foo\\Bar\\Baz;\n",
+            "src/test.php",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert!(!refs.is_empty(), "Expected REFERENCES edge for class import");
+        let targets: Vec<&str> = refs
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.iter().any(|t| t.contains("Foo\\Bar\\Baz::Baz")),
+            "Expected Foo\\Bar\\Baz::Baz in REFERENCES targets: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn test_extract_aliased_import_creates_references() {
+        let ctx = extract(
+            "<?php\nuse Foo\\Bar\\Baz as Alias;\n",
+            "src/test.php",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert!(!refs.is_empty(), "Expected REFERENCES edge for aliased import");
+        let targets: Vec<&str> = refs
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.iter().any(|t| t.contains("Foo\\Bar\\Baz::Baz")),
+            "Expected Foo\\Bar\\Baz::Baz in REFERENCES targets: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn test_extract_function_import_creates_references() {
+        let ctx = extract(
+            "<?php\nuse function Foo\\Bar\\helper;\n",
+            "src/test.php",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert!(!refs.is_empty(), "Expected REFERENCES edge for function import");
+        let targets: Vec<&str> = refs
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.iter().any(|t| t.contains("Foo\\Bar::helper")),
+            "Expected Foo\\Bar::helper in REFERENCES targets: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn test_extract_const_import_creates_references() {
+        let ctx = extract(
+            "<?php\nuse const Foo\\Bar\\MY_CONST;\n",
+            "src/test.php",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert!(!refs.is_empty(), "Expected REFERENCES edge for const import");
+        let targets: Vec<&str> = refs
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.iter().any(|t| t.contains("Foo\\Bar::MY_CONST")),
+            "Expected Foo\\Bar::MY_CONST in REFERENCES targets: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn test_extract_multiple_imports_references() {
+        let ctx = extract(
+            "<?php\nuse Foo\\Bar\\Baz;\nuse Foo\\Bar\\Qux;\n",
+            "src/test.php",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert!(refs.len() >= 2, "Expected at least 2 REFERENCES edges, got {}", refs.len());
+        let targets: Vec<&str> = refs
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.iter().any(|t| t.contains("Foo\\Bar\\Baz::Baz")),
+            "Expected Baz REF: {:?}", targets
+        );
+        assert!(
+            targets.iter().any(|t| t.contains("Foo\\Bar\\Qux::Qux")),
+            "Expected Qux REF: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_extract_import_preserves_imports_edge() {
+        let ctx = extract(
+            "<?php\nuse Foo\\Bar\\Baz;\n",
+            "src/test.php",
+        );
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        let targets: Vec<&str> = imports
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.iter().any(|t| t.contains("Foo\\Bar\\Baz")),
+            "Expected Foo\\Bar\\Baz in IMPORTS targets: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn test_extract_imported_call_qualified() {
+        let ctx = extract(
+            r#"<?php
+use function Foo\Bar\helper;
+
+function test(): void {
+    helper();
+}
+"#,
+            "src/test.php",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.iter().any(|t| t.contains("Foo\\Bar::helper")),
+            "Expected qualified Foo\\Bar::helper in call targets: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn test_extract_non_imported_call_bare() {
+        let ctx = extract(
+            "<?php\nfunction test(): void {\n    localFunc();\n}\n",
+            "src/test.php",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.contains(&"localFunc"),
+            "Expected bare 'localFunc' in call targets: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn test_extract_imported_type_ref_qualified() {
+        let ctx = extract(
+            r#"<?php
+use Foo\Bar\User;
+
+function process(User $user): User {
+    return $user;
+}
+"#,
+            "src/test.php",
+        );
+        let type_refs = find_edges(&ctx, EdgeKind::TypeRef);
+        let targets: Vec<&str> = type_refs
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.iter().any(|t| t.contains("Foo\\Bar\\User::User")),
+            "Expected Foo\\Bar\\User::User in type refs: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn test_extract_non_imported_type_ref_bare() {
+        let ctx = extract(
+            r"<?php
+function test(LocalClass $x): void {}
+",
+            "src/test.php",
+        );
+        let type_refs = find_edges(&ctx, EdgeKind::TypeRef);
+        let targets: Vec<&str> = type_refs
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.iter().any(|t| *t == "LocalClass"),
+            "Expected bare 'LocalClass' in type refs: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn test_extract_aliased_function_import_qualified() {
+        let ctx = extract(
+            r#"<?php
+use function Foo\Bar\helper as h;
+
+function test(): void {
+    h();
+}
+"#,
+            "src/test.php",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            targets.iter().any(|t| t.contains("Foo\\Bar::helper")),
+            "Expected aliased qualified Foo\\Bar::helper in call targets: {:?}",
+            targets
+        );
     }
 }

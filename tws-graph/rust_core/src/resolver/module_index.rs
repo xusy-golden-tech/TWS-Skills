@@ -101,6 +101,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "kotlin" => infer_kotlin_module(file_path),
         "go" => infer_go_module(file_path),
         "rust" => infer_rust_module(file_path),
+        "php" => infer_php_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -440,6 +441,56 @@ fn strip_rust_src_prefix(module: &str) -> String {
         return String::new();
     }
     module.to_string()
+}
+
+/// PHP module name inference.
+///
+/// Rules:
+/// 1. Only handle `.php` files.
+/// 2. Strip the `.php` extension.
+/// 3. Strip common source root prefixes (`src/`, `lib/`, `app/`, `includes/`).
+/// 4. Replace path separators with backslashes (PHP namespace convention).
+///
+/// Examples:
+/// - `src/Foo/Bar/Baz.php` → `Foo\Bar\Baz`
+/// - `lib/Services/UserService.php` → `Services\UserService`
+/// - `app/Models/User.php` → `Models\User`
+fn infer_php_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle .php files
+    if !path.ends_with(".php") {
+        return None;
+    }
+
+    // Strip .php extension
+    let without_ext = &path[..path.len() - 4];
+
+    // Strip common PHP source root prefixes
+    let stripped = strip_php_source_root(without_ext);
+
+    // Replace / with \ for PHP namespace convention
+    let module = stripped.replace('/', "\\");
+    Some(module)
+}
+
+/// Strip common PHP source root prefixes.
+fn strip_php_source_root(path: &str) -> String {
+    let prefixes = &[
+        ("src/", "src/"),
+        ("lib/", "lib/"),
+        ("app/", "app/"),
+        ("includes/", "includes/"),
+        ("public/", "public/"),
+    ];
+
+    for (_name, prefix) in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+
+    path.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -899,5 +950,56 @@ mod tests {
             infer_module_name("src/core/mod.rs", "rust"),
             Some("core".to_string())
         );
+    }
+
+    // ------------------------------------------------------------------
+    // PHP module name inference
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_php_module_basic() {
+        assert_eq!(
+            infer_module_name("src/Foo/Bar/Baz.php", "php"),
+            Some("Foo\\Bar\\Baz".to_string())
+        );
+        assert_eq!(
+            infer_module_name("lib/Services/UserService.php", "php"),
+            Some("Services\\UserService".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_php_module_app_prefix() {
+        assert_eq!(
+            infer_module_name("app/Models/User.php", "php"),
+            Some("Models\\User".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_php_module_includes_prefix() {
+        assert_eq!(
+            infer_module_name("includes/Database/Connection.php", "php"),
+            Some("Database\\Connection".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_php_module_no_prefix() {
+        assert_eq!(
+            infer_module_name("Controller.php", "php"),
+            Some("Controller".to_string())
+        );
+        assert_eq!(
+            infer_module_name("deep/path/Class.php", "php"),
+            Some("deep\\path\\Class".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_php_module_non_php() {
+        assert_eq!(infer_module_name("src/foo.py", "php"), None);
+        assert_eq!(infer_module_name("src/foo.java", "php"), None);
+        assert_eq!(infer_module_name("src/foo.ts", "php"), None);
     }
 }
