@@ -117,6 +117,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "dart" => infer_dart_module(file_path),
         "swift" => infer_swift_module(file_path),
         "lua" => infer_lua_module(file_path),
+        "groovy" => infer_groovy_module(file_path),
         "bash" => infer_bash_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
@@ -892,6 +893,72 @@ fn strip_lua_source_root(path: &str) -> String {
             return path[prefix.len()..].to_string();
         }
     }
+    path.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Groovy module name inference (Stage 16)
+// ---------------------------------------------------------------------------
+
+/// Groovy module name inference.
+///
+/// Rules:
+/// 1. Strip `.groovy` extension.
+/// 2. Strip common source root prefixes: `src/main/groovy/`, `src/test/groovy/`,
+///    `src/main/java/`, `src/test/java/`, `src/`.
+/// 3. Replace path separators with dots.
+///
+/// Groovy follows JVM package conventions identical to Java.
+/// Groovy files can coexist in the same source trees as Java.
+///
+/// Examples:
+/// - `src/main/groovy/com/foo/bar/MyClass.groovy` → `com.foo.bar.MyClass`
+/// - `src/test/groovy/com/foo/BarTest.groovy` → `com.foo.BarTest`
+/// - `src/com/example/Utils.groovy` → `com.example.Utils`
+/// - `scripts/deploy.groovy` → `scripts.deploy`
+fn infer_groovy_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle .groovy files
+    if !path.ends_with(".groovy") {
+        return None;
+    }
+
+    // Strip .groovy extension
+    let without_ext = &path[..path.len() - 7];
+
+    // Strip common Groovy/Java source root prefixes
+    let stripped = strip_groovy_source_root(without_ext);
+
+    // Replace / with . to get dotted package notation
+    let module = stripped.replace('/', ".");
+
+    if module.is_empty() {
+        None
+    } else {
+        Some(module)
+    }
+}
+
+/// Strip Groovy source root prefixes.
+fn strip_groovy_source_root(path: &str) -> String {
+    let prefixes = &[
+        ("src/main/groovy/", "src/main/groovy/"),
+        ("src/test/groovy/", "src/test/groovy/"),
+        ("src/main/java/", "src/main/java/"),
+        ("src/test/java/", "src/test/java/"),
+        ("src/main/", "src/main/"),
+        ("src/test/", "src/test/"),
+        ("src/", "src/"),
+        ("lib/", "lib/"),
+    ];
+
+    for (_name, prefix) in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+
     path.to_string()
 }
 
@@ -1980,5 +2047,71 @@ mod tests {
         assert_eq!(strip_bash_source_root("lib/utils.sh"), "utils.sh");
         assert_eq!(strip_bash_source_root("no_prefix.sh"), "no_prefix.sh");
         assert_eq!(strip_bash_source_root("subdir/script.sh"), "subdir/script.sh");
+    }
+
+    // ------------------------------------------------------------------
+    // Groovy module name inference (Stage 16)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_groovy_module_maven_src() {
+        assert_eq!(
+            infer_module_name("src/main/groovy/com/foo/bar/MyClass.groovy", "groovy"),
+            Some("com.foo.bar.MyClass".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_groovy_module_simple_src() {
+        assert_eq!(
+            infer_module_name("src/com/example/Utils.groovy", "groovy"),
+            Some("com.example.Utils".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_groovy_module_test_src() {
+        assert_eq!(
+            infer_module_name("src/test/groovy/com/foo/BarTest.groovy", "groovy"),
+            Some("com.foo.BarTest".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_groovy_module_in_java_src_tree() {
+        // Groovy files can coexist in src/main/java/
+        assert_eq!(
+            infer_module_name("src/main/java/com/foo/bar/Script.groovy", "groovy"),
+            Some("com.foo.bar.Script".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_groovy_module_no_prefix() {
+        assert_eq!(
+            infer_module_name("com/foo/bar/App.groovy", "groovy"),
+            Some("com.foo.bar.App".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_groovy_module_non_groovy() {
+        assert_eq!(infer_module_name("src/com/foo/bar.java", "groovy"), None);
+        assert_eq!(infer_module_name("src/com/foo/bar.kt", "groovy"), None);
+        assert_eq!(infer_module_name("src/com/foo/bar.py", "groovy"), None);
+    }
+
+    #[test]
+    fn test_infer_groovy_module_deep_nested() {
+        assert_eq!(
+            infer_module_name("src/main/groovy/com/example/service/impl/UserServiceImpl.groovy", "groovy"),
+            Some("com.example.service.impl.UserServiceImpl".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_groovy_source_root() {
+        assert_eq!(strip_groovy_source_root("com/foo/bar"), "com/foo/bar");
+        assert_eq!(strip_groovy_source_root("scripts/deploy"), "scripts/deploy");
     }
 }
