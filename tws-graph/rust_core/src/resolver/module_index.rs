@@ -110,6 +110,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "csharp" => infer_csharp_module(file_path),
         "dart" => infer_dart_module(file_path),
         "swift" => infer_swift_module(file_path),
+        "lua" => infer_lua_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -824,6 +825,66 @@ fn strip_swift_source_root(path: &str) -> String {
         }
     }
 
+    path.to_string()
+}
+
+/// Lua module name inference.
+///
+/// Rules:
+/// 1. Only handle `.lua` files.
+/// 2. Strip the `.lua` extension.
+/// 3. Strip common source root prefixes (`src/`, `lib/`, `lua/`).
+/// 4. Replace path separators with dots (Lua `require("foo.bar")` convention).
+///
+/// Examples:
+/// - `src/foo.lua` → `foo`
+/// - `src/foo/bar.lua` → `foo.bar`
+/// - `lib/http/request.lua` → `http.request`
+/// - `main.lua` → `main`
+/// - `src/foo/bar/init.lua` → `foo.bar` (Lua init module convention)
+fn infer_lua_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle .lua files
+    if !path.ends_with(".lua") {
+        return None;
+    }
+
+    // Strip .lua extension
+    let without_ext = &path[..path.len() - 4];
+
+    // Handle init.lua: `src/foo/bar/init.lua` → module = "foo.bar"
+    // Strip source root BEFORE converting / to . so strip_lua_source_root works correctly
+    let stripped = if without_ext.ends_with("/init") {
+        let dir_part = &without_ext[..without_ext.len() - 5]; // strip "/init"
+        if dir_part.is_empty() {
+            return Some(String::new()); // root-level init.lua → root module
+        }
+        strip_lua_source_root(dir_part)
+    } else if without_ext == "init" {
+        return Some(String::new());
+    } else {
+        strip_lua_source_root(without_ext)
+    };
+
+    // Replace / with . for Lua module convention
+    let module = stripped.replace('/', ".");
+
+    if module.is_empty() {
+        None
+    } else {
+        Some(module)
+    }
+}
+
+/// Strip common Lua source root prefixes.
+fn strip_lua_source_root(path: &str) -> String {
+    let prefixes = &["src/", "lib/", "lua/"];
+    for prefix in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
     path.to_string()
 }
 
@@ -1725,5 +1786,76 @@ mod tests {
         assert_eq!(strip_swift_source_root("src/models"), "models");
         assert_eq!(strip_swift_source_root("lib/core"), "core");
         assert_eq!(strip_swift_source_root("no_prefix"), "no_prefix");
+    }
+
+    // ------------------------------------------------------------------
+    // Lua module name inference (Stage 14)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_lua_module_src() {
+        assert_eq!(
+            infer_module_name("src/foo.lua", "lua"),
+            Some("foo".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/foo/bar.lua", "lua"),
+            Some("foo.bar".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_lua_module_lib() {
+        assert_eq!(
+            infer_module_name("lib/http.lua", "lua"),
+            Some("http".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_lua_module_no_prefix() {
+        assert_eq!(
+            infer_module_name("main.lua", "lua"),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            infer_module_name("utils/helpers.lua", "lua"),
+            Some("utils.helpers".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_lua_module_init() {
+        assert_eq!(
+            infer_module_name("src/foo/init.lua", "lua"),
+            Some("foo".to_string())
+        );
+        assert_eq!(
+            infer_module_name("init.lua", "lua"),
+            Some("".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_lua_module_non_lua() {
+        assert_eq!(infer_module_name("src/foo.py", "lua"), None);
+        assert_eq!(infer_module_name("src/foo.java", "lua"), None);
+        assert_eq!(infer_module_name("src/foo.rb", "lua"), None);
+    }
+
+    #[test]
+    fn test_infer_lua_module_deep_nested() {
+        assert_eq!(
+            infer_module_name("src/features/auth/services/login.lua", "lua"),
+            Some("features.auth.services.login".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_lua_source_root() {
+        assert_eq!(strip_lua_source_root("src/foo"), "foo");
+        assert_eq!(strip_lua_source_root("lib/http"), "http");
+        assert_eq!(strip_lua_source_root("lua/mylib"), "mylib");
+        assert_eq!(strip_lua_source_root("no_prefix"), "no_prefix");
     }
 }

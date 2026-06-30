@@ -29,13 +29,14 @@ impl LanguageRegistry {
             "csharp" => Some(Box::new(CSharpResolver)),
             "dart" => Some(Box::new(DartResolver)),
             "swift" => Some(Box::new(SwiftResolver)),
+            "lua" => Some(Box::new(LuaResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift", "lua"]
     }
 }
 
@@ -2405,6 +2406,126 @@ pub fn is_swift_external(module_name: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Lua module resolver (Stage 14)
+// ---------------------------------------------------------------------------
+
+/// Lua module resolver.
+///
+/// Handles Lua's module system via `require`:
+/// - `require("foo")` → loads `foo.lua` or `foo/init.lua` from source roots
+/// - `require("foo.bar")` → loads `foo/bar.lua` or `foo/bar/init.lua`
+///
+/// Lua modules use `.` as a namespace separator which maps to `/` for
+/// file path resolution.
+pub struct LuaResolver;
+
+impl ModuleResolver for LuaResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        _source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        if module_name.is_empty() {
+            return Vec::new();
+        }
+
+        // 1. Direct ModuleIndex lookup by module name
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Try with common source root prefixes
+        for prefix in &["", "src.", "lib.", "lua."] {
+            let candidate = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&candidate) {
+                return files.clone();
+            }
+        }
+
+        // 3. Generate candidate file paths based on module_name
+        //    require("foo") → foo.lua, foo/init.lua
+        //    require("foo.bar") → foo/bar.lua, foo/bar/init.lua
+        let mut candidates = Vec::new();
+
+        let module_path = module_name.replace('.', "/");
+        for prefix in &["src/", "lib/", "lua/", ""] {
+            // Regular .lua file
+            let file_candidate = format!("{}{}.lua", prefix, module_path);
+            candidates.push(file_candidate);
+
+            // init.lua (module directory)
+            let init_candidate = format!("{}{}/init.lua", prefix, module_path);
+            candidates.push(init_candidate);
+        }
+
+        candidates
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "lua")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_lua_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "lua"
+    }
+}
+
+/// Check if a module name is a known Lua standard library.
+///
+/// Lua has a small standard library.  Common third-party Lua packages
+/// (installed via LuaRocks) are also classified as external.
+pub fn is_lua_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    let root = module_name.split('.').next().unwrap_or(module_name);
+
+    // Lua standard library modules
+    let lua_stdlib: &[&str] = &[
+        "string", "table", "math", "io", "os", "coroutine",
+        "debug", "utf8", "package",
+    ];
+
+    if lua_stdlib.contains(&root) {
+        return true;
+    }
+
+    // Common third-party Lua packages (LuaRocks)
+    let third_party: &[&str] = &[
+        "luasocket", "socket", "http", "mime", "ltn12",
+        "lpeg", "luafilesystem", "lfs",
+        "luasec", "ssl",
+        "luajson", "cjson", "dkjson",
+        "lua-cjson",
+        "penlight", "pl",
+        "busted", "luacheck", "luacov",
+        "argparse", "luaposix",
+        "redis-lua", "lua-resty-redis",
+        "pgmoon", "lua-resty-mysql",
+        "lapis", "lua-resty-http",
+        "moonscript",
+        "inspect",
+    ];
+
+    if third_party.contains(&root) {
+        return true;
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4297,5 +4418,155 @@ mod tests {
     fn test_supported_languages_includes_swift() {
         let langs = LanguageRegistry::supported_languages();
         assert!(langs.contains(&"swift"), "Expected 'swift' in supported languages");
+    }
+
+    // ------------------------------------------------------------------
+    // Lua resolver tests (Stage 14)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_lua_resolver_is_external_stdlib() {
+        let resolver = LuaResolver;
+        assert!(resolver.is_external("string"));
+        assert!(resolver.is_external("table"));
+        assert!(resolver.is_external("math"));
+        assert!(resolver.is_external("io"));
+        assert!(resolver.is_external("os"));
+        assert!(resolver.is_external("coroutine"));
+        assert!(resolver.is_external("debug"));
+        assert!(resolver.is_external("package"));
+        assert!(resolver.is_external("utf8"));
+    }
+
+    #[test]
+    fn test_lua_resolver_is_external_nested() {
+        let resolver = LuaResolver;
+        // "socket.http" → root "socket" is third-party
+        assert!(resolver.is_external("socket.http"));
+        // "pl.stringx" → root "pl" is third-party (Penlight)
+        assert!(resolver.is_external("pl.stringx"));
+    }
+
+    #[test]
+    fn test_lua_resolver_not_external_project_module() {
+        let resolver = LuaResolver;
+        assert!(!resolver.is_external("myproject.utils"));
+        assert!(!resolver.is_external("src.main"));
+        assert!(!resolver.is_external("app.core"));
+        assert!(!resolver.is_external("mymodule"));
+    }
+
+    #[test]
+    fn test_lua_resolver_empty_module_name() {
+        let resolver = LuaResolver;
+        assert!(!resolver.is_external(""));
+    }
+
+    #[test]
+    fn test_lua_resolver_language() {
+        let resolver = LuaResolver;
+        assert_eq!(resolver.language(), "lua");
+    }
+
+    #[test]
+    fn test_lua_resolver_file_to_module_name() {
+        let resolver = LuaResolver;
+        assert_eq!(
+            resolver.file_to_module_name("src/mymod.lua", Path::new(".")),
+            Some("mymod".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("lib/http/request.lua", Path::new(".")),
+            Some("http.request".to_string())
+        );
+    }
+
+    #[test]
+    fn test_lua_resolver_resolve_module_empty_index() {
+        let resolver = LuaResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "mymod",
+            "src/main.lua",
+            Path::new("."),
+            &index,
+        );
+        // Should generate candidate file paths
+        assert!(!candidates.is_empty(), "Expected candidate paths for Lua module");
+        assert!(candidates.contains(&"src/mymod.lua".to_string()));
+        assert!(candidates.contains(&"src/mymod/init.lua".to_string()));
+    }
+
+    #[test]
+    fn test_lua_resolver_resolve_module_generates_candidates_with_empty_index() {
+        let resolver = LuaResolver;
+        let index = ModuleIndex::empty();
+
+        // For "http", the resolver should generate candidate paths
+        let candidates = resolver.resolve_module(
+            "http",
+            "src/main.lua",
+            Path::new("."),
+            &index,
+        );
+        // Should generate src/http.lua, lib/http.lua, lua/http.lua, http.lua,
+        // and init.lua variants for each
+        assert!(!candidates.is_empty(), "Expected candidate paths for Lua module");
+        assert!(candidates.contains(&"src/http.lua".to_string()), "Expected src/http.lua candidate");
+        assert!(candidates.contains(&"src/http/init.lua".to_string()), "Expected src/http/init.lua candidate");
+        assert!(candidates.contains(&"http.lua".to_string()), "Expected http.lua candidate");
+    }
+
+    #[test]
+    fn test_lua_resolver_resolve_nested_module_candidates() {
+        let resolver = LuaResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "foo.bar.baz",
+            "src/main.lua",
+            Path::new("."),
+            &index,
+        );
+        // Should generate foo/bar/baz.lua and foo/bar/baz/init.lua candidates
+        assert!(candidates.contains(&"src/foo/bar/baz.lua".to_string()));
+        assert!(candidates.contains(&"src/foo/bar/baz/init.lua".to_string()));
+        // Also without src prefix
+        assert!(candidates.contains(&"foo/bar/baz.lua".to_string()));
+        assert!(candidates.contains(&"foo/bar/baz/init.lua".to_string()));
+    }
+
+    #[test]
+    fn test_lua_resolver_resolve_empty_module() {
+        let resolver = LuaResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "",
+            "src/main.lua",
+            Path::new("."),
+            &index,
+        );
+        assert!(candidates.is_empty(), "Empty module should return no candidates");
+    }
+
+    #[test]
+    fn test_language_registry_get_lua() {
+        let r = LanguageRegistry::get("lua");
+        assert!(r.is_some(), "Expected Lua resolver to be registered");
+        assert_eq!(r.unwrap().language(), "lua");
+    }
+
+    #[test]
+    fn test_supported_languages_includes_lua() {
+        let langs = LanguageRegistry::supported_languages();
+        assert!(langs.contains(&"lua"), "Expected 'lua' in supported languages");
+    }
+
+    #[test]
+    fn test_is_lua_external_third_party_luarocks() {
+        assert!(is_lua_external("luasocket"));
+        assert!(is_lua_external("lpeg"));
+        assert!(is_lua_external("luafilesystem"));
+        assert!(is_lua_external("penlight"));
+        assert!(is_lua_external("busted"));
     }
 }

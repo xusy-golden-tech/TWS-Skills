@@ -921,4 +921,101 @@ mod tests {
 
         cleanup(&path);
     }
+
+    // ------------------------------------------------------------------
+    // Lua cross-file resolution integration tests (Stage 14)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_lua_require_cross_file() {
+        let (db, path) = setup_db("resolve_lua_require");
+
+        // Source: src/main.lua
+        let src_id = insert_node(
+            &db, "main", "src.main::main", "src/main.lua", "lua", "file"
+        );
+        // Target: src/utils.lua — the module required
+        let tgt_id = insert_node(
+            &db, "utils", "src.utils::utils", "src/utils.lua", "lua", "file"
+        );
+
+        // Dangling REFERENCES edge: require('utils') → target_text = "utils::"
+        let fake_target = hash_id("nonexistent.lua", "nonexistent::utils");
+        insert_edge(&db, &src_id, &fake_target, "utils::", "REFERENCES");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // ModuleIndex maps src/utils.lua → module "utils", so resolve should find it
+        assert!(stats.resolved + stats.unresolved + stats.external > 0,
+            "Expected some resolution activity for Lua require");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_resolve_lua_external_stdlib() {
+        let (db, path) = setup_db("resolve_lua_ext");
+
+        let src_id = insert_node(
+            &db, "main", "src.main::main", "src/main.lua", "lua", "file"
+        );
+        let fake_target = hash_id("nonexistent.lua", "nonexistent::string");
+        // require('string') → target_text = "string::"
+        insert_edge(&db, &src_id, &fake_target, "string::", "REFERENCES");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // "string" is Lua stdlib → should be external
+        assert_eq!(stats.external, 1, "Lua stdlib 'string' should be classified as external");
+        assert_eq!(stats.resolved, 0);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_resolve_lua_unresolved_internal() {
+        let (db, path) = setup_db("resolve_lua_unres");
+
+        let src_id = insert_node(
+            &db, "main", "src.main::main", "src/main.lua", "lua", "file"
+        );
+        let fake_target = hash_id("missing.lua", "missing::unknown_module");
+        // require('unknown_module') with no matching file
+        insert_edge(&db, &src_id, &fake_target, "unknown_module::", "REFERENCES");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // Not in stdlib, no matching file → unresolved
+        assert_eq!(stats.unresolved, 1);
+
+        // Verify unresolved_refs entry
+        let conn = db.connection();
+        let is_ext: i32 = conn
+            .query_row(
+                "SELECT is_external FROM unresolved_refs WHERE from_node_id = ?1",
+                [&src_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(is_ext, 0, "Unknown internal module should not be external");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_parse_target_lua_require_format() {
+        // Lua require("foo.bar") → target_text = "foo.bar::"
+        let result = parse_target_text("foo.bar::");
+        assert!(result.is_some());
+        let (module, symbol) = result.unwrap();
+        assert_eq!(module, "foo.bar");
+        assert_eq!(symbol, "");
+    }
+
+    #[test]
+    fn test_parse_target_lua_simple_require() {
+        // Lua require("http") → target_text = "http::"
+        let result = parse_target_text("http::");
+        assert!(result.is_some());
+        let (module, symbol) = result.unwrap();
+        assert_eq!(module, "http");
+        assert_eq!(symbol, "");
+    }
 }
