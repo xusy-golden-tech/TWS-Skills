@@ -19,6 +19,7 @@
 //! - `calls`: invocation_expression
 //! - `contains`: containment hierarchy
 //! - `imports`: using_directive
+//! - `references`: using_directive (cross-file resolution, v7.3.0)
 //! - `decorates`: attribute_list on declarations
 //! - `type_ref`: generic type parameters
 //! - `reads`: inferred from property get accessor
@@ -70,6 +71,21 @@ fn is_system_ns(name: &str) -> bool {
     CSHARP_SYSTEM_NS.contains(&name)
 }
 
+/// Check if a namespace/type name is from known external libraries.
+fn is_external_ns(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    // System.* and Microsoft.* are external
+    if name.starts_with("System.") || name.starts_with("System")
+        || name.starts_with("Microsoft.")
+    {
+        return true;
+    }
+    // Check against the system namespace list (exact match)
+    is_system_ns(name)
+}
+
 // ---------------------------------------------------------------------------
 // CSharpExtractor
 // ---------------------------------------------------------------------------
@@ -102,606 +118,1031 @@ impl Extractor for CSharpExtractor {
         };
         let file_id = ctx.add_node(NodeKind::File, &file_name, &root, HashMap::new());
 
-        walk_children(source, root, ctx, &file_id)?;
+        let mut walker = Walker::new();
+        walker.walk_children(source, root, ctx, &file_id)?;
 
         Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Tree walker
+// Walker — scope-aware tree walker with imported_names tracking
 // ---------------------------------------------------------------------------
 
-fn walk_children(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<()> {
-    for i in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(i) {
-            match child.kind() {
-                "namespace_declaration" => {
-                    extract_namespace(source, child, ctx, parent_id)?;
+struct Walker {
+    /// Maps imported simple name → fully qualified reference text.
+    /// e.g. `using Foo.Bar.Baz;` populates "Baz" → "Foo.Bar.Baz::Baz"
+    /// e.g. `using MyAlias = Foo.Bar.Baz;` populates "MyAlias" → "Foo.Bar.Baz::Baz"
+    imported_names: HashMap<String, String>,
+    /// Track class/struct scope for context.
+    class_stack: Vec<String>,
+}
+
+impl Walker {
+    fn new() -> Self {
+        Self {
+            imported_names: HashMap::new(),
+            class_stack: Vec::new(),
+        }
+    }
+
+    /// Qualify a simple type name using imported_names.
+    fn qualify_name(&self, simple_name: &str) -> String {
+        // Handle dotted names: for "Foo.Bar", check if "Foo" is imported
+        if let Some(dot_pos) = simple_name.find('.') {
+            let first = &simple_name[..dot_pos];
+            if let Some(qualified) = self.imported_names.get(first) {
+                // Replace the first segment with qualified target
+                // qualified is like "Some.Namespace.Foo::Foo"
+                // We need to extract the module part and append the rest
+                let rest = &simple_name[dot_pos + 1..];
+                // Extract module part from qualified ref (before ::)
+                if let Some(colon_pos) = qualified.find("::") {
+                    let module = &qualified[..colon_pos];
+                    return format!("{}::{}", module, rest);
                 }
-                "class_declaration" => {
-                    extract_class(source, child, ctx, parent_id)?;
+                return format!("{}::{}", qualified, rest);
+            }
+        }
+
+        // Try simple name directly in imported_names
+        self.imported_names
+            .get(simple_name)
+            .cloned()
+            .unwrap_or_else(|| simple_name.to_string())
+    }
+
+    /// For call targets: "SomeClass.Method()" → qualify "SomeClass" if imported.
+    /// Returns the qualified target_text for the call edge.
+    fn qualify_call_target(&self, source: &[u8], func: Node) -> String {
+        match func.kind() {
+            "identifier" => {
+                let name = get_text(source, Some(func));
+                // Check if the function name itself is from a static import
+                if let Some(qualified) = self.imported_names.get(&name) {
+                    // Static import: the method is directly callable
+                    return qualified.clone();
                 }
-                "interface_declaration" => {
-                    extract_interface(source, child, ctx, parent_id)?;
+                name
+            }
+            "member_access_expression" => {
+                let method_name = get_text(source, func.child_by_field_name("name"));
+                // tree-sitter-c-sharp uses "expression" field for the left side
+                let obj_node = func.child_by_field_name("expression")
+                    .or_else(|| func.child_by_field_name("object"));
+                if let Some(obj_node) = obj_node {
+                    let obj_name = get_text(source, Some(obj_node));
+                    // Check if the object is an imported name
+                    if let Some(qualified) = self.imported_names.get(&obj_name) {
+                        // qualified is like "Foo.Bar.Baz::Baz"
+                        // We want "Foo.Bar.Baz::MethodName"
+                        if let Some(colon_pos) = qualified.find("::") {
+                            let module = &qualified[..colon_pos];
+                            return format!("{}::{}", module, method_name);
+                        }
+                    }
                 }
-                "struct_declaration" => {
-                    extract_struct(source, child, ctx, parent_id)?;
+                // Fallback: just the method name
+                if !method_name.is_empty() {
+                    method_name
+                } else {
+                    get_text(source, Some(func))
                 }
-                "enum_declaration" => {
-                    extract_enum(source, child, ctx, parent_id)?;
+            }
+            "generic_name" => get_text(source, Some(func)),
+            "conditional_access_expression" => {
+                if let Some(name) = func.child_by_field_name("name") {
+                    get_text(source, Some(name))
+                } else {
+                    get_text(source, Some(func))
                 }
-                "method_declaration" => {
-                    extract_method(source, child, ctx, parent_id, NodeKind::Method)?;
+            }
+            "element_access_expression" => {
+                let obj = func.child_by_field_name("expression");
+                self.qualify_call_target(source, obj.unwrap_or(func))
+            }
+            _ => get_text(source, Some(func)),
+        }
+    }
+
+    /// Qualify a type name for instantiation or type references.
+    fn qualify_type_name(&self, source: &[u8], type_node: Node) -> String {
+        let type_name = match type_node.kind() {
+            "identifier" | "generic_name" => get_text(source, Some(type_node)),
+            "qualified_name" => {
+                let text = get_text(source, Some(type_node));
+                // First try to qualify the entire text
+                if let Some(qualified) = self.imported_names.get(&text) {
+                    if let Some(colon_pos) = qualified.find("::") {
+                        return qualified[..colon_pos].to_string()
+                            + "::"
+                            + text.rsplit('.').next().unwrap_or(&text);
+                    }
                 }
-                "constructor_declaration" => {
-                    extract_constructor(source, child, ctx, parent_id)?;
+                // Just the last segment
+                text.rsplitn(2, '.').next().unwrap_or(&text).to_string()
+            }
+            "nullable_type" => {
+                if let Some(inner) = type_node.named_child(0) {
+                    return self.qualify_type_name(source, inner);
+                } else {
+                    get_text(source, Some(type_node))
                 }
-                "property_declaration" => {
-                    extract_property(source, child, ctx, parent_id)?;
+            }
+            "array_type" => {
+                if let Some(inner) = type_node.child_by_field_name("type") {
+                    return self.qualify_type_name(source, inner);
+                } else {
+                    get_text(source, Some(type_node))
                 }
-                "field_declaration" => {
-                    extract_field_decl(source, child, ctx, parent_id)?;
+            }
+            _ => get_text(source, Some(type_node)),
+        };
+
+        // Try to qualify via imported_names
+        self.qualify_name(&type_name)
+    }
+}
+
+impl Walker {
+    // ------------------------------------------------------------------
+    // Tree walker (main entry point)
+    // ------------------------------------------------------------------
+
+    fn walk_children(
+        &mut self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<()> {
+        let mut i = 0;
+        while i < node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                match child.kind() {
+                    "namespace_declaration" => {
+                        self.extract_namespace(source, child, ctx, parent_id)?;
+                    }
+                    "class_declaration" => {
+                        self.extract_class(source, child, ctx, parent_id)?;
+                    }
+                    "interface_declaration" => {
+                        self.extract_interface(source, child, ctx, parent_id)?;
+                    }
+                    "struct_declaration" => {
+                        self.extract_struct(source, child, ctx, parent_id)?;
+                    }
+                    "enum_declaration" => {
+                        self.extract_enum(source, child, ctx, parent_id)?;
+                    }
+                    "method_declaration" => {
+                        self.extract_method(source, child, ctx, parent_id, NodeKind::Method)?;
+                    }
+                    "constructor_declaration" => {
+                        self.extract_constructor(source, child, ctx, parent_id)?;
+                    }
+                    "property_declaration" => {
+                        self.extract_property(source, child, ctx, parent_id)?;
+                    }
+                    "field_declaration" => {
+                        self.extract_field_decl(source, child, ctx, parent_id)?;
+                    }
+                    "using_directive" => {
+                        self.extract_using(source, child, ctx, parent_id)?;
+                    }
+                    "attribute_list" => {
+                        self.extract_attribute_list(source, child, ctx, parent_id)?;
+                    }
+                    "global_statement" => {
+                        self.walk_for_calls(source, child, ctx, parent_id)?;
+                    }
+                    _ => {
+                        // Recurse for compilation_unit, etc.
+                        self.walk_children(source, child, ctx, parent_id)?;
+                    }
                 }
-                "using_directive" => {
-                    extract_using(source, child, ctx, parent_id)?;
+            }
+            i += 1;
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Namespace
+    // ------------------------------------------------------------------
+
+    fn extract_namespace(
+        &mut self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<String> {
+        let name = get_text(source, node.child_by_field_name("name"));
+        if name.is_empty() {
+            return Ok(String::new());
+        }
+
+        let ns_id = ctx.add_node(NodeKind::Namespace, &name, &node, HashMap::new());
+        let line = node.start_position().row as u32 + 1;
+        ctx.add_edge(parent_id, &ns_id, EdgeKind::Contains, line, None);
+
+        ctx.push_scope(&name);
+        ctx.push_scope_node(&ns_id);
+
+        if let Some(body) = node.child_by_field_name("body") {
+            self.walk_children(source, body, ctx, &ns_id)?;
+        }
+
+        ctx.pop_scope();
+        Ok(ns_id)
+    }
+
+    // ------------------------------------------------------------------
+    // Class declaration
+    // ------------------------------------------------------------------
+
+    fn extract_class(
+        &mut self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<String> {
+        let name = get_text(source, node.child_by_field_name("name"));
+        if name.is_empty() {
+            return Ok(String::new());
+        }
+
+        let line = node.start_position().row as u32 + 1;
+
+        let extra = HashMap::new();
+
+        // Collect attribute_list decorators
+        let decorator_names = collect_attributes_from_node(source, node);
+
+        // Base list (extends)
+        if let Some(bases) = node.child_by_field_name("bases") {
+            self.extract_base_types(source, bases, ctx, &name, line);
+        }
+
+        let class_id = ctx.add_node(NodeKind::Class, &name, &node, extra);
+        ctx.add_edge(parent_id, &class_id, EdgeKind::Contains, line, None);
+
+        // Add decorates edges for attributes on the class
+        for dec_name in &decorator_names {
+            let target_qn = format!("{}::{}", ctx.file_path, dec_name);
+            let target = hash_id(&ctx.file_path, &target_qn);
+            ctx.add_edge(&class_id, &target, EdgeKind::Decorates, line, Some(dec_name));
+        }
+
+        ctx.push_scope_with_kind(&name, "class");
+        ctx.push_scope_node(&class_id);
+
+        self.class_stack.push(name.clone());
+
+        if let Some(body) = node.child_by_field_name("body") {
+            self.walk_body(source, body, ctx, &class_id)?;
+        }
+
+        self.class_stack.pop();
+
+        ctx.pop_scope();
+        Ok(class_id)
+    }
+
+    fn extract_base_types(
+        &self,
+        source: &[u8],
+        bases_node: Node,
+        ctx: &mut ExtractionContext,
+        class_name: &str,
+        line: u32,
+    ) {
+        for i in 0..bases_node.named_child_count() {
+            if let Some(base) = bases_node.named_child(i) {
+                let base_name = self.qualify_type_name(source, base);
+                if !base_name.is_empty() {
+                    let target_qn = format!("{}::{}", ctx.file_path, base_name);
+                    let target = hash_id(&ctx.file_path, &target_qn);
+                    ctx.add_edge(
+                        &hash_id(&ctx.file_path, &format!("{}::{}", ctx.file_path, class_name)),
+                        &target,
+                        EdgeKind::Extends,
+                        line,
+                        Some(&base_name),
+                    );
                 }
-                "attribute_list" => {
-                    extract_attribute_list(source, child, ctx, parent_id)?;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Interface
+    // ------------------------------------------------------------------
+
+    fn extract_interface(
+        &mut self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<String> {
+        let name = get_text(source, node.child_by_field_name("name"));
+        if name.is_empty() {
+            return Ok(String::new());
+        }
+
+        let line = node.start_position().row as u32 + 1;
+        let iface_id = ctx.add_node(NodeKind::Interface, &name, &node, HashMap::new());
+        ctx.add_edge(parent_id, &iface_id, EdgeKind::Contains, line, None);
+
+        ctx.push_scope_with_kind(&name, "interface");
+        ctx.push_scope_node(&iface_id);
+
+        if let Some(body) = node.child_by_field_name("body") {
+            self.walk_body(source, body, ctx, &iface_id)?;
+        }
+
+        ctx.pop_scope();
+        Ok(iface_id)
+    }
+
+    // ------------------------------------------------------------------
+    // Struct
+    // ------------------------------------------------------------------
+
+    fn extract_struct(
+        &mut self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<String> {
+        let name = get_text(source, node.child_by_field_name("name"));
+        if name.is_empty() {
+            return Ok(String::new());
+        }
+
+        let line = node.start_position().row as u32 + 1;
+        let struct_id = ctx.add_node(NodeKind::Struct, &name, &node, HashMap::new());
+        ctx.add_edge(parent_id, &struct_id, EdgeKind::Contains, line, None);
+
+        ctx.push_scope_with_kind(&name, "struct");
+        ctx.push_scope_node(&struct_id);
+
+        self.class_stack.push(name.clone());
+
+        if let Some(body) = node.child_by_field_name("body") {
+            self.walk_body(source, body, ctx, &struct_id)?;
+        }
+
+        self.class_stack.pop();
+
+        ctx.pop_scope();
+        Ok(struct_id)
+    }
+
+    // ------------------------------------------------------------------
+    // Enum
+    // ------------------------------------------------------------------
+
+    fn extract_enum(
+        &self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<String> {
+        let name = get_text(source, node.child_by_field_name("name"));
+        if name.is_empty() {
+            return Ok(String::new());
+        }
+
+        let line = node.start_position().row as u32 + 1;
+        let enum_id = ctx.add_node(NodeKind::Enum, &name, &node, HashMap::new());
+        ctx.add_edge(parent_id, &enum_id, EdgeKind::Contains, line, None);
+
+        if let Some(body) = node.child_by_field_name("body") {
+            for i in 0..body.named_child_count() {
+                if let Some(child) = body.named_child(i) {
+                    if child.kind() == "enum_member_declaration" {
+                        let mem_name = get_text(source, child.child_by_field_name("name"));
+                        if !mem_name.is_empty() {
+                            let mem_id =
+                                ctx.add_node(NodeKind::EnumMember, &mem_name, &child, HashMap::new());
+                            let mline = child.start_position().row as u32 + 1;
+                            ctx.add_edge(&enum_id, &mem_id, EdgeKind::Contains, mline, None);
+                        }
+                    }
                 }
-                "global_statement" => {
-                    // Top-level statements (C# 9+)
-                    walk_for_calls(source, child, ctx, parent_id)?;
+            }
+        }
+
+        Ok(enum_id)
+    }
+
+    // ------------------------------------------------------------------
+    // Body walker (class/struct/interface body)
+    // ------------------------------------------------------------------
+
+    fn walk_body(
+        &mut self,
+        source: &[u8],
+        body: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<()> {
+        for i in 0..body.named_child_count() {
+            if let Some(child) = body.named_child(i) {
+                match child.kind() {
+                    "method_declaration" => {
+                        self.extract_method(source, child, ctx, parent_id, NodeKind::Method)?;
+                    }
+                    "constructor_declaration" => {
+                        self.extract_constructor(source, child, ctx, parent_id)?;
+                    }
+                    "property_declaration" => {
+                        self.extract_property(source, child, ctx, parent_id)?;
+                    }
+                    "field_declaration" => {
+                        self.extract_field_decl(source, child, ctx, parent_id)?;
+                    }
+                    "class_declaration" => {
+                        self.extract_class(source, child, ctx, parent_id)?;
+                    }
+                    "struct_declaration" => {
+                        self.extract_struct(source, child, ctx, parent_id)?;
+                    }
+                    "interface_declaration" => {
+                        self.extract_interface(source, child, ctx, parent_id)?;
+                    }
+                    "enum_declaration" => {
+                        self.extract_enum(source, child, ctx, parent_id)?;
+                    }
+                    "attribute_list" => {
+                        self.extract_attribute_list(source, child, ctx, parent_id)?;
+                    }
+                    _ => {}
                 }
-                _ => {
-                    // Recurse for compilation_unit, etc.
-                    for j in 0..child.named_child_count() {
-                        if let Some(sub) = child.named_child(j) {
-                            walk_children(source, sub, ctx, parent_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Method
+    // ------------------------------------------------------------------
+
+    fn extract_method(
+        &mut self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+        _kind: NodeKind,
+    ) -> anyhow::Result<String> {
+        let name = get_text(source, node.child_by_field_name("name"));
+        if name.is_empty() {
+            return Ok(String::new());
+        }
+
+        let mut extra = HashMap::new();
+        let line = node.start_position().row as u32 + 1;
+
+        // Signature
+        if let Some(params) = node.child_by_field_name("parameters") {
+            let sig = get_text(source, Some(params));
+            let ret = get_text(source, node.child_by_field_name("return_type"));
+            extra.insert("signature".to_string(), format!("{}({}) -> {}", name, sig, ret));
+        }
+
+        // Collect attribute_list decorators
+        let mut decorator_names: Vec<String> = Vec::new();
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                if child.kind() == "attribute_list" {
+                    let decs = collect_attribute_names(source, child);
+                    decorator_names.extend(decs);
+                }
+            }
+        }
+        if !decorator_names.is_empty() {
+            if let Ok(json) = serde_json::to_string(&decorator_names) {
+                extra.insert("decorators".to_string(), json);
+            }
+        }
+
+        let method_id = ctx.add_node(NodeKind::Method, &name, &node, extra);
+        ctx.add_edge(parent_id, &method_id, EdgeKind::Contains, line, None);
+
+        // Add decorates edges for attributes
+        for dec_name in &decorator_names {
+            let target_qn = format!("{}::{}", ctx.file_path, dec_name);
+            let target = hash_id(&ctx.file_path, &target_qn);
+            ctx.add_edge(&method_id, &target, EdgeKind::Decorates, line, Some(dec_name));
+        }
+
+        // Extract type_ref from generic type parameters
+        if let Some(type_params) = node.child_by_field_name("type_parameters") {
+            self.extract_type_params(source, type_params, &method_id, ctx, line);
+        }
+        // Also from return type
+        if let Some(ret_type) = node.child_by_field_name("return_type") {
+            self.extract_type_refs_from_node(source, ret_type, &method_id, ctx, line);
+        }
+
+        ctx.push_scope(&name);
+        ctx.push_scope_node(&method_id);
+
+        if let Some(body) = node.child_by_field_name("body") {
+            self.walk_for_calls(source, body, ctx, &method_id)?;
+        }
+
+        ctx.pop_scope();
+        Ok(method_id)
+    }
+
+    // ------------------------------------------------------------------
+    // Constructor
+    // ------------------------------------------------------------------
+
+    fn extract_constructor(
+        &mut self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<String> {
+        let name = get_text(source, node.child_by_field_name("name"));
+        if name.is_empty() {
+            return Ok(String::new());
+        }
+
+        let line = node.start_position().row as u32 + 1;
+        let ctor_id = ctx.add_node(NodeKind::Method, &name, &node, HashMap::new());
+        ctx.add_edge(parent_id, &ctor_id, EdgeKind::Contains, line, None);
+
+        // Constructor instantiates the class
+        if let Some(class_name) = ctx
+            .result
+            .nodes
+            .iter()
+            .rev()
+            .find(|n| n.kind == "class" || n.kind == "struct")
+            .map(|n| n.name.clone())
+        {
+            let target_qn = format!("{}::{}", ctx.file_path, class_name);
+            let target = hash_id(&ctx.file_path, &target_qn);
+            ctx.add_edge(&ctor_id, &target, EdgeKind::Instantiates, line, Some(&class_name));
+        }
+
+        ctx.push_scope(&name);
+        ctx.push_scope_node(&ctor_id);
+
+        if let Some(body) = node.child_by_field_name("body") {
+            self.walk_for_calls(source, body, ctx, &ctor_id)?;
+        }
+
+        ctx.pop_scope();
+        Ok(ctor_id)
+    }
+
+    // ------------------------------------------------------------------
+    // Property
+    // ------------------------------------------------------------------
+
+    fn extract_property(
+        &mut self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<String> {
+        let name = get_text(source, node.child_by_field_name("name"));
+        if name.is_empty() {
+            return Ok(String::new());
+        }
+
+        let line = node.start_position().row as u32 + 1;
+        let prop_id = ctx.add_node(NodeKind::Property, &name, &node, HashMap::new());
+        ctx.add_edge(parent_id, &prop_id, EdgeKind::Contains, line, None);
+
+        // Analyze accessors: get -> READS, set -> WRITES
+        if let Some(accessors) = node.child_by_field_name("accessors") {
+            for i in 0..accessors.named_child_count() {
+                if let Some(acc) = accessors.named_child(i) {
+                    let acc_kind = acc.kind();
+                    let acc_text = get_text(source, Some(acc));
+                    let is_get = acc_kind == "get_accessor_declaration"
+                        || acc_text.trim_start().starts_with("get");
+                    let is_set = acc_kind == "set_accessor_declaration"
+                        || acc_text.trim_start().starts_with("set");
+
+                    if is_get {
+                        let target_qn = format!("{}::{}", ctx.file_path, name);
+                        let target = hash_id(&ctx.file_path, &target_qn);
+                        ctx.add_edge(
+                            &prop_id,
+                            &target,
+                            EdgeKind::Reads,
+                            line,
+                            Some(&format!("get_{}", name)),
+                        );
+                        if let Some(body) = acc.child_by_field_name("body") {
+                            self.walk_for_calls(source, body, ctx, &prop_id)?;
+                        }
+                    } else if is_set {
+                        let target_qn = format!("{}::{}", ctx.file_path, name);
+                        let target = hash_id(&ctx.file_path, &target_qn);
+                        ctx.add_edge(
+                            &prop_id,
+                            &target,
+                            EdgeKind::Writes,
+                            line,
+                            Some(&format!("set_{}", name)),
+                        );
+                        if let Some(body) = acc.child_by_field_name("body") {
+                            self.walk_for_calls(source, body, ctx, &prop_id)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Expression-bodied property: => expression
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                if child.kind() == "arrow_expression_clause" {
+                    self.walk_for_calls(source, child, ctx, &prop_id)?;
+                }
+            }
+        }
+
+        Ok(prop_id)
+    }
+
+    // ------------------------------------------------------------------
+    // Field
+    // ------------------------------------------------------------------
+
+    fn extract_field_decl(
+        &self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<()> {
+        let field_names = collect_field_names(source, node);
+        for field_name in &field_names {
+            let fid = ctx.add_node(NodeKind::Field, field_name, &node, HashMap::new());
+            let line = node.start_position().row as u32 + 1;
+            ctx.add_edge(parent_id, &fid, EdgeKind::Contains, line, None);
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // using directive (enhanced for cross-file resolution, v7.3.0)
+    // ------------------------------------------------------------------
+
+    fn extract_using(
+        &mut self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<()> {
+        let line = node.start_position().row as u32 + 1;
+
+        // Detect if this is an alias: `using Alias = Target;`
+        let mut is_alias = false;
+        for i in 0..node.child_count() {
+            if let Some(c) = node.child(i) {
+                if c.kind() == "=" {
+                    is_alias = true;
+                    break;
+                }
+            }
+        }
+
+        // Detect if this has the `static` keyword
+        let mut is_static = false;
+        for i in 0..node.child_count() {
+            if let Some(c) = node.child(i) {
+                if c.kind() == "static" {
+                    is_static = true;
+                    break;
+                }
+            }
+        }
+
+        if is_alias {
+            // `using MyAlias = Some.Namespace.Type;`
+            let alias_name = get_text(source, node.child_by_field_name("name"));
+            // The target is the unnamed qualified_name or identifier after "="
+            let target_name = find_using_target(source, node);
+
+            if alias_name.is_empty() || target_name.is_empty() {
+                return Ok(());
+            }
+
+            if is_external_ns(&target_name) || is_system_ns(&target_name) {
+                return Ok(());
+            }
+
+            // Create IMPORTS edge for the target
+            let target_qn = format!("{}::{}", ctx.file_path, target_name);
+            let target = hash_id(&ctx.file_path, &target_qn);
+            ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&target_name));
+
+            // Create REFERENCES edge: "Some.Namespace.Type::Type"
+            let last_seg = target_name.rsplit('.').next().unwrap_or(&target_name);
+            let ref_text = format!("{}::{}", target_name, last_seg);
+            let ref_qn = format!("{}::{}", ctx.file_path, ref_text);
+            let ref_target = hash_id(&ctx.file_path, &ref_qn);
+            ctx.add_edge(parent_id, &ref_target, EdgeKind::References, line, Some(&ref_text));
+
+            // Populate imported_names: alias → qualified ref
+            self.imported_names
+                .insert(alias_name, ref_text);
+
+            return Ok(());
+        }
+
+        // Non-alias using: `using Namespace.Type;` or `using static Namespace.Type;`
+        let ns_name = get_text(source, node.child_by_field_name("name"));
+        let ns_name = if ns_name.is_empty() {
+            find_using_name(source, node)
+        } else {
+            ns_name
+        };
+
+        if ns_name.is_empty() || is_system_ns(&ns_name) || is_external_ns(&ns_name) {
+            return Ok(());
+        }
+
+        // Create IMPORTS edge
+        let target_qn = format!("{}::{}", ctx.file_path, ns_name);
+        let target = hash_id(&ctx.file_path, &target_qn);
+        ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&ns_name));
+
+        // Create REFERENCES edge: the last segment is the imported name
+        let last_seg = ns_name.rsplit('.').next().unwrap_or(&ns_name);
+        let ref_text = format!("{}::{}", ns_name, last_seg);
+        let ref_qn = format!("{}::{}", ctx.file_path, ref_text);
+        let ref_target = hash_id(&ctx.file_path, &ref_qn);
+        ctx.add_edge(parent_id, &ref_target, EdgeKind::References, line, Some(&ref_text));
+
+        // For static imports, also store the type name in imported_names
+        if is_static {
+            self.imported_names
+                .insert(last_seg.to_string(), ref_text);
+        } else {
+            self.imported_names
+                .insert(last_seg.to_string(), ref_text);
+        }
+
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Attribute list (decorates)
+    // ------------------------------------------------------------------
+
+    fn extract_attribute_list(
+        &self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<()> {
+        let line = node.start_position().row as u32 + 1;
+        let decorators = collect_attribute_names(source, node);
+
+        for dec_name in &decorators {
+            let target_qn = format!("{}::{}", ctx.file_path, dec_name);
+            let target = hash_id(&ctx.file_path, &target_qn);
+            ctx.add_edge(parent_id, &target, EdgeKind::Decorates, line, Some(dec_name));
+        }
+
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Type parameters (generics)
+    // ------------------------------------------------------------------
+
+    fn extract_type_params(
+        &self,
+        source: &[u8],
+        type_params: Node,
+        parent_id: &str,
+        ctx: &mut ExtractionContext,
+        line: u32,
+    ) {
+        for i in 0..type_params.named_child_count() {
+            if let Some(param) = type_params.named_child(i) {
+                if param.kind() == "type_parameter" {
+                    let name = get_text(source, Some(param));
+                    if !name.is_empty() {
+                        let target_qn = format!("{}::{}", ctx.file_path, name);
+                        let target = hash_id(&ctx.file_path, &target_qn);
+                        ctx.add_edge(parent_id, &target, EdgeKind::TypeRef, line, Some(&name));
+                    }
+                }
+            }
+        }
+    }
+
+    fn extract_type_refs_from_node(
+        &self,
+        source: &[u8],
+        type_node: Node,
+        parent_id: &str,
+        ctx: &mut ExtractionContext,
+        line: u32,
+    ) {
+        let type_name = get_text(source, Some(type_node));
+        if type_name.contains('<') {
+            for i in 0..type_node.named_child_count() {
+                if let Some(child) = type_node.named_child(i) {
+                    if child.kind() == "type_argument_list" {
+                        for j in 0..child.named_child_count() {
+                            if let Some(arg) = child.named_child(j) {
+                                let arg_name = get_text(source, Some(arg));
+                                if !arg_name.is_empty() && !is_builtin_type(&arg_name) {
+                                    let target_qn = format!("{}::{}", ctx.file_path, arg_name);
+                                    let target = hash_id(&ctx.file_path, &target_qn);
+                                    ctx.add_edge(
+                                        parent_id,
+                                        &target,
+                                        EdgeKind::TypeRef,
+                                        line,
+                                        Some(&arg_name),
+                                    );
+                                }
+                            }
                         }
                     }
                 }
             }
         }
     }
-    Ok(())
-}
 
-// ---------------------------------------------------------------------------
-// Namespace
-// ---------------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // Call extraction
+    // ------------------------------------------------------------------
 
-fn extract_namespace(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<String> {
-    let name = get_text(source, node.child_by_field_name("name"));
-    if name.is_empty() {
-        return Ok(String::new());
-    }
-
-    let ns_id = ctx.add_node(NodeKind::Namespace, &name, &node, HashMap::new());
-    let line = node.start_position().row as u32 + 1;
-    ctx.add_edge(parent_id, &ns_id, EdgeKind::Contains, line, None);
-
-    ctx.push_scope(&name);
-    ctx.push_scope_node(&ns_id);
-
-    if let Some(body) = node.child_by_field_name("body") {
-        walk_children(source, body, ctx, &ns_id)?;
-    }
-
-    ctx.pop_scope();
-    Ok(ns_id)
-}
-
-// ---------------------------------------------------------------------------
-// Class declaration
-// ---------------------------------------------------------------------------
-
-fn extract_class(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<String> {
-    let name = get_text(source, node.child_by_field_name("name"));
-    if name.is_empty() {
-        return Ok(String::new());
-    }
-
-    let line = node.start_position().row as u32 + 1;
-
-    let extra = HashMap::new();
-
-    // Collect attribute_list decorators
-    let decorator_names = collect_attributes_from_node(source, node);
-
-    // Base list (extends)
-    if let Some(bases) = node.child_by_field_name("bases") {
-        extract_base_types(source, bases, ctx, &name, line);
-    }
-
-    let class_id = ctx.add_node(NodeKind::Class, &name, &node, extra);
-    ctx.add_edge(parent_id, &class_id, EdgeKind::Contains, line, None);
-
-    // Add decorates edges for attributes on the class
-    for dec_name in &decorator_names {
-        let target_qn = format!("{}::{}", ctx.file_path, dec_name);
-        let target = hash_id(&ctx.file_path, &target_qn);
-        ctx.add_edge(&class_id, &target, EdgeKind::Decorates, line, Some(dec_name));
-    }
-
-    ctx.push_scope_with_kind(&name, "class");
-    ctx.push_scope_node(&class_id);
-
-    if let Some(body) = node.child_by_field_name("body") {
-        walk_body(source, body, ctx, &class_id)?;
-    }
-
-    ctx.pop_scope();
-    Ok(class_id)
-}
-
-fn extract_base_types(
-    source: &[u8],
-    bases_node: Node,
-    ctx: &mut ExtractionContext,
-    class_name: &str,
-    line: u32,
-) {
-    for i in 0..bases_node.named_child_count() {
-        if let Some(base) = bases_node.named_child(i) {
-            let base_name = resolve_type_name(source, base);
-            if !base_name.is_empty() {
-                let target_qn = format!("{}::{}", ctx.file_path, base_name);
-                let target = hash_id(&ctx.file_path, &target_qn);
-                ctx.add_edge(
-                    &hash_id(&ctx.file_path, &format!("{}::{}", ctx.file_path, class_name)),
-                    &target,
-                    EdgeKind::Extends,
-                    line,
-                    Some(&base_name),
-                );
+    fn walk_for_calls(
+        &mut self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<()> {
+        match node.kind() {
+            "invocation_expression" => {
+                self.extract_invocation(source, node, ctx, parent_id)?;
+                for i in 0..node.named_child_count() {
+                    if let Some(child) = node.named_child(i) {
+                        self.walk_for_calls(source, child, ctx, parent_id)?;
+                    }
+                }
+            }
+            "object_creation_expression" => {
+                self.extract_new_object(source, node, ctx, parent_id)?;
+                for i in 0..node.named_child_count() {
+                    if let Some(child) = node.named_child(i) {
+                        self.walk_for_calls(source, child, ctx, parent_id)?;
+                    }
+                }
+            }
+            "assignment_expression" => {
+                if let Some(left) = node.child_by_field_name("left") {
+                    if left.kind() == "identifier" || left.kind() == "member_access_expression" {
+                        let left_name = resolve_name(source, left);
+                        if !left_name.is_empty() {
+                            let target_qn = format!("{}::{}", ctx.file_path, left_name);
+                            let target = hash_id(&ctx.file_path, &target_qn);
+                            let line = node.start_position().row as u32 + 1;
+                            ctx.add_edge(parent_id, &target, EdgeKind::Writes, line, Some(&left_name));
+                        }
+                    }
+                }
+                for i in 0..node.named_child_count() {
+                    if let Some(child) = node.named_child(i) {
+                        self.walk_for_calls(source, child, ctx, parent_id)?;
+                    }
+                }
+            }
+            "class_declaration" => {
+                self.extract_class(source, node, ctx, parent_id)?;
+            }
+            "method_declaration" => {
+                self.extract_method(source, node, ctx, parent_id, NodeKind::Method)?;
+            }
+            _ => {
+                for i in 0..node.named_child_count() {
+                    if let Some(child) = node.named_child(i) {
+                        self.walk_for_calls(source, child, ctx, parent_id)?;
+                    }
+                }
             }
         }
+        Ok(())
+    }
+
+    fn extract_invocation(
+        &mut self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<()> {
+        let func = node.child_by_field_name("function");
+        let line = node.start_position().row as u32 + 1;
+
+        match func {
+            Some(f) => {
+                let call_name = self.qualify_call_target(source, f);
+                if !call_name.is_empty() {
+                    let target_qn = format!("{}::{}", ctx.file_path, call_name);
+                    let target = hash_id(&ctx.file_path, &target_qn);
+                    ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&call_name));
+                }
+            }
+            None => {}
+        }
+
+        Ok(())
+    }
+
+    fn extract_new_object(
+        &mut self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+    ) -> anyhow::Result<()> {
+        let line = node.start_position().row as u32 + 1;
+
+        if let Some(type_node) = node.child_by_field_name("type") {
+            let type_name = self.qualify_type_name(source, type_node);
+            if !type_name.is_empty() {
+                let target_qn = format!("{}::{}", ctx.file_path, type_name);
+                let target = hash_id(&ctx.file_path, &target_qn);
+                ctx.add_edge(parent_id, &target, EdgeKind::Instantiates, line, Some(&type_name));
+            }
+        }
+
+        Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Interface
+// Helper functions (standalone)
 // ---------------------------------------------------------------------------
 
-fn extract_interface(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<String> {
-    let name = get_text(source, node.child_by_field_name("name"));
-    if name.is_empty() {
-        return Ok(String::new());
-    }
-
-    let line = node.start_position().row as u32 + 1;
-    let iface_id = ctx.add_node(NodeKind::Interface, &name, &node, HashMap::new());
-    ctx.add_edge(parent_id, &iface_id, EdgeKind::Contains, line, None);
-
-    ctx.push_scope_with_kind(&name, "interface");
-    ctx.push_scope_node(&iface_id);
-
-    if let Some(body) = node.child_by_field_name("body") {
-        walk_body(source, body, ctx, &iface_id)?;
-    }
-
-    ctx.pop_scope();
-    Ok(iface_id)
-}
-
-// ---------------------------------------------------------------------------
-// Struct
-// ---------------------------------------------------------------------------
-
-fn extract_struct(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<String> {
-    let node_text = get_text(source, Some(node));
-    // Print children with field names
+/// Find the target name in an alias using directive.
+/// For `using Alias = Foo.Bar.Baz;`, the target is the qualified_name
+/// or identifier after `=` that does NOT have field name "name".
+fn find_using_target(source: &[u8], node: Node) -> String {
+    let mut found_eq = false;
     for i in 0..node.child_count() {
         if let Some(c) = node.child(i) {
-            let fn_ = node.field_name_for_child(i as u32);
-        }
-    }
-    let name = get_text(source, node.child_by_field_name("name"));
-    if name.is_empty() {
-        return Ok(String::new());
-    }
-
-    let line = node.start_position().row as u32 + 1;
-    let struct_id = ctx.add_node(NodeKind::Struct, &name, &node, HashMap::new());
-    ctx.add_edge(parent_id, &struct_id, EdgeKind::Contains, line, None);
-
-    ctx.push_scope_with_kind(&name, "struct");
-    ctx.push_scope_node(&struct_id);
-
-    if let Some(body) = node.child_by_field_name("body") {
-        for i in 0..body.named_child_count() {
-            if let Some(bc) = body.named_child(i) {
+            if c.kind() == "=" {
+                found_eq = true;
+                continue;
             }
-        }
-        walk_body(source, body, ctx, &struct_id)?;
-    } else {
-    }
-
-    ctx.pop_scope();
-    Ok(struct_id)
-}
-
-// ---------------------------------------------------------------------------
-// Enum
-// ---------------------------------------------------------------------------
-
-fn extract_enum(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<String> {
-    let name = get_text(source, node.child_by_field_name("name"));
-    if name.is_empty() {
-        return Ok(String::new());
-    }
-
-    let line = node.start_position().row as u32 + 1;
-    let enum_id = ctx.add_node(NodeKind::Enum, &name, &node, HashMap::new());
-    ctx.add_edge(parent_id, &enum_id, EdgeKind::Contains, line, None);
-
-    if let Some(body) = node.child_by_field_name("body") {
-        for i in 0..body.named_child_count() {
-            if let Some(child) = body.named_child(i) {
-                if child.kind() == "enum_member_declaration" {
-                    let mem_name = get_text(source, child.child_by_field_name("name"));
-                    if !mem_name.is_empty() {
-                        let mem_id =
-                            ctx.add_node(NodeKind::EnumMember, &mem_name, &child, HashMap::new());
-                        let mline = child.start_position().row as u32 + 1;
-                        ctx.add_edge(&enum_id, &mem_id, EdgeKind::Contains, mline, None);
+            if found_eq {
+                match c.kind() {
+                    "qualified_name" | "identifier" | "generic_name" => {
+                        // In alias form, the name field child is BEFORE the =,
+                        // so this unnamed qualified_name is the target
+                        if node.field_name_for_child(i as u32) != Some("name") {
+                            return get_text(source, Some(c));
+                        }
                     }
+                    _ => {}
                 }
             }
         }
     }
-
-    Ok(enum_id)
+    String::new()
 }
 
-// ---------------------------------------------------------------------------
-// Body walker (class/struct/interface body)
-// ---------------------------------------------------------------------------
-
-fn walk_body(
-    source: &[u8],
-    body: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<()> {
-    for i in 0..body.named_child_count() {
-        if let Some(child) = body.named_child(i) {
-            match child.kind() {
-                "method_declaration" => {
-                    extract_method(source, child, ctx, parent_id, NodeKind::Method)?;
-                }
-                "constructor_declaration" => {
-                    extract_constructor(source, child, ctx, parent_id)?;
-                }
-                "property_declaration" => {
-                    extract_property(source, child, ctx, parent_id)?;
-                }
-                "field_declaration" => {
-                    extract_field_decl(source, child, ctx, parent_id)?;
-                }
-                "class_declaration" => {
-                    extract_class(source, child, ctx, parent_id)?;
-                }
-                "struct_declaration" => {
-                    extract_struct(source, child, ctx, parent_id)?;
-                }
-                "interface_declaration" => {
-                    extract_interface(source, child, ctx, parent_id)?;
-                }
-                "enum_declaration" => {
-                    extract_enum(source, child, ctx, parent_id)?;
-                }
-                "attribute_list" => {
-                    extract_attribute_list(source, child, ctx, parent_id)?;
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Method
-// ---------------------------------------------------------------------------
-
-fn extract_method(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-    _kind: NodeKind,
-) -> anyhow::Result<String> {
-    let name = get_text(source, node.child_by_field_name("name"));
-    if name.is_empty() {
-        return Ok(String::new());
-    }
-
-    let mut extra = HashMap::new();
-    let line = node.start_position().row as u32 + 1;
-
-    // Signature
-    if let Some(params) = node.child_by_field_name("parameters") {
-        let sig = get_text(source, Some(params));
-        let ret = get_text(source, node.child_by_field_name("return_type"));
-        extra.insert("signature".to_string(), format!("{}({}) -> {}", name, sig, ret));
-    }
-
-    // Collect attribute_list decorators
-    let mut decorator_names: Vec<String> = Vec::new();
-    for i in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(i) {
-            if child.kind() == "attribute_list" {
-                let decs = collect_attribute_names(source, child);
-                decorator_names.extend(decs);
-            }
-        }
-    }
-    if !decorator_names.is_empty() {
-        if let Ok(json) = serde_json::to_string(&decorator_names) {
-            extra.insert("decorators".to_string(), json);
-        }
-    }
-
-    let method_id = ctx.add_node(NodeKind::Method, &name, &node, extra);
-    ctx.add_edge(parent_id, &method_id, EdgeKind::Contains, line, None);
-
-    // Add decorates edges for attributes
-    for dec_name in &decorator_names {
-        let target_qn = format!("{}::{}", ctx.file_path, dec_name);
-        let target = hash_id(&ctx.file_path, &target_qn);
-        ctx.add_edge(&method_id, &target, EdgeKind::Decorates, line, Some(dec_name));
-    }
-
-    // Extract type_ref from generic type parameters
-    if let Some(type_params) = node.child_by_field_name("type_parameters") {
-        extract_type_params(source, type_params, &method_id, ctx, line);
-    }
-    // Also from return type
-    if let Some(ret_type) = node.child_by_field_name("return_type") {
-        extract_type_refs_from_node(source, ret_type, &method_id, ctx, line);
-    }
-
-    ctx.push_scope(&name);
-    ctx.push_scope_node(&method_id);
-
-    if let Some(body) = node.child_by_field_name("body") {
-        walk_for_calls(source, body, ctx, &method_id)?;
-    }
-
-    ctx.pop_scope();
-    Ok(method_id)
-}
-
-// ---------------------------------------------------------------------------
-// Constructor
-// ---------------------------------------------------------------------------
-
-fn extract_constructor(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<String> {
-    let name = get_text(source, node.child_by_field_name("name"));
-    if name.is_empty() {
-        return Ok(String::new());
-    }
-
-    let line = node.start_position().row as u32 + 1;
-    let ctor_id = ctx.add_node(NodeKind::Method, &name, &node, HashMap::new());
-    ctx.add_edge(parent_id, &ctor_id, EdgeKind::Contains, line, None);
-
-    // Constructor instantiates the class
-    if let Some(class_name) = ctx
-        .result
-        .nodes
-        .iter()
-        .rev()
-        .find(|n| n.kind == "class" || n.kind == "struct")
-        .map(|n| n.name.clone())
-    {
-        let target_qn = format!("{}::{}", ctx.file_path, class_name);
-        let target = hash_id(&ctx.file_path, &target_qn);
-        ctx.add_edge(&ctor_id, &target, EdgeKind::Instantiates, line, Some(&class_name));
-    }
-
-    ctx.push_scope(&name);
-    ctx.push_scope_node(&ctor_id);
-
-    if let Some(body) = node.child_by_field_name("body") {
-        walk_for_calls(source, body, ctx, &ctor_id)?;
-    }
-
-    ctx.pop_scope();
-    Ok(ctor_id)
-}
-
-// ---------------------------------------------------------------------------
-// Property
-// ---------------------------------------------------------------------------
-
-fn extract_property(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<String> {
-    let name = get_text(source, node.child_by_field_name("name"));
-    if name.is_empty() {
-        return Ok(String::new());
-    }
-
-    let line = node.start_position().row as u32 + 1;
-    let prop_id = ctx.add_node(NodeKind::Property, &name, &node, HashMap::new());
-    ctx.add_edge(parent_id, &prop_id, EdgeKind::Contains, line, None);
-
-    // Analyze accessors: get -> READS, set -> WRITES
-    if let Some(accessors) = node.child_by_field_name("accessors") {
-        for i in 0..accessors.named_child_count() {
-            if let Some(acc) = accessors.named_child(i) {
-                let acc_kind = acc.kind();
-                let acc_text = get_text(source, Some(acc));
-                let is_get = acc_kind == "get_accessor_declaration"
-                    || acc_text.trim_start().starts_with("get");
-                let is_set = acc_kind == "set_accessor_declaration"
-                    || acc_text.trim_start().starts_with("set");
-
-                if is_get {
-                    // get → reads this property
-                    let target_qn = format!("{}::{}", ctx.file_path, name);
-                    let target = hash_id(&ctx.file_path, &target_qn);
-                    ctx.add_edge(
-                        &prop_id,
-                        &target,
-                        EdgeKind::Reads,
-                        line,
-                        Some(&format!("get_{}", name)),
-                    );
-                    if let Some(body) = acc.child_by_field_name("body") {
-                        walk_for_calls(source, body, ctx, &prop_id)?;
-                    }
-                } else if is_set {
-                    // set → writes this property
-                    let target_qn = format!("{}::{}", ctx.file_path, name);
-                    let target = hash_id(&ctx.file_path, &target_qn);
-                    ctx.add_edge(
-                        &prop_id,
-                        &target,
-                        EdgeKind::Writes,
-                        line,
-                        Some(&format!("set_{}", name)),
-                    );
-                    if let Some(body) = acc.child_by_field_name("body") {
-                        walk_for_calls(source, body, ctx, &prop_id)?;
-                    }
-                }
-            }
-        }
-    }
-
-    // Expression-bodied property: => expression
-    for i in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(i) {
-            match child.kind() {
-                "arrow_expression_clause" => {
-                    walk_for_calls(source, child, ctx, &prop_id)?;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    Ok(prop_id)
-}
-
-// ---------------------------------------------------------------------------
-// Field
-// ---------------------------------------------------------------------------
-
-fn extract_field_decl(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<()> {
-    // field_declaration contains variable_declaration which contains variable_declarator
-    let field_names = collect_field_names(source, node);
-    for field_name in &field_names {
-        let fid = ctx.add_node(NodeKind::Field, field_name, &node, HashMap::new());
-        let line = node.start_position().row as u32 + 1;
-        ctx.add_edge(parent_id, &fid, EdgeKind::Contains, line, None);
-    }
-    Ok(())
-}
-
-fn collect_field_names(source: &[u8], node: Node) -> Vec<String> {
-    let mut names = Vec::new();
-    match node.kind() {
-        "variable_declarator" => {
-            let name = get_text(source, node.child_by_field_name("name"));
-            if !name.is_empty() {
-                names.push(name);
-            }
-        }
-        _ => {
-            for i in 0..node.named_child_count() {
-                if let Some(child) = node.named_child(i) {
-                    names.extend(collect_field_names(source, child));
-                }
-            }
-        }
-    }
-    names
-}
-
-// ---------------------------------------------------------------------------
-// using directive
-// ---------------------------------------------------------------------------
-
-fn extract_using(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<()> {
-    let line = node.start_position().row as u32 + 1;
-
-    // using namespace; or using static Type; or using alias = Type;
-    // The name field on using_directive depends on the using form
-    let ns_name = if let Some(name_node) = node.child_by_field_name("name") {
-        get_text(source, Some(name_node))
-    } else {
-        // Try to find a qualified_name or identifier child
-        find_using_name(source, node)
-    };
-
-    if !ns_name.is_empty() && !is_system_ns(&ns_name) {
-        let target_qn = format!("{}::{}", ctx.file_path, ns_name);
-        let target = hash_id(&ctx.file_path, &target_qn);
-        ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&ns_name));
-    }
-
-    Ok(())
-}
-
+/// Find the imported name from a using_directive node that doesn't have
+/// a `name` field on the using_directive itself.
 fn find_using_name(source: &[u8], node: Node) -> String {
     for i in 0..node.named_child_count() {
         if let Some(child) = node.named_child(i) {
             match child.kind() {
                 "qualified_name" | "identifier" | "generic_name" => {
-                    return get_text(source, Some(child));
+                    // Skip children with field "name" (these are alias names)
+                    if node.field_name_for_child(i as u32) != Some("name") {
+                        return get_text(source, Some(child));
+                    }
                 }
                 _ => {
                     let name = find_using_name(source, child);
@@ -713,28 +1154,6 @@ fn find_using_name(source: &[u8], node: Node) -> String {
         }
     }
     String::new()
-}
-
-// ---------------------------------------------------------------------------
-// Attribute list (decorates)
-// ---------------------------------------------------------------------------
-
-fn extract_attribute_list(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<()> {
-    let line = node.start_position().row as u32 + 1;
-    let decorators = collect_attribute_names(source, node);
-
-    for dec_name in &decorators {
-        let target_qn = format!("{}::{}", ctx.file_path, dec_name);
-        let target = hash_id(&ctx.file_path, &target_qn);
-        ctx.add_edge(parent_id, &target, EdgeKind::Decorates, line, Some(dec_name));
-    }
-
-    Ok(())
 }
 
 /// Collect attribute names from attribute_list children of a declaration node.
@@ -765,65 +1184,24 @@ fn collect_attribute_names(source: &[u8], attr_list: Node) -> Vec<String> {
     names
 }
 
-// ---------------------------------------------------------------------------
-// Type parameters (generics)
-// ---------------------------------------------------------------------------
-
-fn extract_type_params(
-    source: &[u8],
-    type_params: Node,
-    parent_id: &str,
-    ctx: &mut ExtractionContext,
-    line: u32,
-) {
-    for i in 0..type_params.named_child_count() {
-        if let Some(param) = type_params.named_child(i) {
-            if param.kind() == "type_parameter" {
-                let name = get_text(source, Some(param));
-                if !name.is_empty() {
-                    let target_qn = format!("{}::{}", ctx.file_path, name);
-                    let target = hash_id(&ctx.file_path, &target_qn);
-                    ctx.add_edge(parent_id, &target, EdgeKind::TypeRef, line, Some(&name));
+fn collect_field_names(source: &[u8], node: Node) -> Vec<String> {
+    let mut names = Vec::new();
+    match node.kind() {
+        "variable_declarator" => {
+            let name = get_text(source, node.child_by_field_name("name"));
+            if !name.is_empty() {
+                names.push(name);
+            }
+        }
+        _ => {
+            for i in 0..node.named_child_count() {
+                if let Some(child) = node.named_child(i) {
+                    names.extend(collect_field_names(source, child));
                 }
             }
         }
     }
-}
-
-fn extract_type_refs_from_node(
-    source: &[u8],
-    type_node: Node,
-    parent_id: &str,
-    ctx: &mut ExtractionContext,
-    line: u32,
-) {
-    // Look for generic types like List<MyType>
-    let type_name = get_text(source, Some(type_node));
-    if type_name.contains('<') {
-        // Has generic arguments — extract the inner types
-        for i in 0..type_node.named_child_count() {
-            if let Some(child) = type_node.named_child(i) {
-                if child.kind() == "type_argument_list" {
-                    for j in 0..child.named_child_count() {
-                        if let Some(arg) = child.named_child(j) {
-                            let arg_name = get_text(source, Some(arg));
-                            if !arg_name.is_empty() && !is_builtin_type(&arg_name) {
-                                let target_qn = format!("{}::{}", ctx.file_path, arg_name);
-                                let target = hash_id(&ctx.file_path, &target_qn);
-                                ctx.add_edge(
-                                    parent_id,
-                                    &target,
-                                    EdgeKind::TypeRef,
-                                    line,
-                                    Some(&arg_name),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    names
 }
 
 fn is_builtin_type(name: &str) -> bool {
@@ -848,146 +1226,6 @@ fn is_builtin_type(name: &str) -> bool {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Call extraction
-// ---------------------------------------------------------------------------
-
-fn walk_for_calls(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<()> {
-    match node.kind() {
-        "invocation_expression" => {
-            extract_invocation(source, node, ctx, parent_id)?;
-            for i in 0..node.named_child_count() {
-                if let Some(child) = node.named_child(i) {
-                    walk_for_calls(source, child, ctx, parent_id)?;
-                }
-            }
-        }
-        "object_creation_expression" => {
-            extract_new_object(source, node, ctx, parent_id)?;
-            for i in 0..node.named_child_count() {
-                if let Some(child) = node.named_child(i) {
-                    walk_for_calls(source, child, ctx, parent_id)?;
-                }
-            }
-        }
-        "assignment_expression" => {
-            // Check left side for writes
-            if let Some(left) = node.child_by_field_name("left") {
-                if left.kind() == "identifier" || left.kind() == "member_access_expression" {
-                    let left_name = resolve_name(source, left);
-                    if !left_name.is_empty() {
-                        let target_qn = format!("{}::{}", ctx.file_path, left_name);
-                        let target = hash_id(&ctx.file_path, &target_qn);
-                        let line = node.start_position().row as u32 + 1;
-                        ctx.add_edge(parent_id, &target, EdgeKind::Writes, line, Some(&left_name));
-                    }
-                }
-            }
-            // Recurse both sides
-            for i in 0..node.named_child_count() {
-                if let Some(child) = node.named_child(i) {
-                    walk_for_calls(source, child, ctx, parent_id)?;
-                }
-            }
-        }
-        "class_declaration" => {
-            extract_class(source, node, ctx, parent_id)?;
-        }
-        "method_declaration" => {
-            extract_method(source, node, ctx, parent_id, NodeKind::Method)?;
-        }
-        _ => {
-            for i in 0..node.named_child_count() {
-                if let Some(child) = node.named_child(i) {
-                    walk_for_calls(source, child, ctx, parent_id)?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn extract_invocation(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<()> {
-    let func = node.child_by_field_name("function");
-    let line = node.start_position().row as u32 + 1;
-
-    match func {
-        Some(f) => {
-            let call_name = resolve_call_target(source, f);
-            if !call_name.is_empty() {
-                let target_qn = format!("{}::{}", ctx.file_path, call_name);
-                let target = hash_id(&ctx.file_path, &target_qn);
-                ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&call_name));
-            }
-        }
-        None => {}
-    }
-
-    Ok(())
-}
-
-fn resolve_call_target(source: &[u8], func: Node) -> String {
-    match func.kind() {
-        "identifier" => get_text(source, Some(func)),
-        "member_access_expression" => {
-            let method_name = get_text(source, func.child_by_field_name("name"));
-            if !method_name.is_empty() {
-                return method_name;
-            }
-            // Fallback: full dotted name
-            get_text(source, Some(func))
-        }
-        "generic_name" => {
-            // Func<T>(args)
-            get_text(source, Some(func))
-        }
-        "conditional_access_expression" => {
-            // obj?.Method()
-            if let Some(name) = func.child_by_field_name("name") {
-                get_text(source, Some(name))
-            } else {
-                get_text(source, Some(func))
-            }
-        }
-        "element_access_expression" => {
-            // this[i] or dict[key]
-            let obj = func.child_by_field_name("expression");
-            resolve_call_target(source, obj.unwrap_or(func))
-        }
-        _ => get_text(source, Some(func)),
-    }
-}
-
-fn extract_new_object(
-    source: &[u8],
-    node: Node,
-    ctx: &mut ExtractionContext,
-    parent_id: &str,
-) -> anyhow::Result<()> {
-    let line = node.start_position().row as u32 + 1;
-
-    if let Some(type_node) = node.child_by_field_name("type") {
-        let type_name = resolve_type_name(source, type_node);
-        if !type_name.is_empty() {
-            let target_qn = format!("{}::{}", ctx.file_path, type_name);
-            let target = hash_id(&ctx.file_path, &target_qn);
-            ctx.add_edge(parent_id, &target, EdgeKind::Instantiates, line, Some(&type_name));
-        }
-    }
-
-    Ok(())
-}
-
 fn resolve_name(source: &[u8], node: Node) -> String {
     match node.kind() {
         "identifier" => get_text(source, Some(node)),
@@ -1001,36 +1239,6 @@ fn resolve_name(source: &[u8], node: Node) -> String {
         _ => get_text(source, Some(node)),
     }
 }
-
-fn resolve_type_name(source: &[u8], type_node: Node) -> String {
-    match type_node.kind() {
-        "identifier" | "generic_name" => get_text(source, Some(type_node)),
-        "qualified_name" => {
-            let text = get_text(source, Some(type_node));
-            text.rsplitn(2, '.').next().unwrap_or(&text).to_string()
-        }
-        "nullable_type" => {
-            // Type? — extract inner type
-            if let Some(inner) = type_node.named_child(0) {
-                resolve_type_name(source, inner)
-            } else {
-                get_text(source, Some(type_node))
-            }
-        }
-        "array_type" => {
-            if let Some(inner) = type_node.child_by_field_name("type") {
-                resolve_type_name(source, inner)
-            } else {
-                get_text(source, Some(type_node))
-            }
-        }
-        _ => get_text(source, Some(type_node)),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 fn get_text(source: &[u8], node: Option<Node>) -> String {
     match node {
@@ -1092,7 +1300,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Class tests
+    // Class tests (existing)
     // ------------------------------------------------------------------
 
     #[test]
@@ -1129,7 +1337,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Interface tests
+    // Interface tests (existing)
     // ------------------------------------------------------------------
 
     #[test]
@@ -1147,7 +1355,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Struct tests
+    // Struct tests (existing)
     // ------------------------------------------------------------------
 
     #[test]
@@ -1164,7 +1372,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Enum tests
+    // Enum tests (existing)
     // ------------------------------------------------------------------
 
     #[test]
@@ -1181,7 +1389,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Namespace tests
+    // Namespace tests (existing)
     // ------------------------------------------------------------------
 
     #[test]
@@ -1193,13 +1401,12 @@ mod tests {
         let namespaces = find_nodes(&ctx, NodeKind::Namespace);
         assert_eq!(namespaces.len(), 1);
         assert_eq!(namespaces[0].name, "MyApp");
-        // Class should be contained
         let classes = find_nodes(&ctx, NodeKind::Class);
         assert_eq!(classes.len(), 1);
     }
 
     // ------------------------------------------------------------------
-    // Property tests
+    // Property tests (existing)
     // ------------------------------------------------------------------
 
     #[test]
@@ -1238,7 +1445,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Constructor tests
+    // Constructor tests (existing)
     // ------------------------------------------------------------------
 
     #[test]
@@ -1253,7 +1460,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // using directive tests
+    // using directive tests (existing + new)
     // ------------------------------------------------------------------
 
     #[test]
@@ -1282,7 +1489,171 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Call tests
+    // NEW: using directive REFERENCES edges (v7.3.0)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_using_creates_ref_edge() {
+        let ctx = extract(
+            "using MyApp.Services.UserService;\nclass Test { }",
+            "src/test.cs",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> =
+            refs.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(
+            targets.iter().any(|t| t.contains("UserService")),
+            "Expected UserService in REFERENCES, got: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_extract_using_ref_target_text_format() {
+        let ctx = extract(
+            "using MyApp.Services.UserService;\nclass Test { }",
+            "src/test.cs",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> =
+            refs.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        // target_text should be "MyApp.Services.UserService::UserService"
+        assert!(
+            targets.contains(&"MyApp.Services.UserService::UserService"),
+            "Expected 'MyApp.Services.UserService::UserService', got: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_extract_using_static_creates_ref_edge() {
+        let ctx = extract(
+            "using static MyApp.Utils.Helpers;\nclass Test { }",
+            "src/test.cs",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> =
+            refs.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(
+            targets.iter().any(|t| t.contains("Helpers")),
+            "Expected Helpers in REFERENCES, got: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_extract_using_alias_creates_ref_edge() {
+        let ctx = extract(
+            "using MyAlias = MyApp.Services.UserService;\nclass Test { }",
+            "src/test.cs",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> =
+            refs.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(
+            targets.iter().any(|t| t.contains("UserService")),
+            "Expected UserService in REFERENCES for alias, got: {:?}", targets
+        );
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        let import_targets: Vec<&str> =
+            imports.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(
+            import_targets.contains(&"MyApp.Services.UserService"),
+            "Expected IMPORTS edge for alias target, got: {:?}", import_targets
+        );
+    }
+
+    #[test]
+    fn test_extract_using_short_namespace_creates_ref() {
+        // Short namespace (2 segments) should still create REFERENCES
+        let ctx = extract(
+            "using MyApp.Utils;\nclass Test { }",
+            "src/test.cs",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> =
+            refs.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(
+            targets.contains(&"MyApp.Utils::Utils"),
+            "Expected 'MyApp.Utils::Utils', got: {:?}", targets
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // NEW: imported_names call qualification (v7.3.0)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_imported_call_qualified() {
+        // `using Foo.Bar;` then `Bar.Method()` → calls target_text = "Foo.Bar::Method"
+        let ctx = extract(
+            "using MyApp.Utils;\nclass Test { void Run() { Utils.DoSomething(); } }",
+            "src/test.cs",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> =
+            calls.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(
+            targets.iter().any(|t| *t == "MyApp.Utils::DoSomething"),
+            "Expected 'MyApp.Utils::DoSomething', got: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_extract_imported_type_instantiation_qualified() {
+        // `using Foo.Bar.Baz;` then `new Baz()` → target_text = "Foo.Bar.Baz::Baz"
+        let ctx = extract(
+            "using MyApp.Services.UserService;\nclass Test { void Run() { var x = new UserService(); } }",
+            "src/test.cs",
+        );
+        let insts = find_edges(&ctx, EdgeKind::Instantiates);
+        let targets: Vec<&str> =
+            insts.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(
+            targets.iter().any(|t| t.contains("MyApp.Services.UserService")),
+            "Expected qualified instantiation, got: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_extract_non_imported_call_uses_bare_name() {
+        // Local method call without import → bare name
+        let ctx = extract(
+            "class Test { void Run() { LocalMethod(); } void LocalMethod() { } }",
+            "src/test.cs",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> =
+            calls.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        assert!(
+            targets.contains(&"LocalMethod"),
+            "Expected bare 'LocalMethod', got: {:?}", targets
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // NEW: System/Microsoft using still filtered
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_system_using_no_refs() {
+        let ctx = extract(
+            "using System;\nusing System.Collections.Generic;\nusing Microsoft.Extensions.Logging;\nclass Test { }",
+            "src/test.cs",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> =
+            refs.iter().filter_map(|e| e.target_text.as_deref()).collect();
+        // No REFERENCES for system namespaces
+        assert!(
+            !targets.iter().any(|t| t.contains("System")),
+            "Should not have System REFERENCES, got: {:?}", targets
+        );
+        assert!(
+            !targets.iter().any(|t| t.contains("Microsoft")),
+            "Should not have Microsoft REFERENCES, got: {:?}", targets
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Call tests (existing)
     // ------------------------------------------------------------------
 
     #[test]
@@ -1298,7 +1669,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Attribute tests
+    // Attribute tests (existing)
     // ------------------------------------------------------------------
 
     #[test]
@@ -1314,7 +1685,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Generic type tests
+    // Generic type tests (existing)
     // ------------------------------------------------------------------
 
     #[test]
@@ -1329,7 +1700,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Edge cases
+    // Edge cases (existing)
     // ------------------------------------------------------------------
 
     #[test]

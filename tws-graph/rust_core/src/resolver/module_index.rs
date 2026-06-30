@@ -104,6 +104,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "php" => infer_php_module(file_path),
         "ruby" => infer_ruby_module(file_path),
         "c" | "cpp" | "c++" => infer_c_module(file_path),
+        "csharp" => infer_csharp_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -592,6 +593,60 @@ fn infer_c_module(file_path: &str) -> Option<String> {
     // The resolve_module function also tries path-prefix lookups.
 
     Some(basename)
+}
+
+/// C# module name inference.
+///
+/// Rules:
+/// 1. Only handle `.cs` files.
+/// 2. Strip the `.cs` extension.
+/// 3. Strip common source root prefixes (`src/`).
+/// 4. Replace path separators with dots (C# namespace convention).
+///
+/// Examples:
+/// - `src/Services/UserService.cs` → `Services.UserService`
+/// - `src/Models/Customer.cs` → `Models.Customer`
+/// - `src/MyApp/Core/Engine.cs` → `MyApp.Core.Engine`
+/// - `Utils.cs` → `Utils`
+fn infer_csharp_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle .cs files
+    if !path.ends_with(".cs") {
+        return None;
+    }
+
+    // Strip .cs extension
+    let without_ext = &path[..path.len() - 3];
+
+    // Strip common C# source root prefixes
+    let stripped = strip_csharp_source_root(without_ext);
+
+    // Replace / with . for C# namespace convention
+    let module = stripped.replace('/', ".");
+
+    if module.is_empty() {
+        None
+    } else {
+        Some(module)
+    }
+}
+
+/// Strip common C# source root prefixes.
+fn strip_csharp_source_root(path: &str) -> String {
+    let prefixes = &[
+        "src/",
+        "lib/",
+        "app/",
+    ];
+
+    for prefix in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+
+    path.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1260,6 +1315,66 @@ mod tests {
         assert_eq!(
             infer_module_name("src/foo.cpp", "c++"),
             Some("foo.cpp".to_string())
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // C# module name inference (v7.3.0)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_csharp_module_src() {
+        assert_eq!(
+            infer_module_name("src/Services/UserService.cs", "csharp"),
+            Some("Services.UserService".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/Models/Customer.cs", "csharp"),
+            Some("Models.Customer".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/MyApp/Core/Engine.cs", "csharp"),
+            Some("MyApp.Core.Engine".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_csharp_module_no_prefix() {
+        assert_eq!(
+            infer_module_name("Utils.cs", "csharp"),
+            Some("Utils".to_string())
+        );
+        assert_eq!(
+            infer_module_name("Controllers/HomeController.cs", "csharp"),
+            Some("Controllers.HomeController".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_csharp_module_lib_prefix() {
+        assert_eq!(
+            infer_module_name("lib/Helpers/Utils.cs", "csharp"),
+            Some("Helpers.Utils".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_csharp_module_non_cs() {
+        assert_eq!(infer_module_name("src/foo.py", "csharp"), None);
+        assert_eq!(infer_module_name("src/foo.java", "csharp"), None);
+        assert_eq!(infer_module_name("src/foo.ts", "csharp"), None);
+        assert_eq!(infer_module_name("src/foo.go", "csharp"), None);
+    }
+
+    #[test]
+    fn test_infer_csharp_module_nested() {
+        assert_eq!(
+            infer_module_name("src/Services/Auth/TokenService.cs", "csharp"),
+            Some("Services.Auth.TokenService".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/Infrastructure/Data/Repositories/UserRepository.cs", "csharp"),
+            Some("Infrastructure.Data.Repositories.UserRepository".to_string())
         );
     }
 }

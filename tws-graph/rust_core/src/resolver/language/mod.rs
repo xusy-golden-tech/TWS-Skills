@@ -25,13 +25,14 @@ impl LanguageRegistry {
             "php" => Some(Box::new(PhpResolver)),
             "ruby" => Some(Box::new(RubyResolver)),
             "c" | "cpp" | "c++" => Some(Box::new(CppResolver)),
+            "csharp" => Some(Box::new(CSharpResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin", "go", "rust", "php", "ruby", "c", "cpp"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "go", "rust", "php", "ruby", "c", "cpp", "csharp"]
     }
 }
 
@@ -1624,6 +1625,185 @@ pub fn is_cpp_external(module_name: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// C# module resolver (v7.3.0)
+// ---------------------------------------------------------------------------
+
+/// C# module resolver.
+///
+/// Uses C# namespace/using conventions:
+/// - `using Foo.Bar.Baz;` → module = `Foo.Bar.Baz` → file = `Foo/Bar/Baz.cs`
+/// - ModuleIndex lookup: dotted namespace.declaration → file_path mapping
+/// - Source root prefixes: `src/`, `Services/`, `Models/`
+///
+/// C# namespace mapping follows .NET conventions where namespace segments
+/// roughly correspond to directory structure:
+/// - `MyApp.Services.UserService` → `src/Services/UserService.cs`
+/// - `MyApp.Models.Customer` → `src/Models/Customer.cs`
+pub struct CSharpResolver;
+
+impl ModuleResolver for CSharpResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        _source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        if module_name.is_empty() {
+            return Vec::new();
+        }
+
+        // 1. Direct ModuleIndex lookup (namespace as dotted name)
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Try removing the type name (last dot-segment) to get namespace
+        // e.g., "MyApp.Services.UserService" → namespace "MyApp.Services"
+        if let Some(last_dot) = module_name.rfind('.') {
+            let namespace_name = &module_name[..last_dot];
+            let type_name = &module_name[last_dot + 1..];
+
+            // Look up the namespace in ModuleIndex
+            if let Some(files) = module_index.lookup(namespace_name) {
+                return files.clone();
+            }
+
+            // 3. Try common source root prefixes, converting namespace to path
+            let ns_path = namespace_name.replace('.', "/");
+            let candidates = vec![
+                format!("{}/{}.cs", ns_path, type_name),
+                format!("src/{}/{}.cs", ns_path, type_name),
+            ];
+
+            let mut result = Vec::new();
+            for candidate in &candidates {
+                if let Some(files) = module_index.lookup(candidate) {
+                    result.extend(files.clone());
+                }
+            }
+
+            if !result.is_empty() {
+                return result;
+            }
+        } else {
+            // Single-segment name: try as both namespace and type
+            let type_candidate = format!("{}.cs", module_name);
+            if let Some(files) = module_index.lookup(&type_candidate) {
+                return files.clone();
+            }
+
+            for prefix in &["src/", ""] {
+                let with_prefix = format!("{}{}.cs", prefix, module_name);
+                if let Some(files) = module_index.lookup(&with_prefix) {
+                    return files.clone();
+                }
+            }
+        }
+
+        // 4. Try ModuleIndex with namespace prefix variations
+        for prefix in &["src.", ""] {
+            let with_prefix = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&with_prefix) {
+                return files.clone();
+            }
+        }
+
+        Vec::new()
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "csharp")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_csharp_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "csharp"
+    }
+}
+
+/// Check if a module/type name is from a known C# system namespace or common
+/// third-party library.
+///
+/// A module is considered external if it starts with:
+/// - System.* / System.* (BCL)
+/// - Microsoft.* (nuget packages, ASP.NET, EntityFramework)
+/// - Common third-party NuGet packages (Newtonsoft, Serilog, AutoMapper, etc.)
+///
+/// Project-local using directives (`using MyApp.Services.UserService;`) are
+/// not considered external unless they match one of the known patterns above.
+pub fn is_csharp_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    // .NET Base Class Library and SDK prefixes
+    let system_prefixes: &[&str] = &[
+        "System.", "System",
+        "Microsoft.", "Microsoft",
+    ];
+
+    for prefix in system_prefixes {
+        if module_name.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    // Common third-party NuGet packages / frameworks
+    let third_party_prefixes: &[&str] = &[
+        "Newtonsoft.Json",
+        "Npgsql",
+        "Dapper",
+        "Serilog",
+        "AutoMapper",
+        "NLog",
+        "log4net",
+        "FluentValidation",
+        "MediatR",
+        "Polly",
+        "Swashbuckle",
+        "Xunit",
+        "NUnit",
+        "Moq",
+        "FluentAssertions",
+        "EntityFramework",
+        "IdentityModel",
+        "RestSharp",
+        "StackExchange.Redis",
+        "MassTransit",
+        "Grpc",
+        "Google.Protobuf",
+        "AWSSDK",
+        "Azure",
+        "Amazon",
+        "Hangfire",
+        "Quartz",
+        "Sentry",
+        "OpenTelemetry",
+        "YamlDotNet",
+        "CsvHelper",
+        "Humanizer",
+        "Stateless",
+        "BenchmarkDotNet",
+    ];
+
+    for prefix in third_party_prefixes {
+        if module_name.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2857,5 +3037,145 @@ mod tests {
         assert!(is_cpp_external("vulkan/vulkan.h"));
         assert!(is_cpp_external("GL/gl.h"));
         assert!(is_cpp_external("GL/glew.h"));
+    }
+
+    // ------------------------------------------------------------------
+    // C# resolver tests (v7.3.0)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_is_csharp_external_system() {
+        assert!(is_csharp_external("System"));
+        assert!(is_csharp_external("System.Collections.Generic"));
+        assert!(is_csharp_external("System.Threading.Tasks"));
+        assert!(is_csharp_external("System.Linq"));
+        assert!(is_csharp_external("System.Text.Json"));
+    }
+
+    #[test]
+    fn test_is_csharp_external_microsoft() {
+        assert!(is_csharp_external("Microsoft.Extensions.DependencyInjection"));
+        assert!(is_csharp_external("Microsoft.Extensions.Logging"));
+        assert!(is_csharp_external("Microsoft.AspNetCore.Mvc"));
+        assert!(is_csharp_external("Microsoft.EntityFrameworkCore"));
+    }
+
+    #[test]
+    fn test_is_csharp_external_third_party() {
+        assert!(is_csharp_external("Newtonsoft.Json"));
+        assert!(is_csharp_external("Dapper"));
+        assert!(is_csharp_external("Serilog"));
+        assert!(is_csharp_external("AutoMapper"));
+        assert!(is_csharp_external("Npgsql"));
+        assert!(is_csharp_external("Xunit"));
+        assert!(is_csharp_external("Moq"));
+        assert!(is_csharp_external("Swashbuckle.AspNetCore"));
+    }
+
+    #[test]
+    fn test_is_csharp_external_project_code() {
+        assert!(!is_csharp_external("MyApp.Services.UserService"));
+        assert!(!is_csharp_external("MyApp.Models.Customer"));
+        assert!(!is_csharp_external("MyLib.Utils.Helpers"));
+        assert!(!is_csharp_external("Contoso.Core.Engine"));
+    }
+
+    #[test]
+    fn test_is_csharp_external_empty() {
+        assert!(!is_csharp_external(""));
+    }
+
+    #[test]
+    fn test_csharp_resolver_language() {
+        let resolver = CSharpResolver;
+        assert_eq!(resolver.language(), "csharp");
+    }
+
+    #[test]
+    fn test_csharp_resolver_file_to_module() {
+        let resolver = CSharpResolver;
+        assert_eq!(
+            resolver.file_to_module_name("src/Services/UserService.cs", Path::new(".")),
+            Some("Services.UserService".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("src/Models/Customer.cs", Path::new(".")),
+            Some("Models.Customer".to_string())
+        );
+        // Non-.cs files return None
+        assert_eq!(
+            resolver.file_to_module_name("src/foo.py", Path::new(".")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_csharp_resolver_resolve_module_empty() {
+        let resolver = CSharpResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "MyApp.Services.UserService",
+            "src/Test.cs",
+            Path::new("."),
+            &index,
+        );
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_csharp_resolver_resolve_module_with_index() {
+        use crate::db::hash_id;
+        use crate::db::Database;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let db_path = std::env::temp_dir().join("tws_csharp_resolver_test.db");
+        let _ = std::fs::remove_file(&db_path);
+        let db = Database::initialize(&db_path).unwrap();
+
+        // Insert nodes for C# files
+        let paths = vec![
+            ("src/Services/UserService.cs", "Services.UserService"),
+            ("src/Models/Customer.cs", "Models.Customer"),
+            ("src/Utils/Helpers.cs", "Utils.Helpers"),
+        ];
+        for (file_path, module_name) in &paths {
+            let id = hash_id(file_path, &format!("{}::{}", file_path, module_name));
+            db.connection().execute(
+                "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, start_line, end_line, updated_at) VALUES (?1, 'class', ?2, ?3, ?4, 'csharp', 1, 1, ?5)",
+                rusqlite::params![id, module_name, format!("{}::{}", file_path, module_name), file_path, ts],
+            ).unwrap();
+        }
+
+        let index = ModuleIndex::build(&db).unwrap();
+
+        let resolver = CSharpResolver;
+        // Direct lookup by module name
+        let candidates = resolver.resolve_module(
+            "Services.UserService",
+            "src/Test.cs",
+            Path::new("."),
+            &index,
+        );
+        assert!(!candidates.is_empty());
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_language_registry_get_csharp() {
+        let r = LanguageRegistry::get("csharp");
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().language(), "csharp");
+    }
+
+    #[test]
+    fn test_supported_languages_includes_csharp() {
+        let langs = LanguageRegistry::supported_languages();
+        assert!(langs.contains(&"csharp"));
     }
 }
