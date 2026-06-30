@@ -108,6 +108,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "ruby" => infer_ruby_module(file_path),
         "c" | "cpp" | "c++" => infer_c_module(file_path),
         "csharp" => infer_csharp_module(file_path),
+        "dart" => infer_dart_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -700,6 +701,62 @@ fn strip_csharp_source_root(path: &str) -> String {
         "src/",
         "lib/",
         "app/",
+    ];
+
+    for prefix in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+
+    path.to_string()
+}
+
+/// Dart module name inference.
+///
+/// Rules:
+/// 1. Only handle `.dart` files.
+/// 2. Strip the `.dart` extension.
+/// 3. Strip common source root prefixes (`lib/`, `src/`).
+/// 4. Replace path separators with dots.
+///
+/// Examples:
+/// - `lib/src/models/user.dart` → `src.models.user`
+/// - `lib/widgets/button.dart` → `widgets.button`
+/// - `test/widget_test.dart` → `widget_test`
+/// - `main.dart` → `main`
+fn infer_dart_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle .dart files
+    if !path.ends_with(".dart") {
+        return None;
+    }
+
+    // Strip .dart extension
+    let without_ext = &path[..path.len() - 5];
+
+    // Strip common Dart source root prefixes
+    let stripped = strip_dart_source_root(without_ext);
+
+    // Replace / with . for Dart module convention
+    let module = stripped.replace('/', ".");
+
+    if module.is_empty() {
+        None
+    } else {
+        Some(module)
+    }
+}
+
+/// Strip common Dart source root prefixes.
+fn strip_dart_source_root(path: &str) -> String {
+    let prefixes = &[
+        "lib/",
+        "src/",
+        "test/",
+        "bin/",
+        "web/",
     ];
 
     for prefix in prefixes {
@@ -1488,6 +1545,66 @@ mod tests {
         assert_eq!(
             infer_module_name("src/Infrastructure/Data/Repositories/UserRepository.cs", "csharp"),
             Some("Infrastructure.Data.Repositories.UserRepository".to_string())
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Dart module name inference (Stage 12)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_dart_module_lib_src() {
+        assert_eq!(
+            infer_module_name("lib/src/models/user.dart", "dart"),
+            Some("src.models.user".to_string())
+        );
+        assert_eq!(
+            infer_module_name("lib/widgets/button.dart", "dart"),
+            Some("widgets.button".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_dart_module_lib_root() {
+        assert_eq!(
+            infer_module_name("lib/main.dart", "dart"),
+            Some("main".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_dart_module_no_prefix() {
+        assert_eq!(
+            infer_module_name("main.dart", "dart"),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            infer_module_name("models/user.dart", "dart"),
+            Some("models.user".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_dart_module_test() {
+        assert_eq!(
+            infer_module_name("test/widget_test.dart", "dart"),
+            Some("widget_test".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_dart_module_non_dart() {
+        assert_eq!(infer_module_name("lib/foo.py", "dart"), None);
+        assert_eq!(infer_module_name("lib/foo.java", "dart"), None);
+        assert_eq!(infer_module_name("lib/foo.ts", "dart"), None);
+        assert_eq!(infer_module_name("lib/foo.go", "dart"), None);
+    }
+
+    #[test]
+    fn test_infer_dart_module_nested() {
+        assert_eq!(
+            infer_module_name("lib/features/auth/data/repositories/auth_repository.dart", "dart"),
+            Some("features.auth.data.repositories.auth_repository".to_string())
         );
     }
 }

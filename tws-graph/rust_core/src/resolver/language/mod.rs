@@ -27,13 +27,14 @@ impl LanguageRegistry {
             "ruby" => Some(Box::new(RubyResolver)),
             "c" | "cpp" | "c++" => Some(Box::new(CppResolver)),
             "csharp" => Some(Box::new(CSharpResolver)),
+            "dart" => Some(Box::new(DartResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart"]
     }
 }
 
@@ -1940,6 +1941,310 @@ pub fn is_csharp_external(module_name: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Dart module resolver (Stage 12)
+// ---------------------------------------------------------------------------
+
+/// Dart module resolver.
+///
+/// Dart module system:
+/// - `package:my_app/foo/bar.dart` → resolves to `lib/foo/bar.dart`
+/// - `dart:core` → Dart SDK (external)
+/// - `foo/bar.dart` → relative path import
+/// - `import '...' show X` → selective import
+/// - `import '...' hide X` → import all except X
+/// - `import '...' as prefix` → prefixed import
+pub struct DartResolver;
+
+impl ModuleResolver for DartResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        source_file: &str,
+        project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        if module_name.is_empty() {
+            return Vec::new();
+        }
+
+        // 1. Direct ModuleIndex lookup by module name
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Handle package: scheme → map to lib/ directory
+        //    package:my_app/foo/bar.dart → lib/foo/bar.dart
+        //    (strip the package name, which is the first path segment)
+        if module_name.starts_with("package:") {
+            let after_scheme = &module_name["package:".len()..];
+            // Strip the package name (first path segment) to get the lib-relative path
+            let lib_relative = if let Some(slash_pos) = after_scheme.find('/') {
+                &after_scheme[slash_pos + 1..]
+            } else {
+                // package:foo → lib/foo.dart (single package, no path)
+                after_scheme
+            };
+            // The lib-relative path maps under lib/
+            let lib_path = if lib_relative.is_empty() {
+                "lib".to_string()
+            } else {
+                format!("lib/{}", lib_relative)
+            };
+
+            // Try the lib/ path
+            if let Some(files) = module_index.lookup(&lib_path) {
+                return files.clone();
+            }
+
+            // Try without .dart extension (ModuleIndex may store it)
+            let path_without_dart = if lib_path.ends_with(".dart") {
+                lib_path[..lib_path.len() - 5].to_string()
+            } else {
+                lib_path.clone()
+            };
+            let dotted = path_without_dart.replace('/', ".");
+            if let Some(files) = module_index.lookup(&dotted) {
+                return files.clone();
+            }
+
+            // Also try just the filename without path scheme
+            let basename = if let Some(slash_pos) = after_scheme.rfind('/') {
+                &after_scheme[slash_pos + 1..]
+            } else {
+                after_scheme
+            };
+            let basename_no_ext = if basename.ends_with(".dart") {
+                &basename[..basename.len() - 5]
+            } else {
+                basename
+            };
+
+            // Look up basename in ModuleIndex
+            if let Some(files) = module_index.lookup(basename_no_ext) {
+                return files.clone();
+            }
+
+            // Also try dotted variations
+            for prefix in &["lib.", ""] {
+                let candidate = if path_without_dart.ends_with(basename_no_ext) {
+                    // Try with/without directory parts
+                    if let Some(dir_part_end) = path_without_dart.rfind(basename_no_ext) {
+                        let dir_part = &path_without_dart[..dir_part_end];
+                        format!("{}{}{}", prefix, dir_part.replace('/', "."), basename_no_ext)
+                    } else {
+                        format!("{}{}", prefix, basename_no_ext)
+                    }
+                } else {
+                    format!("{}{}", prefix, path_without_dart.replace('/', "."))
+                };
+                if let Some(files) = module_index.lookup(&candidate) {
+                    if !files.is_empty() {
+                        return files.clone();
+                    }
+                }
+            }
+
+            // Return the lib/ path as a candidate
+            return vec![lib_path];
+        }
+
+        // 3. Handle dart: scheme → external, don't resolve
+        if module_name.starts_with("dart:") {
+            return Vec::new();
+        }
+
+        // 4. Handle relative paths (e.g., 'foo/bar.dart')
+        // Resolve relative to the source file's directory
+        let source_dir = {
+            let p = Path::new(source_file);
+            p.parent()
+                .map(|d| d.to_string_lossy().to_string())
+                .unwrap_or_default()
+        };
+
+        let resolved = if !source_dir.is_empty() {
+            let normalized = if module_name.starts_with("./") {
+                format!("{}/{}", source_dir, &module_name[2..])
+            } else if module_name.starts_with("../") {
+                // Resolve parent directory
+                let parent = {
+                    let p = Path::new(&source_dir);
+                    p.parent()
+                        .map(|d| d.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                };
+                if parent.is_empty() {
+                    module_name[3..].to_string()
+                } else {
+                    format!("{}/{}", parent, &module_name[3..])
+                }
+            } else {
+                format!("{}/{}", source_dir, module_name)
+            };
+            // Simplify the path
+            simplify_dart_path(&normalized)
+        } else {
+            module_name.to_string()
+        };
+
+        // Try the resolved path in ModuleIndex
+        if let Some(files) = module_index.lookup(&resolved) {
+            if !files.is_empty() {
+                return files.clone();
+            }
+        }
+
+        // Try without .dart extension
+        let resolved_no_ext = if resolved.ends_with(".dart") {
+            resolved[..resolved.len() - 5].to_string()
+        } else {
+            resolved.clone()
+        };
+        let dotted = resolved_no_ext.replace('/', ".");
+        if let Some(files) = module_index.lookup(&dotted) {
+            if !files.is_empty() {
+                return files.clone();
+            }
+        }
+
+        // Try with/without common source root prefixes
+        for prefix in &["lib.", "src.", ""] {
+            let candidate = format!("{}{}", prefix, dotted);
+            if let Some(files) = module_index.lookup(&candidate) {
+                if !files.is_empty() {
+                    return files.clone();
+                }
+            }
+        }
+
+        // If .dart extension is present, return as candidate
+        if resolved.ends_with(".dart") {
+            return vec![resolved];
+        }
+
+        // Try adding .dart extension
+        vec![format!("{}.dart", resolved)]
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "dart")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_dart_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "dart"
+    }
+}
+
+/// Simplify a path by resolving ./ and ../ segments.
+fn simplify_dart_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "." => {}
+            ".." => {
+                parts.pop();
+            }
+            "" => {}
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
+/// Check if a module name is from a known Dart/Flutter SDK or common
+/// third-party package.
+///
+/// A module is considered external if it starts with:
+/// - `dart:*` (Dart core SDK)
+/// - `package:flutter/*` (Flutter framework)
+/// - `package:meta/*` (meta package)
+/// - Other well-known third-party packages
+pub fn is_dart_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    // dart: scheme is always external (Dart SDK)
+    if module_name.starts_with("dart:") {
+        return true;
+    }
+
+    // Check package: imports for known external packages
+    if module_name.starts_with("package:") {
+        let after_scheme = &module_name["package:".len()..];
+
+        // Extract the package name (first path segment)
+        let package_name = if let Some(slash_pos) = after_scheme.find('/') {
+            &after_scheme[..slash_pos]
+        } else {
+            after_scheme
+        };
+
+        // Flutter framework packages
+        let flutter_packages: &[&str] = &[
+            "flutter", "flutter_test", "flutter_driver",
+            "flutter_localizations", "flutter_web_plugins",
+            "integration_test",
+        ];
+        if flutter_packages.contains(&package_name) {
+            return true;
+        }
+
+        // Dart team packages
+        let dart_team_packages: &[&str] = &[
+            "meta", "collection", "async", "convert", "crypto",
+            "html", "http", "intl", "logging", "markdown",
+            "mockito", "path", "pedantic", "plugin", "quiver",
+            "shelf", "source_span", "stack_trace", "stream_channel",
+            "string_scanner", "term_glyph", "test", "typed_data",
+            "usage", "vector_math", "watcher", "web_socket_channel",
+            "yaml", "args", "characters", "clock", "fake_async",
+            "file", "matcher", "platform", "process", "pub_semver",
+            "pool", "glob", "json_annotation", "lints", "build",
+            "source_gen", "analyzer", "front_end",
+            // Additional well-known third-party
+            "provider", "riverpod", "bloc", "flutter_bloc",
+            "get", "dio", "retrofit", "chopper",
+            "sqflite", "floor", "drift", "hive",
+            "shared_preferences", "path_provider",
+            "firebase_core", "firebase_auth", "firebase_firestore",
+            "url_launcher", "google_fonts",
+            "equatable", "freezed", "freezed_annotation",
+            "json_serializable", "build_runner",
+            "cached_network_image", "flutter_svg",
+            "go_router", "auto_route",
+            "intl", "flutter_localizations",
+            "rxdart", "dartz",
+            "get_it", "injectable",
+            "flutter_hooks", "hooks_riverpod",
+            "google_maps_flutter", "geolocator",
+            "connectivity_plus", "permission_handler",
+            "image_picker", "file_picker",
+            "flutter_secure_storage", "encrypted_shared_preferences",
+        ];
+
+        if dart_team_packages.contains(&package_name) {
+            return true;
+        }
+
+        // Check for Dart team packages (pub.dev publisher "dart.dev" or "flutter.dev")
+        if package_name.starts_with("flutter_") {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3481,5 +3786,180 @@ mod tests {
     fn test_supported_languages_includes_scala() {
         let langs = LanguageRegistry::supported_languages();
         assert!(langs.contains(&"scala"));
+    }
+
+    // ------------------------------------------------------------------
+    // Dart resolver tests (Stage 12)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_dart_resolver_is_external_dart_sdk() {
+        let resolver = DartResolver;
+        assert!(resolver.is_external("dart:core"));
+        assert!(resolver.is_external("dart:convert"));
+        assert!(resolver.is_external("dart:async"));
+        assert!(resolver.is_external("dart:io"));
+        assert!(resolver.is_external("dart:math"));
+        assert!(resolver.is_external("dart:collection"));
+    }
+
+    #[test]
+    fn test_dart_resolver_is_external_flutter() {
+        let resolver = DartResolver;
+        assert!(resolver.is_external("package:flutter/material.dart"));
+        assert!(resolver.is_external("package:flutter/widgets.dart"));
+        assert!(resolver.is_external("package:flutter_test/flutter_test.dart"));
+    }
+
+    #[test]
+    fn test_dart_resolver_is_external_known_packages() {
+        let resolver = DartResolver;
+        assert!(resolver.is_external("package:provider/provider.dart"));
+        assert!(resolver.is_external("package:http/http.dart"));
+        assert!(resolver.is_external("package:sqflite/sqflite.dart"));
+        assert!(resolver.is_external("package:freezed_annotation/freezed_annotation.dart"));
+    }
+
+    #[test]
+    fn test_dart_resolver_not_external_project_package() {
+        let resolver = DartResolver;
+        // Project's own package imports
+        assert!(!resolver.is_external("package:my_app/models/user.dart"));
+        assert!(!resolver.is_external("package:my_app/utils/helpers.dart"));
+        assert!(!resolver.is_external("package:my_app/main.dart"));
+        // Relative imports
+        assert!(!resolver.is_external("models/user.dart"));
+        assert!(!resolver.is_external("utils/helpers.dart"));
+        assert!(!resolver.is_external("lib/src/core.dart"));
+    }
+
+    #[test]
+    fn test_dart_resolver_empty_module_name() {
+        let resolver = DartResolver;
+        assert!(!resolver.is_external(""));
+    }
+
+    #[test]
+    fn test_dart_resolver_language() {
+        let resolver = DartResolver;
+        assert_eq!(resolver.language(), "dart");
+    }
+
+    #[test]
+    fn test_dart_resolver_file_to_module_name() {
+        let resolver = DartResolver;
+        assert_eq!(
+            resolver.file_to_module_name("lib/src/models/user.dart", Path::new(".")),
+            Some("src.models.user".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("lib/widgets/button.dart", Path::new(".")),
+            Some("widgets.button".to_string())
+        );
+        // Non-Dart files return None
+        assert_eq!(
+            resolver.file_to_module_name("src/foo.py", Path::new(".")),
+            None
+        );
+        assert_eq!(
+            resolver.file_to_module_name("src/foo.java", Path::new(".")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_dart_resolver_resolve_package_module() {
+        let resolver = DartResolver;
+        let index = ModuleIndex::empty();
+        // Even with empty ModuleIndex, should generate candidate lib/ paths
+        let candidates = resolver.resolve_module(
+            "package:my_app/models/user.dart",
+            "lib/main.dart",
+            Path::new("."),
+            &index,
+        );
+        assert!(!candidates.is_empty(), "Expected candidate paths for package import");
+        assert!(candidates.contains(&"lib/models/user.dart".to_string()),
+            "Expected lib/models/user.dart, got: {:?}", candidates);
+    }
+
+    #[test]
+    fn test_dart_resolver_resolve_dart_sdk_empty() {
+        let resolver = DartResolver;
+        let index = ModuleIndex::empty();
+        // dart: imports should return empty (external)
+        let candidates = resolver.resolve_module(
+            "dart:core",
+            "lib/main.dart",
+            Path::new("."),
+            &index,
+        );
+        assert!(candidates.is_empty(), "dart: imports should return no candidates");
+    }
+
+    #[test]
+    fn test_dart_resolver_resolve_relative_import() {
+        let resolver = DartResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "models/user.dart",
+            "lib/main.dart",
+            Path::new("."),
+            &index,
+        );
+        // Should resolve relative to source file directory
+        assert!(!candidates.is_empty(), "Expected candidate paths for relative import");
+        assert!(candidates.contains(&"lib/models/user.dart".to_string()),
+            "Expected lib/models/user.dart, got: {:?}", candidates);
+    }
+
+    #[test]
+    fn test_dart_resolver_resolve_relative_with_parent() {
+        let resolver = DartResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "../utils/helpers.dart",
+            "lib/src/main.dart",
+            Path::new("."),
+            &index,
+        );
+        // Should resolve to lib/utils/helpers.dart (one level up from lib/src/)
+        assert!(!candidates.is_empty(), "Expected candidates for parent-relative import");
+        assert!(candidates.contains(&"lib/utils/helpers.dart".to_string()),
+            "Expected lib/utils/helpers.dart, got: {:?}", candidates);
+    }
+
+    #[test]
+    fn test_dart_resolver_resolve_empty_module() {
+        let resolver = DartResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "",
+            "lib/main.dart",
+            Path::new("."),
+            &index,
+        );
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_language_registry_get_dart() {
+        let r = LanguageRegistry::get("dart");
+        assert!(r.is_some(), "Expected Dart resolver in registry");
+        assert_eq!(r.unwrap().language(), "dart");
+    }
+
+    #[test]
+    fn test_supported_languages_includes_dart() {
+        let langs = LanguageRegistry::supported_languages();
+        assert!(langs.contains(&"dart"), "Expected 'dart' in supported languages");
+    }
+
+    #[test]
+    fn test_simplify_dart_path() {
+        assert_eq!(simplify_dart_path("lib/models/user.dart"), "lib/models/user.dart");
+        assert_eq!(simplify_dart_path("lib/./models/user.dart"), "lib/models/user.dart");
+        assert_eq!(simplify_dart_path("lib/src/../models/user.dart"), "lib/models/user.dart");
+        assert_eq!(simplify_dart_path("./utils.dart"), "utils.dart");
     }
 }
