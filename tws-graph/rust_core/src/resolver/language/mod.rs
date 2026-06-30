@@ -35,13 +35,14 @@ impl LanguageRegistry {
             "zig" => Some(Box::new(ZigResolver)),
             "nix" => Some(Box::new(NixResolver)),
             "elixir" => Some(Box::new(ElixirResolver)),
+            "haskell" => Some(Box::new(HaskellResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift", "lua", "bash", "groovy", "zig", "nix", "elixir"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift", "lua", "bash", "groovy", "zig", "nix", "elixir", "haskell"]
     }
 }
 
@@ -3419,6 +3420,196 @@ pub fn is_elixir_external(module_name: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Haskell module resolver (Stage 20)
+// ---------------------------------------------------------------------------
+
+/// Haskell module resolver.
+///
+/// Haskell module system conventions:
+/// - Module name `Foo.Bar.Baz` maps to file `Foo/Bar/Baz.hs`
+/// - `import Foo.Bar` → look for module in the file system by name-to-path mapping
+/// - Common source roots: `src/`, `lib/`, `app/`
+/// - Standard library (Prelude, Data.*, Control.*, System.*, etc.) is external
+pub struct HaskellResolver;
+
+impl ModuleResolver for HaskellResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        _source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        if module_name.is_empty() {
+            return Vec::new();
+        }
+
+        // 1. Direct ModuleIndex lookup by module name
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Try with common source root prefixes
+        for prefix in &["", "src.", "lib.", "app."] {
+            let candidate = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&candidate) {
+                return files.clone();
+            }
+        }
+
+        // 3. Generate candidate file paths from module name
+        //    e.g., "Foo.Bar.Baz" → "Foo/Bar/Baz.hs"
+        let module_path = haskell_module_to_path(module_name);
+
+        let mut candidates = Vec::new();
+        for prefix in &["", "src/", "lib/", "app/"] {
+            candidates.push(format!("{}{}.hs", prefix, module_path));
+        }
+
+        candidates
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "haskell")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_haskell_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "haskell"
+    }
+}
+
+/// Convert a Haskell module name to a slash-separated file path (without extension).
+///
+/// "Foo.Bar.Baz" → "Foo/Bar/Baz"
+fn haskell_module_to_path(module_name: &str) -> String {
+    module_name.replace('.', "/")
+}
+
+/// Check if a module name is a known Haskell standard library module.
+///
+/// Haskell's standard library includes:
+/// - `Prelude` (implicitly imported)
+/// - `Data.*` packages (Data.List, Data.Map, Data.Set, etc.)
+/// - `Control.*` packages (Control.Monad, Control.Applicative, etc.)
+/// - `System.*` packages (System.IO, System.Environment, etc.)
+/// - `Foreign.*` packages
+/// - `Numeric.*`, `Text.*`, `GHC.*`, `Debug.*`
+/// - Popular third-party packages: `qualified`, `containers`, `bytestring`, `text`, `aeson`, `lens`, `mtl`, etc.
+pub fn is_haskell_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    // Relative references are always local
+    if module_name.starts_with('.') {
+        return false;
+    }
+
+    // Standard library root prefixes
+    let stdlib_prefixes: &[&str] = &[
+        "Prelude",
+        "Data.",
+        "Control.",
+        "System.",
+        "Foreign.",
+        "Numeric.",
+        "Text.",
+        "GHC.",
+        "Debug.",
+        "Unsafe.",
+        "Language.",
+    ];
+
+    for prefix in stdlib_prefixes {
+        if module_name.starts_with(prefix) || module_name == prefix.trim_end_matches('.') {
+            return true;
+        }
+    }
+
+    // Well-known third-party packages
+    let third_party_roots: &[&str] = &[
+        // Core packages (bundled with GHC)
+        "base",
+        "containers",
+        "array",
+        "bytestring",
+        "binary",
+        "deepseq",
+        "directory",
+        "filepath",
+        "process",
+        "time",
+        "transformers",
+        "mtl",
+        "text",
+        "parsec",
+        "pretty",
+        "template_haskell",
+        "ghc",
+        "ghci",
+        "Cabal",
+        "hpc",
+        "integer",
+        "parallel",
+        "stm",
+        // Popular third-party packages
+        "aeson",
+        "lens",
+        "conduit",
+        "warp",
+        "wai",
+        "servant",
+        "persistent",
+        "esqueleto",
+        "yesod",
+        "scotty",
+        "optparse",
+        "vector",
+        "unordered",
+        "hashable",
+        "network",
+        "http",
+        "tls",
+        "cryptonite",
+        "cryptohash",
+        "attoparsec",
+        "megaparsec",
+        "quickcheck",
+        "hspec",
+        "tasty",
+        "hedgehog",
+        "doctest",
+    ];
+
+    let root = module_name.split('.').next().unwrap_or(module_name);
+    if third_party_roots.contains(&root) {
+        return true;
+    }
+
+    // Check two-level prefixes for package sub-modules
+    let two_level_prefixes: &[&str] = &[
+        "Data.Aeson", "Network.HTTP", "Text.Printf",
+        "System.Posix", "GHC.Exts",
+    ];
+
+    for prefix in two_level_prefixes {
+        if module_name.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3487,7 +3678,7 @@ mod tests {
 
     #[test]
     fn test_language_registry_get_unsupported() {
-        let r = LanguageRegistry::get("haskell");
+        let r = LanguageRegistry::get("clojure");
         assert!(r.is_none());
     }
 
@@ -6225,5 +6416,201 @@ mod tests {
         let resolver = LanguageRegistry::get("elixir");
         assert!(resolver.is_some(), "Expected ElixirResolver in LanguageRegistry");
         assert_eq!(resolver.unwrap().language(), "elixir");
+    }
+
+    // ------------------------------------------------------------------
+    // Haskell resolver tests (Stage 20)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_haskell_resolver_language() {
+        let resolver = HaskellResolver;
+        assert_eq!(resolver.language(), "haskell");
+    }
+
+    #[test]
+    fn test_is_haskell_external_stdlib() {
+        assert!(is_haskell_external("Prelude"));
+        assert!(is_haskell_external("Data.List"));
+        assert!(is_haskell_external("Data.Map"));
+        assert!(is_haskell_external("Control.Monad"));
+        assert!(is_haskell_external("Control.Applicative"));
+        assert!(is_haskell_external("System.IO"));
+        assert!(is_haskell_external("System.Environment"));
+        assert!(is_haskell_external("Foreign.C"));
+        assert!(is_haskell_external("Numeric"));
+        assert!(is_haskell_external("Text.Printf"));
+        assert!(is_haskell_external("GHC.Exts"));
+        assert!(is_haskell_external("Debug.Trace"));
+    }
+
+    #[test]
+    fn test_is_haskell_external_third_party() {
+        assert!(is_haskell_external("aeson"));
+        assert!(is_haskell_external("lens"));
+        assert!(is_haskell_external("conduit"));
+        assert!(is_haskell_external("containers"));
+        assert!(is_haskell_external("bytestring"));
+        assert!(is_haskell_external("text"));
+        assert!(is_haskell_external("mtl"));
+        assert!(is_haskell_external("servant"));
+    }
+
+    #[test]
+    fn test_is_haskell_external_two_level() {
+        assert!(is_haskell_external("Data.Aeson"));
+        assert!(is_haskell_external("Network.HTTP"));
+        assert!(is_haskell_external("System.Posix"));
+    }
+
+    #[test]
+    fn test_is_haskell_external_not_external() {
+        // Project-local modules should NOT be external
+        assert!(!is_haskell_external("MyApp"));
+        assert!(!is_haskell_external("MyApp.Services.User"));
+        assert!(!is_haskell_external("Internal"));
+        assert!(!is_haskell_external("Utils"));
+    }
+
+    #[test]
+    fn test_is_haskell_external_empty() {
+        assert!(!is_haskell_external(""));
+    }
+
+    #[test]
+    fn test_haskell_resolver_file_to_module_name() {
+        let resolver = HaskellResolver;
+        assert_eq!(
+            resolver.file_to_module_name("src/Foo/Bar.hs", Path::new(".")),
+            Some("Foo.Bar".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("lib/Data/Map.hs", Path::new(".")),
+            Some("Data.Map".to_string())
+        );
+        // Non-Haskell files
+        assert_eq!(
+            resolver.file_to_module_name("src/foo.py", Path::new(".")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_haskell_resolver_resolve_module_direct() {
+        let resolver = HaskellResolver;
+        let mut index = ModuleIndex::empty();
+
+        // Register: src/Foo/Bar.hs → module "Foo.Bar"
+        index.insert("Foo.Bar", "src/Foo/Bar.hs".to_string());
+
+        let candidates = resolver.resolve_module(
+            "Foo.Bar",
+            "src/Main.hs",
+            Path::new("."),
+            &index,
+        );
+        assert!(
+            candidates.contains(&"src/Foo/Bar.hs".to_string()),
+            "Expected src/Foo/Bar.hs in candidates, got {:?}",
+            candidates
+        );
+    }
+
+    #[test]
+    fn test_haskell_resolver_resolve_module_nested() {
+        let resolver = HaskellResolver;
+        let mut index = ModuleIndex::empty();
+
+        index.insert(
+            "MyApp.Services.Helper",
+            "src/MyApp/Services/Helper.hs".to_string(),
+        );
+
+        let candidates = resolver.resolve_module(
+            "MyApp.Services.Helper",
+            "src/MyApp/Main.hs",
+            Path::new("."),
+            &index,
+        );
+        assert!(
+            candidates.contains(&"src/MyApp/Services/Helper.hs".to_string()),
+            "Expected module to be resolved, got {:?}",
+            candidates
+        );
+    }
+
+    #[test]
+    fn test_haskell_resolver_resolve_module_prefix_fallback() {
+        let resolver = HaskellResolver;
+        let mut index = ModuleIndex::empty();
+
+        // Index has stripped prefix: "Services.Worker" → "src/Services/Worker.hs"
+        index.insert(
+            "Services.Worker",
+            "src/Services/Worker.hs".to_string(),
+        );
+
+        let candidates = resolver.resolve_module(
+            "Services.Worker",
+            "src/Main.hs",
+            Path::new("."),
+            &index,
+        );
+        assert!(
+            candidates.contains(&"src/Services/Worker.hs".to_string()),
+            "Expected src/Services/Worker.hs via prefix fallback, got {:?}",
+            candidates
+        );
+    }
+
+    #[test]
+    fn test_haskell_resolver_resolve_module_no_index() {
+        let resolver = HaskellResolver;
+        let index = ModuleIndex::empty();
+
+        let candidates = resolver.resolve_module(
+            "Foo.Bar.Baz",
+            "src/Main.hs",
+            Path::new("."),
+            &index,
+        );
+        // Should generate candidate paths as fallback
+        assert!(!candidates.is_empty(), "Should generate candidate paths");
+        // Should include common prefixes
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.contains("Foo/Bar/Baz.hs")),
+            "Should contain Haskell file path, got {:?}",
+            candidates
+        );
+    }
+
+    #[test]
+    fn test_haskell_resolver_resolve_module_empty() {
+        let resolver = HaskellResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module("", "src/Main.hs", Path::new("."), &index);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_haskell_module_to_path() {
+        assert_eq!(haskell_module_to_path("Foo"), "Foo");
+        assert_eq!(haskell_module_to_path("Foo.Bar"), "Foo/Bar");
+        assert_eq!(
+            haskell_module_to_path("Foo.Bar.Baz"),
+            "Foo/Bar/Baz"
+        );
+    }
+
+    #[test]
+    fn test_language_registry_get_haskell() {
+        let resolver = LanguageRegistry::get("haskell");
+        assert!(
+            resolver.is_some(),
+            "Expected HaskellResolver in LanguageRegistry"
+        );
+        assert_eq!(resolver.unwrap().language(), "haskell");
     }
 }

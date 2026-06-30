@@ -123,6 +123,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "zig" => infer_zig_module(file_path),
         "nix" => infer_nix_module(file_path),
         "elixir" => infer_elixir_module(file_path),
+        "haskell" => infer_haskell_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -1194,6 +1195,60 @@ fn segment_to_camel_case(segment: &str) -> String {
         })
         .collect::<Vec<String>>()
         .join("")
+}
+
+// ---------------------------------------------------------------------------
+// Haskell module name inference (Stage 20)
+// ---------------------------------------------------------------------------
+
+/// Haskell module name inference.
+///
+/// Rules:
+/// 1. Only handle `.hs` files.
+/// 2. Strip the `.hs` extension.
+/// 3. Replace path separators with dots (Haskell module name convention).
+/// 4. Strip common source root prefixes (`src/`, `lib/`, `app/`).
+///
+/// Haskell convention: module name `Foo.Bar.Baz` maps to file `Foo/Bar/Baz.hs`.
+///
+/// Examples:
+/// - `src/Foo/Bar.hs` → `Foo.Bar`
+/// - `lib/Data/Map.hs` → `Data.Map`
+/// - `app/Main.hs` → `Main`
+/// - `MyLib.hs` → `MyLib`
+fn infer_haskell_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle .hs files
+    if !path.ends_with(".hs") {
+        return None;
+    }
+
+    // Strip .hs extension
+    let without_ext = &path[..path.len() - 3];
+
+    // Strip common Haskell source root prefixes
+    let stripped = strip_haskell_source_root(without_ext);
+
+    // Replace / with . for module name convention
+    let module = stripped.replace('/', ".");
+
+    if module.is_empty() {
+        None
+    } else {
+        Some(module)
+    }
+}
+
+/// Strip common Haskell source root prefixes.
+fn strip_haskell_source_root(path: &str) -> String {
+    let prefixes = &["src/", "lib/", "app/"];
+    for prefix in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+    path.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -2510,5 +2565,87 @@ mod tests {
         assert_eq!(segment_to_camel_case("user"), "User");
         assert_eq!(segment_to_camel_case("services"), "Services");
         assert_eq!(segment_to_camel_case("http_client"), "HttpClient");
+    }
+
+    // ------------------------------------------------------------------
+    // Haskell module name inference (Stage 20)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_haskell_module_src() {
+        assert_eq!(
+            infer_module_name("src/Foo/Bar.hs", "haskell"),
+            Some("Foo.Bar".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/Main.hs", "haskell"),
+            Some("Main".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_haskell_module_lib() {
+        assert_eq!(
+            infer_module_name("lib/Data/Map.hs", "haskell"),
+            Some("Data.Map".to_string())
+        );
+        assert_eq!(
+            infer_module_name("lib/Control/Monad.hs", "haskell"),
+            Some("Control.Monad".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_haskell_module_app() {
+        assert_eq!(
+            infer_module_name("app/Main.hs", "haskell"),
+            Some("Main".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_haskell_module_no_prefix() {
+        assert_eq!(
+            infer_module_name("MyLib.hs", "haskell"),
+            Some("MyLib".to_string())
+        );
+        assert_eq!(
+            infer_module_name("Foo/Bar/Baz.hs", "haskell"),
+            Some("Foo.Bar.Baz".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_haskell_module_non_hs() {
+        assert_eq!(infer_module_name("src/foo.py", "haskell"), None);
+        assert_eq!(infer_module_name("src/foo.java", "haskell"), None);
+        assert_eq!(infer_module_name("src/foo.rs", "haskell"), None);
+    }
+
+    #[test]
+    fn test_infer_haskell_module_deep_nested() {
+        assert_eq!(
+            infer_module_name("src/MyApp/Services/User/Auth.hs", "haskell"),
+            Some("MyApp.Services.User.Auth".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_haskell_source_root() {
+        assert_eq!(strip_haskell_source_root("src/foo"), "foo");
+        assert_eq!(strip_haskell_source_root("lib/bar"), "bar");
+        assert_eq!(strip_haskell_source_root("app/baz"), "baz");
+        assert_eq!(strip_haskell_source_root("no_prefix"), "no_prefix");
+    }
+
+    #[test]
+    fn test_infer_module_unknown_lang_haskell_now_supported() {
+        // Haskell is now supported — .hs files should return a module name
+        assert_eq!(
+            infer_module_name("src/Foo/Bar.hs", "haskell"),
+            Some("Foo.Bar".to_string())
+        );
+        // Non-.hs files still return None even for "haskell" language
+        assert_eq!(infer_module_name("src/foo/bar.rb", "haskell"), None);
     }
 }
