@@ -100,12 +100,17 @@ impl Extractor for PythonExtractor {
 struct Walker {
     /// Stack of class names for building self.method targets.
     class_stack: Vec<String>,
+    /// Map from imported name (including aliases) to qualified module.symbol name.
+    /// E.g. `from os.path import join` populates `"join" → "os.path.join"`.
+    /// `from os.path import join as jn` populates `"jn" → "os.path.join"`.
+    imported_names: HashMap<String, String>,
 }
 
 impl Walker {
     fn new() -> Self {
         Self {
             class_stack: Vec::new(),
+            imported_names: HashMap::new(),
         }
     }
 
@@ -340,7 +345,8 @@ impl Walker {
             if !type_text.is_empty() && !is_python_builtin(&type_text) {
                 let target_qn = format!("{}::{}", ctx.file_path, type_text);
                 let target = hash_id(&ctx.file_path, &target_qn);
-                ctx.add_edge(&func_id, &target, EdgeKind::TypeRef, line, Some(&type_text));
+                let qualified_type = qualify_type_text(&self.imported_names, &type_text);
+                ctx.add_edge(&func_id, &target, EdgeKind::TypeRef, line, Some(&qualified_type));
             }
         }
 
@@ -443,14 +449,20 @@ impl Walker {
             | "string"
             | "attribute"
             | "keyword_argument"
-            | "pair"
-            | "import_statement"
-            | "import_from_statement" => {
+            | "pair" => {
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
                         self.walk_body_for_calls(source, child, ctx, parent_id)?;
                     }
                 }
+            }
+            // Imports inside function bodies: extract them so they populate
+            // `imported_names` for later calls in the same function.
+            "import_statement" => {
+                self.extract_import_stmt(source, node, ctx, parent_id)?;
+            }
+            "import_from_statement" => {
+                self.extract_import_from(source, node, ctx, parent_id)?;
             }
             _ => {
                 for i in 0..node.named_child_count() {
@@ -499,7 +511,13 @@ impl Walker {
                             false,
                         );
                         let target = hash_id(&ctx.file_path, &target_qn);
-                        ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&name));
+                        // If name was imported, use qualified module.symbol as target_text
+                        let call_target_text = self
+                            .imported_names
+                            .get(&name)
+                            .map(|s| s.as_str())
+                            .unwrap_or(&name);
+                        ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(call_target_text));
                     }
                 }
                 "attribute" => {
@@ -550,7 +568,9 @@ impl Walker {
             let callee = full_chain.rsplitn(2, '.').next().unwrap_or(&full_chain);
             let target_qn = format!("{}::{}", ctx.file_path, callee);
             let target = hash_id(&ctx.file_path, &target_qn);
-            ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&full_chain));
+            // If the first segment is an imported module, qualify the target_text
+            let qualified_chain = qualify_chain(&self.imported_names, &full_chain);
+            ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&qualified_chain));
         }
 
         Ok(())
@@ -637,7 +657,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_import_stmt(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -646,13 +666,37 @@ impl Walker {
         let line = node.start_position().row as u32 + 1;
         for i in 0..node.named_child_count() {
             if let Some(child) = node.named_child(i) {
-                if child.kind() == "dotted_name" {
-                    let module_name = get_text(source, Some(child));
-                    if !module_name.is_empty() {
-                        let target_qn = format!("{}::{}", ctx.file_path, module_name);
-                        let target = hash_id(&ctx.file_path, &target_qn);
-                        ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&module_name));
+                match child.kind() {
+                    "dotted_name" => {
+                        let module_name = get_text(source, Some(child));
+                        if !module_name.is_empty() {
+                            let target_qn = format!("{}::{}", ctx.file_path, module_name);
+                            let target = hash_id(&ctx.file_path, &target_qn);
+                            ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&module_name));
+                            // Populate imported_names so we can qualify references
+                            // e.g. `import foo.bar` → imported names: "foo.bar" → "foo.bar" (top-level)
+                            let top = module_name.split('.').next().unwrap_or(&module_name);
+                            self.imported_names.insert(top.to_string(), module_name.clone());
+                        }
                     }
+                    "aliased_import" => {
+                        // import foo.bar as fb → IMPORTS edge + map alias
+                        if let Some(name_node) = child.child_by_field_name("name") {
+                            let module_name = get_text(source, Some(name_node));
+                            if !module_name.is_empty() {
+                                let target_qn = format!("{}::{}", ctx.file_path, module_name);
+                                let target = hash_id(&ctx.file_path, &target_qn);
+                                ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&module_name));
+                                if let Some(alias_node) = child.child_by_field_name("alias") {
+                                    let alias = get_text(source, Some(alias_node));
+                                    if !alias.is_empty() && !is_python_builtin(&alias) {
+                                        self.imported_names.insert(alias.to_string(), module_name.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -660,19 +704,86 @@ impl Walker {
     }
 
     fn extract_import_from(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
         parent_id: &str,
     ) -> anyhow::Result<()> {
         let line = node.start_position().row as u32 + 1;
-        if let Some(module_node) = node.child_by_field_name("module_name") {
-            let module_name = get_text(source, Some(module_node));
-            if !module_name.is_empty() {
-                let target_qn = format!("{}::{}", ctx.file_path, module_name);
-                let target = hash_id(&ctx.file_path, &target_qn);
-                ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&module_name));
+        let module_node = node.child_by_field_name("module_name");
+        let module_id = module_node.map(|m| m.id());
+        let module_name = get_text(source, module_node);
+
+        if !module_name.is_empty() {
+            // 1. Module-level IMPORTS edge (existing logic)
+            let target_qn = format!("{}::{}", ctx.file_path, module_name);
+            let target = hash_id(&ctx.file_path, &target_qn);
+            ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&module_name));
+
+            // 2. Per-symbol REFERENCES edges + populate imported_names map
+            for i in 0..node.named_child_count() {
+                if let Some(child) = node.named_child(i) {
+                    // Skip the module_name child itself
+                    if module_id == Some(child.id()) {
+                        continue;
+                    }
+                    match child.kind() {
+                        "dotted_name" => {
+                            // from X import Y → REFERENCES edge target_text = "X.Y"
+                            let symbol_name = get_text(source, Some(child));
+                            if !symbol_name.is_empty() && !is_python_builtin(&symbol_name) {
+                                let ref_target = format!("{}.{}", module_name, symbol_name);
+                                let ref_target_qn =
+                                    format!("{}::{}", ctx.file_path, ref_target);
+                                let ref_id = hash_id(&ctx.file_path, &ref_target_qn);
+                                ctx.add_edge(
+                                    parent_id,
+                                    &ref_id,
+                                    EdgeKind::References,
+                                    line,
+                                    Some(&ref_target),
+                                );
+                                self.imported_names
+                                    .insert(symbol_name.to_string(), ref_target);
+                            }
+                        }
+                        "aliased_import" => {
+                            // from X import Y as Z → REFERENCES target_text = "X.Y"
+                            if let Some(name_node) = child.child_by_field_name("name") {
+                                let original_name = get_text(source, Some(name_node));
+                                if !original_name.is_empty() && !is_python_builtin(&original_name) {
+                                    let ref_target =
+                                        format!("{}.{}", module_name, original_name);
+                                    let ref_target_qn =
+                                        format!("{}::{}", ctx.file_path, ref_target);
+                                    let ref_id = hash_id(&ctx.file_path, &ref_target_qn);
+                                    ctx.add_edge(
+                                        parent_id,
+                                        &ref_id,
+                                        EdgeKind::References,
+                                        line,
+                                        Some(&ref_target),
+                                    );
+                                    // Map the alias (or original name if no alias) → qualified name
+                                    if let Some(alias_node) =
+                                        child.child_by_field_name("alias")
+                                    {
+                                        let alias = get_text(source, Some(alias_node));
+                                        if !alias.is_empty() {
+                                            self.imported_names
+                                                .insert(alias.to_string(), ref_target);
+                                        }
+                                    } else {
+                                        self.imported_names
+                                            .insert(original_name.to_string(), ref_target);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
         Ok(())
@@ -792,12 +903,14 @@ impl Walker {
                             if !type_text.is_empty() && !is_python_builtin(&type_text) {
                                 let target_qn = format!("{}::{}", ctx.file_path, type_text);
                                 let target = hash_id(&ctx.file_path, &target_qn);
+                                let qualified_type =
+                                    qualify_type_text(&self.imported_names, &type_text);
                                 ctx.add_edge(
                                     func_id,
                                     &target,
                                     EdgeKind::TypeRef,
                                     line,
-                                    Some(&type_text),
+                                    Some(&qualified_type),
                                 );
                             }
                         }
@@ -877,6 +990,44 @@ impl Walker {
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+/// Qualify a dotted chain (e.g. `mylib.helper`) by replacing the first segment
+/// with its imported qualified name if it exists in `imported_names`.
+///
+/// Example: if `imported_names` maps `"mylib" → "package.mylib"`, then
+/// `qualify_chain(..., "mylib.helper")` returns `"package.mylib.helper"`.
+fn qualify_chain(imported_names: &HashMap<String, String>, chain: &str) -> String {
+    if let Some(dot_pos) = chain.find('.') {
+        let first = &chain[..dot_pos];
+        if let Some(qualified) = imported_names.get(first) {
+            return format!("{}.{}", qualified, &chain[dot_pos + 1..]);
+        }
+    }
+    chain.to_string()
+}
+
+/// Qualify a type annotation text by looking up imported names.
+///
+/// Two cases:
+/// 1. Simple type name: `MyType` — if in `imported_names`, use qualified form
+/// 2. Dotted type name: `module.MyType` — if `module` is in `imported_names`,
+///    qualify the chain
+/// 3. Everything else (generics `List[X]`, complex expressions) — return as-is
+fn qualify_type_text(imported_names: &HashMap<String, String>, type_text: &str) -> String {
+    // Skip complex type expressions with brackets, quotes, etc.
+    if type_text.contains('[') || type_text.contains('"') || type_text.contains('\'') {
+        return type_text.to_string();
+    }
+    // Check if the whole type_text is an imported name
+    if let Some(qualified) = imported_names.get(type_text) {
+        return qualified.clone();
+    }
+    // Check if it's a dotted name where the first segment is imported
+    if type_text.contains('.') {
+        return qualify_chain(imported_names, type_text);
+    }
+    type_text.to_string()
+}
 
 /// Build a target qualified name for a call edge.
 fn build_call_target(
@@ -1175,6 +1326,111 @@ mod tests {
         let imports = find_edges(&ctx, EdgeKind::Imports);
         assert_eq!(imports.len(), 1);
         assert_eq!(imports[0].target_text.as_deref().unwrap_or(""), "os.path");
+    }
+
+    #[test]
+    fn test_import_from_creates_references_edges() {
+        // from X import Y → REFERENCE edge with target_text = "X.Y"
+        let ctx = extract("from utils import helper\n", "src/test.py");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert!(!refs.is_empty(), "Expected at least one REFERENCE edge");
+        let targets: Vec<&str> = refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(targets.contains(&"utils.helper"), "Expected 'utils.helper' in REFERENCE targets: {:?}", targets);
+    }
+
+    #[test]
+    fn test_import_from_multiple_symbols_references() {
+        // from X import Y, Z → REFERENCE edges for both Y and Z
+        let ctx = extract("from mylib import func_a, func_b\n", "src/test.py");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert!(refs.len() >= 2, "Expected at least 2 REFERENCE edges, got {}", refs.len());
+        let targets: Vec<&str> = refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(targets.contains(&"mylib.func_a"), "Expected 'mylib.func_a' in: {:?}", targets);
+        assert!(targets.contains(&"mylib.func_b"), "Expected 'mylib.func_b' in: {:?}", targets);
+    }
+
+    #[test]
+    fn test_import_from_aliased_creates_references() {
+        // from X import Y as ALIAS → REFERENCE edge with target_text = "X.Y" (original name)
+        let ctx = extract("from utils import helper as hlp\n", "src/test.py");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert!(!refs.is_empty(), "Expected at least one REFERENCE edge for aliased import");
+        let targets: Vec<&str> = refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(targets.contains(&"utils.helper"), "Expected 'utils.helper' (original name) in: {:?}", targets);
+        assert!(!targets.contains(&"utils.hlp"), "Alias should NOT appear in REFERENCE target_text");
+    }
+
+    #[test]
+    fn test_import_as_alias() {
+        // import X as Y → IMPORTS edge + imported_names maps alias → module
+        let ctx = extract("import numpy as np\n", "src/test.py");
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].target_text.as_deref().unwrap_or(""), "numpy");
+    }
+
+    #[test]
+    fn test_imported_call_uses_qualified_target_text() {
+        // When a call target was imported via `from X import Y`,
+        // the CALLS edge should use qualified target_text = "X.Y"
+        let ctx = extract(
+            "from utils import helper\ndef foo():\n    helper()\n",
+            "src/test.py",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(targets.contains(&"utils.helper"), "Expected 'utils.helper' in call targets: {:?}", targets);
+    }
+
+    #[test]
+    fn test_imported_alias_call_uses_original_qualified_name() {
+        // from X import Y as Z → call Z() should use target_text = "X.Y"
+        let ctx = extract(
+            "from utils import helper as hlp\ndef foo():\n    hlp()\n",
+            "src/test.py",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(targets.contains(&"utils.helper"), "Expected 'utils.helper' (original name) in: {:?}", targets);
+    }
+
+    #[test]
+    fn test_imported_type_annotation_uses_qualified_target_text() {
+        // Type annotations referencing imported types should use qualified target_text
+        let ctx = extract(
+            "from models import User\ndef get_user() -> User:\n    pass\n",
+            "src/test.py",
+        );
+        let type_refs: Vec<&crate::db::models::EdgeRecord> =
+            ctx.result.edges.iter().filter(|e| e.kind == "TYPE_REF").collect();
+        assert!(type_refs.len() >= 1, "Expected at least one TYPE_REF edge, got {}", type_refs.len());
+        let texts: Vec<&str> = type_refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(texts.contains(&"models.User"), "Expected 'models.User' in TYPE_REF: {:?}", texts);
+    }
+
+    #[test]
+    fn test_imported_type_param_annotation_qualified() {
+        // Type annotations in parameters should use qualified target_text
+        let ctx = extract(
+            "from schemas import Item\ndef process(x: Item) -> None:\n    pass\n",
+            "src/test.py",
+        );
+        let type_refs: Vec<&crate::db::models::EdgeRecord> =
+            ctx.result.edges.iter().filter(|e| e.kind == "TYPE_REF").collect();
+        let texts: Vec<&str> = type_refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(texts.iter().any(|t| *t == "schemas.Item"), "Expected 'schemas.Item' in TYPE_REF: {:?}", texts);
+    }
+
+    #[test]
+    fn test_non_imported_call_uses_bare_name() {
+        // Calls to non-imported (local) symbols should still use bare name
+        let ctx = extract(
+            "def local_func():\n    pass\ndef foo():\n    local_func()\n",
+            "src/test.py",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(targets.contains(&"local_func"), "Expected 'local_func' in call targets: {:?}", targets);
     }
 
     // ------------------------------------------------------------------
