@@ -114,6 +114,24 @@ def rust_unresolved(db_path: str,
     return unresolved(db_path, include_paths, exclude_paths)
 
 
+def rust_resolve(db_path: str, project_root: str) -> str:
+    """Run cross-file reference resolution using Rust.
+
+    Scans dangling edges and attempts to resolve module references
+    using language-specific resolvers. Returns a JSON string with
+    resolution statistics.
+
+    Args:
+        db_path: Path to the SQLite index database.
+        project_root: Root directory of the project.
+
+    Returns:
+        JSON string: {"resolved": N, "unresolved": N, "already_valid": N, "external": N}
+    """
+    from _core._core import resolve_refs
+    return resolve_refs(db_path, project_root)
+
+
 def rust_export_dot(db_path: str, from_node: str, depth: int = 3, kind: str | None = None,
                     include_paths: list[str] | None = None,
                     exclude_paths: list[str] | None = None) -> str:
@@ -389,10 +407,10 @@ def rust_snapshot_list(db_path: str) -> str:
     return snapshot_list(db_path)
 
 
-def rust_snapshot_diff(db_path: str, a: str, b: str) -> str:
+def rust_snapshot_diff(db_path: str, a: str, b: str, brief: bool = False) -> str:
     """Compare two snapshots using Rust."""
     from _core._core import snapshot_diff
-    return snapshot_diff(db_path, a, b)
+    return snapshot_diff(db_path, a, b, brief)
 
 
 def rust_lsp_setup(db_path: str) -> str:

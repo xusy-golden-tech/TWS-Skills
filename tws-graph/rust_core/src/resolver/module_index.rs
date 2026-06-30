@@ -1,0 +1,309 @@
+//! ModuleIndex — reverse index from module name to file paths.
+//!
+//! Scans the `nodes` table for all distinct file paths, infers module names
+//! from file paths using language-specific rules, and builds a bidirectional
+//! mapping: module name → file paths (forward) and file path → module name
+//! (reverse).
+//!
+//! Phase 0 only implements Python module name inference rules. All other
+//! languages return an empty mapping, gracefully degrading.
+
+use crate::db::Database;
+use std::collections::HashMap;
+
+/// Bidirectional index mapping module names to file paths and vice versa.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleIndex {
+    /// module_name → Vec<file_path> (one module may span multiple files,
+    /// e.g. `__init__.py` + regular modules).
+    mapping: HashMap<String, Vec<String>>,
+    /// file_path → module_name (reverse lookup).
+    rev_mapping: HashMap<String, String>,
+}
+
+impl ModuleIndex {
+    /// Build the module index from the `nodes` table.
+    ///
+    /// Queries distinct (file_path, language) pairs then infers a module
+    /// name for each file.  For languages without inference rules (yet),
+    /// the file is silently skipped.
+    pub fn build(db: &Database) -> rusqlite::Result<Self> {
+        let conn = db.connection();
+        let mut stmt = conn.prepare("SELECT DISTINCT file_path, language FROM nodes")?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut mapping: HashMap<String, Vec<String>> = HashMap::new();
+        let mut rev_mapping: HashMap<String, String> = HashMap::new();
+
+        for (file_path, language) in &rows {
+            let module_name = infer_module_name(file_path, language);
+            if let Some(name) = module_name {
+                mapping.entry(name.clone()).or_default().push(file_path.clone());
+                rev_mapping.entry(file_path.clone()).or_insert(name);
+            }
+        }
+
+        Ok(Self { mapping, rev_mapping })
+    }
+
+    /// Build an empty ModuleIndex (useful for testing).
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Look up files that belong to the given module name.
+    pub fn lookup(&self, module_name: &str) -> Option<&Vec<String>> {
+        self.mapping.get(module_name)
+    }
+
+    /// Reverse-lookup: given a file path, return its module name.
+    pub fn rev_lookup(&self, file_path: &str) -> Option<&str> {
+        self.rev_mapping.get(file_path).map(|s| s.as_str())
+    }
+
+    /// Returns the number of module entries in the index.
+    pub fn len(&self) -> usize {
+        self.mapping.len()
+    }
+
+    /// Returns true if the index is empty.
+    pub fn is_empty(&self) -> bool {
+        self.mapping.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Module name inference (language-specific rules)
+// ---------------------------------------------------------------------------
+
+/// Infer a module name from a file path and language.
+///
+/// Each language has its own module system conventions:
+///
+/// | Language     | Rule                                                         |
+/// |--------------|--------------------------------------------------------------|
+/// | Python       | `src/foo/bar.py` → `foo.bar`                                 |
+/// |              | `src/foo/bar/__init__.py` → `foo.bar`                        |
+/// | TypeScript   | `src/foo/bar.ts` → `src/foo/bar` (relative path, stripped ext)|
+/// | Java         | `src/com/foo/Bar.java` → `com.foo.Bar`                       |
+/// | Go           | `pkg/foo/bar.go` → `foo` (package name, not implemented yet) |
+/// | Rust         | crate-based, not implemented yet                             |
+///
+/// Phase 0: only Python is implemented. Other languages return `None`.
+pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
+    match language {
+        "python" => infer_python_module(file_path),
+        _ => None, // not yet implemented, graceful degradation
+    }
+}
+
+/// Python module name inference.
+///
+/// Rules:
+/// 1. Strip `.py` extension.
+/// 2. If the filename is `__init__`, use the parent directory as the module.
+/// 3. Replace path separators with dots.
+/// 4. Strip common source root prefixes (`src/`, `lib/`).
+fn infer_python_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle .py files
+    if !path.ends_with(".py") {
+        return None;
+    }
+
+    // Strip extension
+    let without_ext = &path[..path.len() - 3];
+
+    // Handle __init__.py
+    if without_ext.ends_with("__init__") {
+        // Strip the trailing /__init__ or __init__
+        let dir_part = if without_ext.ends_with("/__init__") {
+            &without_ext[..without_ext.len() - 9]
+        } else {
+            // bare __init__.py — root module
+            ""
+        };
+        if dir_part.is_empty() {
+            return Some("".to_string()); // root-level __init__.py
+        }
+        let module = dir_part.replace('/', ".");
+        return Some(strip_src_prefix(&module));
+    }
+
+    // Regular .py file: replace / with .
+    let module = without_ext.replace('/', ".");
+    Some(strip_src_prefix(&module))
+}
+
+/// Strip common source root prefixes (`src.`, `lib.`, `test.`, `tests.`).
+fn strip_src_prefix(module: &str) -> String {
+    for prefix in &["src.", "lib.", "test.", "tests."] {
+        if module.starts_with(prefix) {
+            return module[prefix.len()..].to_string();
+        }
+    }
+    module.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::connection::hash_id;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn setup_db(name: &str) -> (Database, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("tws_mi_{}.db", name));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+
+        let db = Database::initialize(&path).unwrap();
+        (db, path)
+    }
+
+    fn now_ms() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    }
+
+    fn insert_node(db: &Database, name: &str, file_path: &str, lang: &str) {
+        let id = hash_id(file_path, &format!("{}::{}", file_path, name));
+        let ts = now_ms();
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, \
+             start_line, end_line, updated_at) \
+             VALUES (?1, 'function', ?2, ?3, ?4, ?5, 1, 1, ?6)",
+            rusqlite::params![id, name, format!("{}::{}", file_path, name), file_path, lang, ts],
+        )
+        .unwrap();
+    }
+
+    fn cleanup(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    // ------------------------------------------------------------------
+    // Python module name inference
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_python_module_regular() {
+        assert_eq!(infer_python_module("src/foo/bar.py"), Some("foo.bar".to_string()));
+    }
+
+    #[test]
+    fn test_infer_python_module_init() {
+        assert_eq!(
+            infer_python_module("src/foo/bar/__init__.py"),
+            Some("foo.bar".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_python_module_root() {
+        // No src/ prefix, top-level
+        assert_eq!(infer_python_module("mylib.py"), Some("mylib".to_string()));
+    }
+
+    #[test]
+    fn test_infer_python_module_root_init() {
+        assert_eq!(infer_python_module("__init__.py"), Some("".to_string()));
+    }
+
+    #[test]
+    fn test_infer_python_module_non_python() {
+        assert_eq!(infer_python_module("foo.ts"), None);
+    }
+
+    #[test]
+    fn test_infer_module_python_via_lang() {
+        assert_eq!(
+            infer_module_name("src/foo/bar.py", "python"),
+            Some("foo.bar".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_module_unknown_lang_graceful() {
+        assert_eq!(infer_module_name("src/foo/bar.ts", "typescript"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // ModuleIndex construction
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_build_module_index_from_db() {
+        let (db, path) = setup_db("build_index");
+        insert_node(&db, "foo", "src/pkg/module_a.py", "python");
+        insert_node(&db, "bar", "src/pkg/module_a.py", "python");
+        insert_node(&db, "baz", "src/pkg/module_b.py", "python");
+        insert_node(&db, "qux", "src/utils/helpers.py", "python");
+
+        // Also insert a non-python file (should be ignored)
+        insert_node(&db, "comp", "src/components/App.tsx", "typescript");
+
+        let idx = ModuleIndex::build(&db).unwrap();
+        // We should have 3 Python modules (pkg.module_a, pkg.module_b, utils.helpers)
+        // TypeScript is currently not inferred
+        assert_eq!(idx.len(), 3);
+        assert!(idx.lookup("pkg.module_a").is_some());
+        assert!(idx.lookup("pkg.module_b").is_some());
+        assert!(idx.lookup("utils.helpers").is_some());
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_rev_lookup() {
+        let (db, path) = setup_db("rev_lookup");
+        insert_node(&db, "func", "src/mypkg/core.py", "python");
+
+        let idx = ModuleIndex::build(&db).unwrap();
+        assert_eq!(idx.rev_lookup("src/mypkg/core.py"), Some("mypkg.core"));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_empty_index() {
+        let idx = ModuleIndex::empty();
+        assert!(idx.is_empty());
+        assert_eq!(idx.len(), 0);
+        assert!(idx.lookup("anything").is_none());
+        assert!(idx.rev_lookup("anything.py").is_none());
+    }
+
+    #[test]
+    fn test_multiple_files_same_module() {
+        // __init__.py and other .py files in same directory share module name
+        let (db, path) = setup_db("multi_files");
+        insert_node(&db, "a", "src/pkg/__init__.py", "python");
+        insert_node(&db, "b", "src/pkg/utils.py", "python");
+
+        let idx = ModuleIndex::build(&db).unwrap();
+        assert_eq!(idx.len(), 2);
+        // pkg module → files
+        let pkg_files = idx.lookup("pkg").unwrap();
+        assert!(pkg_files.contains(&"src/pkg/__init__.py".to_string()));
+        let utils_files = idx.lookup("pkg.utils").unwrap();
+        assert!(utils_files.contains(&"src/pkg/utils.py".to_string()));
+
+        cleanup(&path);
+    }
+}

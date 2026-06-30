@@ -387,7 +387,7 @@ def diff(
         typer.echo(rust_snapshot_list(base))
         return
     if before and after:
-        typer.echo(rust_snapshot_diff(base, before, after))
+        typer.echo(rust_snapshot_diff(base, before, after, brief))
         return
 
     typer.echo("错误: 需要同时提供 BEFORE 和 AFTER 快照名称。", err=True)
@@ -795,6 +795,47 @@ def unresolved(
                            f"  来自 {r['from_node_id'][:12]}...")
             if len(file_refs) > 5:
                 typer.echo(f"    ... 还有 {len(file_refs) - 5} 条")
+
+
+# ============================================================================
+# resolve
+# ============================================================================
+
+@app.command()
+def resolve(
+    project_root: str = typer.Argument(".", help="项目根目录"),
+    db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+):
+    """运行跨文件引用解析。
+
+    扫描所有悬挂边（target 不在 nodes 表中的边），使用语言特定的
+    模块解析器尝试解析引用。解析成功则更新 edge target，解析失败
+    则写入 unresolved_refs 表。
+    """
+    resolved_db = os.path.abspath(db_path or DEFAULT_DB)
+
+    if not os.path.exists(resolved_db):
+        typer.echo("错误: 索引数据库不存在。请先运行 tws-graph index。", err=True)
+        raise typer.Exit(1)
+
+    # Try Rust acceleration
+    from .rust_bridge import rust_resolve, _rust_available
+    if _rust_available():
+        result = rust_resolve(resolved_db, os.path.abspath(project_root))
+        try:
+            import json
+            stats = json.loads(result)
+            typer.echo(f"跨文件引用解析完成:")
+            typer.echo(f"  解析成功: {stats['resolved']}")
+            typer.echo(f"  无法解析: {stats['unresolved']}")
+            typer.echo(f"  已有效:   {stats['already_valid']}")
+            typer.echo(f"  外部依赖: {stats['external']}")
+        except Exception:
+            typer.echo(result)
+        return
+
+    typer.echo("错误: Rust 核心不可用，解析功能需要 _core 原生库。", err=True)
+    raise typer.Exit(1)
 
 
 # ============================================================================

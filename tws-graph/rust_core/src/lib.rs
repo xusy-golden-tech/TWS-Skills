@@ -26,6 +26,7 @@ mod services;
 mod snapshot;
 mod watch;
 mod federate;
+mod resolver;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -787,6 +788,35 @@ fn unresolved(db_path: &str, include_paths: Option<Vec<String>>, exclude_paths: 
 }
 
 // ============================================================================
+// Resolution
+// ============================================================================
+
+/// Run cross-file reference resolution.
+///
+/// Scans dangling edges (edges whose target does not exist in `nodes`),
+/// resolves module references using language-specific resolvers, and either
+/// updates edge targets or records unresolved references.
+///
+/// Returns a JSON string with resolution statistics:
+/// ```json
+/// {"resolved": N, "unresolved": N, "already_valid": N, "external": N}
+/// ```
+#[pyfunction]
+fn resolve_refs(db_path: &str, project_root: &str) -> PyResult<String> {
+    let db = open_db(db_path)?;
+    let root = Path::new(project_root);
+    let stats = resolver::resolve(&db, root)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{:#}", e)))?;
+    Ok(serde_json::json!({
+        "resolved": stats.resolved,
+        "unresolved": stats.unresolved,
+        "already_valid": stats.already_valid,
+        "external": stats.external,
+    })
+    .to_string())
+}
+
+// ============================================================================
 // Export operations
 // ============================================================================
 
@@ -1505,6 +1535,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(impact, m)?)?;
     m.add_function(wrap_pyfunction!(trace, m)?)?;
     m.add_function(wrap_pyfunction!(unresolved, m)?)?;
+
+    // Resolution
+    m.add_function(wrap_pyfunction!(resolve_refs, m)?)?;
 
     // Export
     m.add_function(wrap_pyfunction!(export_dot, m)?)?;
