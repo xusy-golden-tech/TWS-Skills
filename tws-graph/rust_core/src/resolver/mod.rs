@@ -636,17 +636,81 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_unsupported_language_graceful() {
-        let (db, path) = setup_db("resolve_unsupported_lang");
+    fn test_resolve_typescript_unresolvable_edge() {
+        let (db, path) = setup_db("resolve_ts_unresolved");
 
-        // Insert a typescript node (no resolver yet)
+        // Insert a typescript node (now supported with resolver)
         let src_id = insert_node(&db, "App", "src.components::App", "src/components/App.tsx", "typescript", "class");
         let fake_target = hash_id("unknown.ts", "unknown::Header");
         insert_edge(&db, &src_id, &fake_target, "Header", "IMPORTS");
 
         let stats = resolve(&db, Path::new(".")).unwrap();
-        // No resolver for typescript → should go to unresolved
+        // TypeScript resolver exists now, but "Header" without module qualifier
+        // cannot be resolved to a specific file → should go to unresolved
         assert_eq!(stats.unresolved, 1);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_resolve_unsupported_language_graceful() {
+        let (db, path) = setup_db("resolve_unsupported_lang");
+
+        // Insert a Java node (no resolver)
+        let src_id = insert_node(&db, "Main", "com.example::Main", "src/com/example/Main.java", "java", "class");
+        let fake_target = hash_id("unknown.java", "unknown::Helper");
+        insert_edge(&db, &src_id, &fake_target, "Helper", "CALLS");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // No resolver for Java → should go to unresolved
+        assert_eq!(stats.unresolved, 1);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_resolve_typescript_relative_import() {
+        let (db, path) = setup_db("resolve_ts_rel");
+
+        // Source: src/components/App.tsx
+        let src_id = insert_node(&db, "App", "src.components::App", "src/components/App.tsx", "typescript", "class");
+        // Target: src/components/Button.tsx  (same directory, relative import)
+        let tgt_id = insert_node(&db, "Button", "src.components::Button", "src/components/Button.tsx", "typescript", "class");
+
+        let fake_target = hash_id("nonexistent.ts", "nonexistent::Button");
+        // Use the expected format: module_path.symbol → "src/components/Button.Button"
+        insert_edge(&db, &src_id, &fake_target, "src/components/Button.Button", "REFERENCES");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        assert_eq!(stats.resolved, 1);
+        assert_eq!(stats.unresolved, 0);
+
+        // Verify edge target was updated
+        let conn = db.connection();
+        let updated: String = conn
+            .query_row(
+                "SELECT target FROM edges WHERE source = ?1",
+                [&src_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(updated, tgt_id);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_resolve_typescript_external_react() {
+        let (db, path) = setup_db("resolve_ts_react");
+
+        let src_id = insert_node(&db, "App", "src.components::App", "src/components/App.tsx", "typescript", "class");
+        let fake_target = hash_id("nonexistent.ts", "nonexistent::react_useState");
+        insert_edge(&db, &src_id, &fake_target, "react.useState", "REFERENCES");
+
+        let stats = resolve(&db, Path::new(".")).unwrap();
+        // react is external → should be classified as external
+        assert_eq!(stats.external, 1);
+        assert_eq!(stats.resolved, 0);
 
         cleanup(&path);
     }

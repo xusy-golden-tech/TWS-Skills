@@ -98,6 +98,7 @@ impl ModuleIndex {
 pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
     match language {
         "python" => infer_python_module(file_path),
+        "typescript" | "javascript" | "tsx" | "jsx" => infer_typescript_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -137,6 +138,53 @@ fn infer_python_module(file_path: &str) -> Option<String> {
     }
 
     // Regular .py file: replace / with .
+    let module = without_ext.replace('/', ".");
+    Some(strip_src_prefix(&module))
+}
+
+/// TypeScript/JavaScript module name inference.
+///
+/// Rules:
+/// 1. Strip known extensions (`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`).
+/// 2. If the filename is `index`, use the parent directory as the module.
+/// 3. Replace path separators with dots.
+/// 4. Strip common source root prefixes (`src/`, `lib/`).
+fn infer_typescript_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    let ts_extensions = &[".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs"];
+    let mut without_ext = path;
+
+    // Find the matching extension (longest first since .tsx > .ts)
+    let mut found_ext = false;
+    for ext in ts_extensions {
+        if path.ends_with(ext) {
+            without_ext = &path[..path.len() - ext.len()];
+            found_ext = true;
+            break;
+        }
+    }
+
+    if !found_ext {
+        return None;
+    }
+
+    // Handle index files: `src/components/index.ts` → module = "components"
+    if without_ext.ends_with("/index") {
+        let dir_part = &without_ext[..without_ext.len() - 6]; // strip "/index"
+        if dir_part.is_empty() {
+            return Some(String::new()); // root-level index.ts
+        }
+        let module = dir_part.replace('/', ".");
+        return Some(strip_src_prefix(&module));
+    }
+
+    // Handle bare "index" at root: "index.ts" → root module
+    if without_ext == "index" {
+        return Some(String::new());
+    }
+
+    // Regular file: replace / with .
     let module = without_ext.replace('/', ".");
     Some(strip_src_prefix(&module))
 }
@@ -240,7 +288,69 @@ mod tests {
 
     #[test]
     fn test_infer_module_unknown_lang_graceful() {
-        assert_eq!(infer_module_name("src/foo/bar.ts", "typescript"), None);
+        assert_eq!(infer_module_name("src/foo/bar.java", "java"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // TypeScript module name inference
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_typescript_module_regular() {
+        assert_eq!(
+            infer_module_name("src/components/Button.ts", "typescript"),
+            Some("components.Button".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_typescript_module_index() {
+        assert_eq!(
+            infer_module_name("src/components/index.ts", "typescript"),
+            Some("components".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_typescript_module_tsx() {
+        assert_eq!(
+            infer_module_name("src/pages/Home.tsx", "typescript"),
+            Some("pages.Home".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_typescript_module_js() {
+        assert_eq!(
+            infer_module_name("src/utils/helpers.js", "javascript"),
+            Some("utils.helpers".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_typescript_module_non_ts() {
+        assert_eq!(infer_module_name("src/foo.py", "typescript"), None);
+    }
+
+    #[test]
+    fn test_infer_typescript_module_root_index() {
+        assert_eq!(
+            infer_module_name("index.ts", "typescript"),
+            Some("".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_module_from_javascript_variants() {
+        // JavaScript uses the same resolver as TypeScript
+        assert_eq!(
+            infer_module_name("lib/core.jsx", "javascript"),
+            Some("core".to_string())
+        );
+        assert_eq!(
+            infer_module_name("lib/core.mjs", "javascript"),
+            Some("core".to_string())
+        );
     }
 
     // ------------------------------------------------------------------
@@ -255,16 +365,17 @@ mod tests {
         insert_node(&db, "baz", "src/pkg/module_b.py", "python");
         insert_node(&db, "qux", "src/utils/helpers.py", "python");
 
-        // Also insert a non-python file (should be ignored)
+        // Also insert a TypeScript file (now supported)
         insert_node(&db, "comp", "src/components/App.tsx", "typescript");
 
         let idx = ModuleIndex::build(&db).unwrap();
-        // We should have 3 Python modules (pkg.module_a, pkg.module_b, utils.helpers)
-        // TypeScript is currently not inferred
-        assert_eq!(idx.len(), 3);
+        // We should have 4 modules (3 Python + 1 TypeScript)
+        assert_eq!(idx.len(), 4);
         assert!(idx.lookup("pkg.module_a").is_some());
         assert!(idx.lookup("pkg.module_b").is_some());
         assert!(idx.lookup("utils.helpers").is_some());
+        // TypeScript module should now be inferred
+        assert!(idx.lookup("components.App").is_some());
 
         cleanup(&path);
     }

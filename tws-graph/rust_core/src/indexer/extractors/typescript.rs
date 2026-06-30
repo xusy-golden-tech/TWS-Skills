@@ -28,6 +28,7 @@ use crate::db::hash_id;
 use crate::indexer::context::ExtractionContext;
 use crate::traits::{EdgeKind, Extractor, NodeKind};
 use std::collections::HashMap;
+use std::path::Path;
 use tree_sitter::Node;
 use tree_sitter::Tree;
 
@@ -107,12 +108,17 @@ impl Extractor for TypeScriptExtractor {
 
 struct TsWalker {
     class_stack: Vec<String>,
+    /// Map from imported name (including aliases) to qualified module.symbol name.
+    /// E.g. `import { join } from './path'` populates `"join" → "./path.join"`.
+    /// `import { join as jn } from './path'` populates `"jn" → "./path.join"`.
+    imported_names: HashMap<String, String>,
 }
 
 impl TsWalker {
     fn new() -> Self {
         Self {
             class_stack: Vec::new(),
+            imported_names: HashMap::new(),
         }
     }
 
@@ -580,7 +586,7 @@ impl TsWalker {
     // ------------------------------------------------------------------
 
     fn extract_import(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -588,16 +594,149 @@ impl TsWalker {
     ) -> anyhow::Result<()> {
         let line = node.start_position().row as u32 + 1;
 
-        if let Some(source_node) = node.child_by_field_name("source") {
-            let module_name = get_text(source, Some(source_node));
-            let clean = module_name.trim_matches(|c| c == '\'' || c == '"' || c == '`');
-            if !clean.is_empty() {
-                let target_qn = format!("{}::{}", ctx.file_path, clean);
-                let target = hash_id(&ctx.file_path, &target_qn);
-                ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(clean));
+        // Get the module path from the source field
+        let module_name = if let Some(source_node) = node.child_by_field_name("source") {
+            let raw = get_text(source, Some(source_node));
+            let clean = raw.trim_matches(|c| c == '\'' || c == '"' || c == '`');
+            if clean.is_empty() {
+                return Ok(());
+            }
+            clean.to_string()
+        } else {
+            return Ok(());
+        };
+
+        // Normalize relative paths (e.g. "./foo" stays as-is for TS)
+        let module_path = normalize_ts_module_path(&module_name, &ctx.file_path);
+
+        // Always create a module-level IMPORTS edge
+        let target_qn = format!("{}::{}", ctx.file_path, module_path);
+        let target = hash_id(&ctx.file_path, &target_qn);
+        ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&module_path));
+
+        // Look for import_clause to extract per-symbol REFERENCES edges
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                if child.kind() == "import_clause" {
+                    self.extract_import_clause(
+                        source,
+                        child,
+                        ctx,
+                        parent_id,
+                        &module_path,
+                        line,
+                    )?;
+                }
             }
         }
 
+        Ok(())
+    }
+
+    /// Extract per-symbol REFERENCES edges from an `import_clause` node.
+    ///
+    /// Handles:
+    /// - Default import: `import Foo from './mod'`
+    /// - Named imports: `import { X, Y } from './mod'`
+    /// - Aliased imports: `import { X as Z } from './mod'`
+    /// - Namespace import: `import * as NS from './mod'`
+    /// - Mixed: `import Foo, { X, Y } from './mod'`
+    fn extract_import_clause(
+        &mut self,
+        source: &[u8],
+        clause: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+        module_path: &str,
+        line: u32,
+    ) -> anyhow::Result<()> {
+        for i in 0..clause.named_child_count() {
+            if let Some(child) = clause.named_child(i) {
+                match child.kind() {
+                    "identifier" => {
+                        // Default import: `import Foo from './mod'`
+                        // or part of `import Foo, { X } from './mod'`
+                        let name = get_text(source, Some(child));
+                        if !name.is_empty() && !is_js_builtin(&name) {
+                            let ref_target = format!("{}.{}", module_path, name);
+                            let ref_target_qn = format!("{}::{}", ctx.file_path, ref_target);
+                            let ref_id = hash_id(&ctx.file_path, &ref_target_qn);
+                            ctx.add_edge(
+                                parent_id,
+                                &ref_id,
+                                EdgeKind::References,
+                                line,
+                                Some(&ref_target),
+                            );
+                            self.imported_names.insert(name.to_string(), ref_target);
+                        }
+                    }
+                    "named_imports" => {
+                        // Named imports: `import { X, Y as Z } from './mod'`
+                        for j in 0..child.named_child_count() {
+                            if let Some(spec) = child.named_child(j) {
+                                if spec.kind() == "import_specifier" {
+                                    let original_name =
+                                        get_text(source, spec.child_by_field_name("name"));
+                                    if !original_name.is_empty() {
+                                        let ref_target =
+                                            format!("{}.{}", module_path, original_name);
+                                        let ref_target_qn =
+                                            format!("{}::{}", ctx.file_path, ref_target);
+                                        let ref_id = hash_id(&ctx.file_path, &ref_target_qn);
+                                        ctx.add_edge(
+                                            parent_id,
+                                            &ref_id,
+                                            EdgeKind::References,
+                                            line,
+                                            Some(&ref_target),
+                                        );
+
+                                        // Map alias → qualified name, or original name if no alias
+                                        if let Some(alias_node) =
+                                            spec.child_by_field_name("alias")
+                                        {
+                                            let alias = get_text(source, Some(alias_node));
+                                            if !alias.is_empty() {
+                                                self.imported_names
+                                                    .insert(alias.to_string(), ref_target);
+                                            }
+                                        } else {
+                                            self.imported_names
+                                                .insert(original_name.to_string(), ref_target);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "namespace_import" => {
+                        // Namespace import: `import * as NS from './mod'`
+                        // AST: (namespace_import (identifier)) — no field name
+                        let ns_name = if let Some(identifier) = child.named_child(0) {
+                            get_text(source, Some(identifier))
+                        } else {
+                            String::new()
+                        };
+                        if !ns_name.is_empty() {
+                            let ref_target_qn =
+                                format!("{}::{}", ctx.file_path, module_path);
+                            let ref_id = hash_id(&ctx.file_path, &ref_target_qn);
+                            ctx.add_edge(
+                                parent_id,
+                                &ref_id,
+                                EdgeKind::References,
+                                line,
+                                Some(module_path),
+                            );
+                            self.imported_names
+                                .insert(ns_name.to_string(), module_path.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1016,6 +1155,59 @@ fn is_all_caps_or_const(name: &str) -> bool {
         && name.chars().any(|c| c.is_alphabetic())
 }
 
+/// Normalize a TypeScript/JavaScript module path to an absolute-style path
+/// based on the source file's location.
+///
+/// Relative imports (`./foo`, `../bar`) are resolved relative to the
+/// source file's directory.  Bare specifiers (`react`, `lodash`) are
+/// returned as-is (they are resolved externally or by the resolver).
+fn normalize_ts_module_path(module_path: &str, source_file: &str) -> String {
+    // Bare specifier (npm package or absolute path alias) — return as-is
+    if !module_path.starts_with('.') {
+        return module_path.to_string();
+    }
+
+    // Relative import — resolve against source file directory
+    let source_dir = Path::new(source_file)
+        .parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or("");
+
+    // Normalize: join source_dir + module_path, then normalize
+    let joined = if source_dir.is_empty() {
+        module_path.to_string()
+    } else {
+        let path = Path::new(source_dir).join(module_path);
+        path.to_string_lossy().replace('\\', "/")
+    };
+
+    // Simplify ../ and ./ sequences
+    simplify_path(&joined)
+}
+
+/// Simplify a path by resolving `.` and `..` segments without using the
+/// filesystem.  Returns a forward-slash normalized path.
+fn simplify_path(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let mut result: Vec<&str> = Vec::new();
+
+    for part in parts {
+        match part {
+            "." => {}
+            ".." => {
+                // Pop the last segment if it's not empty and not ".."
+                if !result.is_empty() && result.last() != Some(&"..") {
+                    result.pop();
+                } else {
+                    result.push(part);
+                }
+            }
+            _ => result.push(part),
+        }
+    }
+    result.join("/")
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1235,19 +1427,109 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_extract_import() {
-        let ctx = extract("import { foo } from './module';\n", "src/test.ts");
+    fn test_extract_named_import_creates_references() {
+        let ctx = extract("import { foo, bar } from './module';\n", "src/test.ts");
         let imports = find_edges(&ctx, EdgeKind::Imports);
-        assert_eq!(imports.len(), 1);
-        assert_eq!(imports[0].target_text.as_deref().unwrap_or(""), "./module");
+        assert_eq!(imports.len(), 1, "Expected 1 IMPORTS edge");
+        assert_eq!(imports[0].target_text.as_deref().unwrap_or(""), "src/module");
+
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 2, "Expected 2 REFERENCES edges for foo and bar");
+
+        let ref_targets: Vec<&str> =
+            refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(ref_targets.contains(&"src/module.foo"), "Expected 'src/module.foo' in {:?}", ref_targets);
+        assert!(ref_targets.contains(&"src/module.bar"), "Expected 'src/module.bar' in {:?}", ref_targets);
     }
 
     #[test]
-    fn test_extract_default_import() {
-        let ctx = extract("import foo from 'bar';\n", "src/test.ts");
+    fn test_extract_default_import_creates_references() {
+        let ctx = extract("import MyDefault from './module';\n", "src/test.ts");
         let imports = find_edges(&ctx, EdgeKind::Imports);
         assert_eq!(imports.len(), 1);
-        assert_eq!(imports[0].target_text.as_deref().unwrap_or(""), "bar");
+        assert_eq!(imports[0].target_text.as_deref().unwrap_or(""), "src/module");
+
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 1, "Expected 1 REFERENCES edge for default import");
+        assert_eq!(refs[0].target_text.as_deref().unwrap_or(""), "src/module.MyDefault");
+    }
+
+    #[test]
+    fn test_extract_aliased_import_creates_references() {
+        let ctx = extract("import { foo as bar } from './module';\n", "src/test.ts");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 1, "Expected 1 REFERENCES edge");
+        // target_text uses original name, not alias
+        assert_eq!(refs[0].target_text.as_deref().unwrap_or(""), "src/module.foo");
+    }
+
+    #[test]
+    fn test_extract_namespace_import_creates_references() {
+        let ctx = extract("import * as Utils from './module';\n", "src/test.ts");
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].target_text.as_deref().unwrap_or(""), "src/module");
+
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 1, "Expected 1 REFERENCES edge for namespace import");
+        assert_eq!(refs[0].target_text.as_deref().unwrap_or(""), "src/module");
+    }
+
+    #[test]
+    fn test_extract_side_effect_import_only_imports_edge() {
+        let ctx = extract("import './side-effects';\n", "src/test.ts");
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        assert_eq!(imports.len(), 1, "Expected IMPORTS edge for side-effect import");
+        assert_eq!(imports[0].target_text.as_deref().unwrap_or(""), "src/side-effects");
+
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 0, "No REFERENCES edges for side-effect import");
+    }
+
+    #[test]
+    fn test_extract_mixed_default_and_named_import() {
+        let ctx = extract(
+            "import DefaultExport, { named1, named2 } from './module';\n",
+            "src/test.ts",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 3, "Expected 3 REFERENCES edges (1 default + 2 named)");
+
+        let ref_targets: Vec<&str> =
+            refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(ref_targets.contains(&"src/module.DefaultExport"));
+        assert!(ref_targets.contains(&"src/module.named1"));
+        assert!(ref_targets.contains(&"src/module.named2"));
+    }
+
+    #[test]
+    fn test_extract_bare_specifier_import() {
+        let ctx = extract("import React from 'react';\n", "src/test.ts");
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].target_text.as_deref().unwrap_or(""), "react");
+
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].target_text.as_deref().unwrap_or(""), "react.React");
+    }
+
+    #[test]
+    fn test_extract_relative_parent_import() {
+        let ctx = extract("import { Baz } from '../sibling/module';\n", "src/pkg/test.ts");
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        assert_eq!(imports.len(), 1);
+        // ../sibling/module relative to src/pkg/ → src/sibling/module
+        assert_eq!(imports[0].target_text.as_deref().unwrap_or(""), "src/sibling/module");
+    }
+
+    #[test]
+    fn test_simplify_path_basic() {
+        assert_eq!(simplify_path("a/b/c"), "a/b/c");
+        assert_eq!(simplify_path("a/./b"), "a/b");
+        assert_eq!(simplify_path("a/b/../c"), "a/c");
+        assert_eq!(simplify_path("a/../b/../c"), "c");
+        assert_eq!(simplify_path("./a"), "a");
     }
 
     // ------------------------------------------------------------------

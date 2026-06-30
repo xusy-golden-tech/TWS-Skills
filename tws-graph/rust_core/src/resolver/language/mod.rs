@@ -1,7 +1,7 @@
 //! Language registry — maps language identifiers to their ModuleResolvers.
 //!
-//! Phase 0 provides a skeleton Python resolver. Future phases will add
-//! TypeScript, Java, Go, Rust, and other language-specific resolvers.
+//! Phase 0 provides a skeleton Python resolver.  Phase 2 adds TypeScript and
+//! JavaScript resolvers.
 
 use crate::resolver::ModuleResolver;
 use crate::resolver::module_index::ModuleIndex;
@@ -17,13 +17,14 @@ impl LanguageRegistry {
     pub fn get(language: &str) -> Option<Box<dyn ModuleResolver>> {
         match language {
             "python" => Some(Box::new(PythonResolver)),
+            "typescript" | "javascript" | "tsx" | "jsx" => Some(Box::new(TypeScriptResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python"]
+        vec!["python", "typescript", "javascript"]
     }
 }
 
@@ -116,6 +117,238 @@ pub fn is_python_external(module_name: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// TypeScript / JavaScript module resolver
+// ---------------------------------------------------------------------------
+
+/// TypeScript (and JavaScript) module resolver.
+///
+/// Handles the ES module system and CommonJS `require()`:
+/// - Relative imports: `./foo`, `../bar` → resolved against source file
+/// - Bare specifiers: `react`, `lodash` → looked up in ModuleIndex or marked external
+/// - Extension resolution: tries `.ts`, `.tsx`, `.js`, `.jsx`, `/index.ts`, etc.
+pub struct TypeScriptResolver;
+
+impl ModuleResolver for TypeScriptResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        // 1. Try ModuleIndex lookup first (direct match)
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Relative path resolution
+        if module_name.starts_with('.') {
+            let source_dir = Path::new(source_file)
+                .parent()
+                .and_then(|p| p.to_str())
+                .unwrap_or(".");
+
+            let resolved = if source_dir.is_empty() || source_dir == "." {
+                module_name.to_string()
+            } else {
+                Path::new(source_dir)
+                    .join(module_name)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            };
+
+            let normalized = simplify_ts_path(&resolved);
+
+            // Try common extensions
+            return find_ts_module_files(&normalized);
+        }
+
+        // 3. Try ModuleIndex with path-to-dotted variants
+        // e.g. "src/components/Button" → "src.components.Button" or "components.Button"
+        let dotted = module_name.replace('/', ".");
+        if let Some(files) = module_index.lookup(&dotted) {
+            return files.clone();
+        }
+
+        // 4. Try stripping common source root prefixes
+        for prefix in &["src.", "lib.", "test.", "tests."] {
+            if let Some(stripped) = dotted.strip_prefix(prefix) {
+                if let Some(files) = module_index.lookup(stripped) {
+                    return files.clone();
+                }
+            }
+        }
+
+        // 5. Also try adding common source prefixes (e.g. bare "components.Button" → "src.components.Button")
+        for prefix in &["src.", "lib."] {
+            let candidate = format!("{}{}", prefix, dotted);
+            if let Some(files) = module_index.lookup(&candidate) {
+                return files.clone();
+            }
+        }
+
+        Vec::new()
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "typescript")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_ts_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "typescript"
+    }
+}
+
+/// Check if a module name is a known npm package or external dependency.
+///
+/// A module is considered external if it is a bare specifier (not starting
+/// with `.` or `/`) that matches a well-known npm package or does not look
+/// like a project-local path.
+pub fn is_ts_external(module_name: &str) -> bool {
+    // Empty module names can't be external
+    if module_name.is_empty() {
+        return false;
+    }
+    // Relative paths are always local
+    if module_name.starts_with('.') {
+        return false;
+    }
+    // Absolute paths are local
+    if module_name.starts_with('/') {
+        return false;
+    }
+    // Path aliases (e.g. @/components) are local
+    if module_name.starts_with('@') && module_name.contains('/') {
+        // Could be an npm org package (@scope/name) or a path alias
+        // For now, if it looks like a path alias (short, no @ in middle), treat as local
+        let parts: Vec<&str> = module_name.split('/').collect();
+        if parts.len() == 2 && !parts[1].is_empty() {
+            // Check common npm org packages
+            let org = parts[0];
+            if is_known_npm_org(org) {
+                return true;
+            }
+            // Otherwise, could be path alias — check if it looks local
+            // If the second part looks like a project path, it might be local
+            return false;
+        }
+    }
+
+    let root = module_name.split('/').next().unwrap_or(module_name);
+
+    let common_npm_packages: &[&str] = &[
+        "react", "react-dom", "react-native", "vue", "vue-router", "vuex",
+        "angular", "@angular",
+        "lodash", "underscore", "ramda",
+        "express", "koa", "fastify", "hapi",
+        "axios", "node-fetch", "got", "superagent",
+        "moment", "dayjs", "luxon", "date-fns",
+        "redux", "mobx", "zustand", "recoil", "jotai",
+        "next", "nuxt", "gatsby", "svelte", "sveltekit",
+        "typescript", "tslib",
+        "jest", "mocha", "chai", "sinon", "vitest",
+        "webpack", "rollup", "vite", "esbuild", "parcel", "babel",
+        "eslint", "prettier", "stylelint",
+        "tailwindcss", "bootstrap", "sass", "less",
+        "graphql", "apollo", "urql",
+        "prisma", "typeorm", "sequelize", "knex", "mongoose",
+        "rxjs", "immutable", "immer",
+        "d3", "three", "pixi", "phaser",
+        "socket.io", "ws",
+        "commander", "yargs", "inquirer", "chalk", "ora",
+        "uuid", "nanoid", "classnames",
+        "zod", "yup", "joi",
+        "ioredis", "redis", "mysql", "mysql2", "pg", "sqlite3",
+        "aws-sdk", "@aws-sdk",
+        "firebase", "@firebase",
+        "dotenv", "cross-env",
+    ];
+
+    if common_npm_packages.contains(&root) || common_npm_packages.contains(&module_name) {
+        return true;
+    }
+
+    // Check for node built-in modules
+    let node_builtins: &[&str] = &[
+        "fs", "path", "os", "http", "https", "http2", "net", "tls", "dns",
+        "stream", "buffer", "crypto", "events", "url", "querystring", "util",
+        "child_process", "cluster", "readline", "repl", "vm", "worker_threads",
+        "assert", "async_hooks", "console", "module", "process", "timers",
+        "tty", "v8", "zlib", "string_decoder", "perf_hooks",
+    ];
+    if node_builtins.contains(&root) {
+        return true;
+    }
+
+    // For other bare specifiers: if we can't resolve them locally,
+    // they're likely external npm packages
+    // But this is only called after resolve_module returns empty,
+    // so at this point it's truly unknown
+    true
+}
+
+/// Known npm organization scopes that indicate external packages.
+fn is_known_npm_org(scope: &str) -> bool {
+    let known_scopes: &[&str] = &[
+        "@angular", "@babel", "@types", "@aws-sdk", "@firebase", "@google-cloud",
+        "@mui", "@emotion", "@radix-ui", "@tanstack", "@headlessui",
+        "@heroicons", "@next", "@vitejs", "@playwright", "@testing-library",
+        "@storybook", "@reduxjs", "@apollo", "@graphql-codegen",
+        "@anthropic-ai", "@openai", "@langchain",
+        "@nestjs", "@prisma", "@pmmmwh", "@swc", "@jest",
+    ];
+    known_scopes.contains(&scope)
+}
+
+/// Given a normalized path (without extension), find matching files by
+/// trying known TypeScript/JavaScript extensions and index files.
+fn find_ts_module_files(normalized_path: &str) -> Vec<String> {
+    let extensions = &["ts", "tsx", "js", "jsx", "mjs", "cjs"];
+    let mut candidates = Vec::new();
+
+    // Try direct file matches
+    for ext in extensions {
+        candidates.push(format!("{}.{}", normalized_path, ext));
+    }
+
+    // Try index files in directory
+    for ext in &["ts", "tsx", "js", "jsx"] {
+        candidates.push(format!("{}/index.{}", normalized_path, ext));
+    }
+
+    candidates
+}
+
+/// Simplify a TypeScript-style path by resolving `.` and `..` segments.
+fn simplify_ts_path(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let mut result: Vec<&str> = Vec::new();
+
+    for part in parts {
+        match part {
+            "." => {}
+            ".." => {
+                if !result.is_empty() && result.last() != Some(&"..") {
+                    result.pop();
+                } else {
+                    result.push(part);
+                }
+            }
+            _ => result.push(part),
+        }
+    }
+    result.join("/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,8 +402,22 @@ mod tests {
     }
 
     #[test]
-    fn test_language_registry_get_unsupported() {
+    fn test_language_registry_get_typescript() {
         let r = LanguageRegistry::get("typescript");
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().language(), "typescript");
+    }
+
+    #[test]
+    fn test_language_registry_get_javascript() {
+        let r = LanguageRegistry::get("javascript");
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().language(), "typescript");
+    }
+
+    #[test]
+    fn test_language_registry_get_unsupported() {
+        let r = LanguageRegistry::get("rust");
         assert!(r.is_none());
     }
 
@@ -178,5 +425,109 @@ mod tests {
     fn test_supported_languages() {
         let langs = LanguageRegistry::supported_languages();
         assert!(langs.contains(&"python"));
+        assert!(langs.contains(&"typescript"));
+        assert!(langs.contains(&"javascript"));
+    }
+
+    // ------------------------------------------------------------------
+    // TypeScript resolver tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_ts_resolver_is_external_relative() {
+        let resolver = TypeScriptResolver;
+        assert!(!resolver.is_external("./utils"));
+        assert!(!resolver.is_external("../sibling"));
+    }
+
+    #[test]
+    fn test_ts_resolver_is_external_npm_packages() {
+        let resolver = TypeScriptResolver;
+        assert!(resolver.is_external("react"));
+        assert!(resolver.is_external("lodash"));
+        assert!(resolver.is_external("express"));
+        assert!(resolver.is_external("axios"));
+    }
+
+    #[test]
+    fn test_ts_resolver_is_external_node_builtins() {
+        let resolver = TypeScriptResolver;
+        assert!(resolver.is_external("fs"));
+        assert!(resolver.is_external("path"));
+        assert!(resolver.is_external("crypto"));
+    }
+
+    #[test]
+    fn test_ts_resolver_is_external_unknown_bare_specifier() {
+        let resolver = TypeScriptResolver;
+        // Unknown bare specifiers are treated as external (npm packages)
+        assert!(resolver.is_external("some-random-npm-pkg"));
+    }
+
+    #[test]
+    fn test_ts_resolver_language() {
+        let resolver = TypeScriptResolver;
+        assert_eq!(resolver.language(), "typescript");
+    }
+
+    #[test]
+    fn test_ts_resolver_resolve_relative_module() {
+        let resolver = TypeScriptResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "./utils",
+            "src/components/Button.tsx",
+            Path::new("."),
+            &index,
+        );
+        assert!(!candidates.is_empty());
+        // Should include: src/components/utils.ts, .tsx, .js, .jsx, /index.ts, etc.
+        assert!(candidates.iter().any(|c| c == "src/components/utils.ts"));
+        assert!(candidates.iter().any(|c| c == "src/components/utils/index.ts"));
+    }
+
+    #[test]
+    fn test_ts_resolver_resolve_parent_import() {
+        let resolver = TypeScriptResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "../shared/helpers",
+            "src/components/Button.tsx",
+            Path::new("."),
+            &index,
+        );
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().any(|c| c == "src/shared/helpers.ts"));
+    }
+
+    #[test]
+    fn test_ts_resolver_resolve_bare_specifier_empty_no_index() {
+        let resolver = TypeScriptResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "myproject",
+            "src/index.ts",
+            Path::new("."),
+            &index,
+        );
+        // No ModuleIndex entry and bare specifier → returns empty
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_simplify_ts_path() {
+        assert_eq!(simplify_ts_path("a/b/c"), "a/b/c");
+        assert_eq!(simplify_ts_path("a/./b"), "a/b");
+        assert_eq!(simplify_ts_path("a/b/../c"), "a/c");
+        assert_eq!(simplify_ts_path("./a"), "a");
+    }
+
+    #[test]
+    fn test_find_ts_module_files() {
+        let files = find_ts_module_files("src/utils");
+        assert!(files.contains(&"src/utils.ts".to_string()));
+        assert!(files.contains(&"src/utils/index.ts".to_string()));
+        // Should be ordered with direct files first, then index files
+        assert_eq!(files[0], "src/utils.ts");
     }
 }
