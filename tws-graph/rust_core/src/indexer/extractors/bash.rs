@@ -11,6 +11,7 @@
 //! - `calls`: command invocations (function calls / external commands)
 //! - `contains`: containment (file -> function)
 //! - `imports`: `source` / `.` script imports
+//! - `references`: cross-file references from `source` / `.` imports
 //! - `env_accesses`: `$VAR` / `${VAR}` references
 
 use crate::db::hash_id;
@@ -18,6 +19,7 @@ use crate::indexer::context::ExtractionContext;
 use crate::traits::{EdgeKind, Extractor, NodeKind};
 use regex::Regex;
 use std::collections::HashMap;
+use std::path::Path;
 use tree_sitter::Node;
 use tree_sitter::Tree;
 
@@ -72,7 +74,10 @@ impl Extractor for BashExtractor {
         };
         let file_id = ctx.add_node(NodeKind::File, &file_name, &root, HashMap::new());
 
-        walk_node(source, root, ctx, &file_id);
+        let mut walker = Walker {
+            imported_names: HashMap::new(),
+        };
+        walker.walk_node(source, root, ctx, &file_id);
 
         // Scan source for environment variable references ($VAR or ${VAR})
         extract_env_vars_regex(source, ctx, &file_id);
@@ -81,36 +86,45 @@ impl Extractor for BashExtractor {
     }
 }
 
+/// Walker state for Bash extraction.
+struct Walker {
+    /// Maps imported short names to qualified paths.
+    /// e.g. `source lib/utils.sh` → ("utils" → "lib/utils.sh")
+    imported_names: HashMap<String, String>,
+}
+
 // ---------------------------------------------------------------------------
 // Tree walker
 // ---------------------------------------------------------------------------
 
-fn walk_node(source: &[u8], node: Node, ctx: &mut ExtractionContext, parent_id: &str) {
-    for i in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(i) {
-            match child.kind() {
-                "function_definition" => {
-                    extract_function(source, child, ctx, parent_id);
-                }
-                "variable_assignment" => {
-                    extract_variable(source, child, ctx, parent_id);
-                }
-                "command" => {
-                    extract_command(source, child, ctx, parent_id);
-                }
-                // Recurse into control flow structures
-                "if_statement" | "elif_clause" | "else_clause"
-                | "for_statement" | "while_statement" | "until_statement"
-                | "case_statement" | "case_item" | "do_group"
-                | "compound_statement" | "subshell" | "c_style_for_statement"
-                | "pipeline" | "list" | "negated_command" | "test_command"
-                | "declaration_command" | "unset_command" | "redirected_statement"
-                | "block" | "brace_group" => {
-                    walk_node(source, child, ctx, parent_id);
-                }
-                _ => {
-                    // Default recursion for any other node
-                    walk_node(source, child, ctx, parent_id);
+impl Walker {
+    fn walk_node(&mut self, source: &[u8], node: Node, ctx: &mut ExtractionContext, parent_id: &str) {
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                match child.kind() {
+                    "function_definition" => {
+                        self.extract_function(source, child, ctx, parent_id);
+                    }
+                    "variable_assignment" => {
+                        extract_variable(source, child, ctx, parent_id);
+                    }
+                    "command" => {
+                        self.extract_command(source, child, ctx, parent_id);
+                    }
+                    // Recurse into control flow structures
+                    "if_statement" | "elif_clause" | "else_clause"
+                    | "for_statement" | "while_statement" | "until_statement"
+                    | "case_statement" | "case_item" | "do_group"
+                    | "compound_statement" | "subshell" | "c_style_for_statement"
+                    | "pipeline" | "list" | "negated_command" | "test_command"
+                    | "declaration_command" | "unset_command" | "redirected_statement"
+                    | "block" | "brace_group" => {
+                        self.walk_node(source, child, ctx, parent_id);
+                    }
+                    _ => {
+                        // Default recursion for any other node
+                        self.walk_node(source, child, ctx, parent_id);
+                    }
                 }
             }
         }
@@ -121,23 +135,25 @@ fn walk_node(source: &[u8], node: Node, ctx: &mut ExtractionContext, parent_id: 
 // Function extraction
 // ---------------------------------------------------------------------------
 
-fn extract_function(source: &[u8], node: Node, ctx: &mut ExtractionContext, parent_id: &str) {
-    let name = get_function_name(source, node);
-    if name.is_empty() {
-        return;
-    }
+impl Walker {
+    fn extract_function(&mut self, source: &[u8], node: Node, ctx: &mut ExtractionContext, parent_id: &str) {
+        let name = get_function_name(source, node);
+        if name.is_empty() {
+            return;
+        }
 
-    let func_id = ctx.add_node(NodeKind::BashFunction, &name, &node, HashMap::new());
-    ctx.add_edge(parent_id, &func_id, EdgeKind::Contains,
-        (node.start_position().row + 1) as u32, Some(&name));
+        let func_id = ctx.add_node(NodeKind::BashFunction, &name, &node, HashMap::new());
+        ctx.add_edge(parent_id, &func_id, EdgeKind::Contains,
+            (node.start_position().row + 1) as u32, Some(&name));
 
-    // Recurse into function body for calls, variables, env accesses
-    let body = node.child_by_field_name("body");
-    if let Some(body_node) = body {
-        walk_node(source, body_node, ctx, &func_id);
-    } else {
-        // Fallback: walk all children
-        walk_node(source, node, ctx, &func_id);
+        // Recurse into function body for calls, variables, env accesses
+        let body = node.child_by_field_name("body");
+        if let Some(body_node) = body {
+            self.walk_node(source, body_node, ctx, &func_id);
+        } else {
+            // Fallback: walk all children
+            self.walk_node(source, node, ctx, &func_id);
+        }
     }
 }
 
@@ -191,31 +207,37 @@ fn extract_variable(source: &[u8], node: Node, ctx: &mut ExtractionContext, pare
 // Command / call extraction
 // ---------------------------------------------------------------------------
 
-fn extract_command(source: &[u8], node: Node, ctx: &mut ExtractionContext, parent_id: &str) {
-    // Get the command name
-    let cmd_name = get_command_name(source, node);
-    if cmd_name.is_empty() {
-        // Recurse into children anyway
-        walk_node(source, node, ctx, parent_id);
-        return;
-    }
+impl Walker {
+    fn extract_command(&mut self, source: &[u8], node: Node, ctx: &mut ExtractionContext, parent_id: &str) {
+        // Get the command name
+        let cmd_name = get_command_name(source, node);
+        if cmd_name.is_empty() {
+            // Recurse into children anyway
+            self.walk_node(source, node, ctx, parent_id);
+            return;
+        }
 
-    // Check if this is a source command (import)
-    if cmd_name == "source" || cmd_name == "." {
-        extract_source_import(source, node, ctx, parent_id);
-        return;
-    }
+        // Check if this is a source command (import)
+        if cmd_name == "source" || cmd_name == "." {
+            self.extract_source_import(source, node, ctx, parent_id);
+            return;
+        }
 
-    // Filter builtins
-    if !is_shell_builtin(&cmd_name) {
-        let tgt_text = ctx.make_qualified(&cmd_name);
-        let tgt_id = hash_id(&ctx.file_path, &tgt_text);
-        ctx.add_edge(parent_id, &tgt_id, EdgeKind::Calls,
-            (node.start_position().row + 1) as u32, Some(&cmd_name));
-    }
+        // Filter builtins
+        if !is_shell_builtin(&cmd_name) {
+            let tgt_text = if let Some(qualified) = self.imported_names.get(&cmd_name) {
+                format!("{}::{}", qualified, cmd_name)
+            } else {
+                ctx.make_qualified(&cmd_name)
+            };
+            let tgt_id = hash_id(&ctx.file_path, &tgt_text);
+            ctx.add_edge(parent_id, &tgt_id, EdgeKind::Calls,
+                (node.start_position().row + 1) as u32, Some(&cmd_name));
+        }
 
-    // Recurse into children for more calls/variables
-    walk_node(source, node, ctx, parent_id);
+        // Recurse into children for more calls/variables
+        self.walk_node(source, node, ctx, parent_id);
+    }
 }
 
 fn get_command_name(source: &[u8], node: Node) -> String {
@@ -247,36 +269,87 @@ fn get_command_name(source: &[u8], node: Node) -> String {
 // Source import extraction
 // ---------------------------------------------------------------------------
 
-fn extract_source_import(source: &[u8], node: Node, ctx: &mut ExtractionContext, parent_id: &str) {
-    // Look for the file argument (word or string after "source" or ".")
-    let mut found_source_keyword = false;
-    for i in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(i) {
-            if child.kind() == "command_name" {
-                let txt = child.utf8_text(source).unwrap_or("");
-                if txt == "source" || txt == "." {
-                    found_source_keyword = true;
-                    continue;
-                }
-            }
-            if found_source_keyword {
-                if child.kind() == "word" || child.kind() == "string" {
-                    let path = child.utf8_text(source).unwrap_or("");
-                    let clean_path = path.trim_matches(|c| c == '"' || c == '\'').to_string();
-                    if !clean_path.is_empty() {
-                        let tgt_text = ctx.make_qualified(&clean_path);
-                        let tgt_id = hash_id(&ctx.file_path, &tgt_text);
-                        ctx.add_edge(parent_id, &tgt_id, EdgeKind::Imports,
-                            (child.start_position().row + 1) as u32, Some(&clean_path));
+impl Walker {
+    fn extract_source_import(&mut self, source: &[u8], node: Node, ctx: &mut ExtractionContext, parent_id: &str) {
+        // Look for the file argument (word or string after "source" or ".")
+        let mut found_source_keyword = false;
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                if child.kind() == "command_name" {
+                    let txt = child.utf8_text(source).unwrap_or("");
+                    if txt == "source" || txt == "." {
+                        found_source_keyword = true;
+                        continue;
                     }
-                    return;
+                }
+                if found_source_keyword {
+                    if child.kind() == "word" || child.kind() == "string" {
+                        let path = child.utf8_text(source).unwrap_or("");
+                        let clean_path = path.trim_matches(|c| c == '"' || c == '\'').to_string();
+                        if !clean_path.is_empty() {
+                            // Resolve relative path (./) based on source file directory
+                            let resolved_path = resolve_bash_source_path(&clean_path, &ctx.file_path);
+
+                            // IMPORTS edge (keep existing)
+                            let import_tgt_text = ctx.make_qualified(&clean_path);
+                            let import_tgt_id = hash_id(&ctx.file_path, &import_tgt_text);
+                            ctx.add_edge(parent_id, &import_tgt_id, EdgeKind::Imports,
+                                (child.start_position().row + 1) as u32, Some(&clean_path));
+
+                            // REFERENCES edge for cross-file resolution
+                            let ref_target = format!("{}::", resolved_path);
+                            let ref_tgt_id = hash_id(&ctx.file_path, &ref_target);
+                            ctx.add_edge(parent_id, &ref_tgt_id, EdgeKind::References,
+                                (child.start_position().row + 1) as u32, Some(&ref_target));
+
+                            // Populate imported_names: basename (without extension) → path
+                            let basename = extract_bash_basename(&resolved_path);
+                            self.imported_names.insert(basename, resolved_path);
+                        }
+                        return;
+                    }
                 }
             }
         }
-    }
 
-    // Walk children for env accesses
-    walk_node(source, node, ctx, parent_id);
+        // Walk children for env accesses
+        self.walk_node(source, node, ctx, parent_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bash path helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve a sourced script path relative to the source file directory.
+/// Handles `./` prefix by resolving against the source file's parent directory.
+fn resolve_bash_source_path(path: &str, source_file: &str) -> String {
+    if path.starts_with("./") {
+        let source_dir = Path::new(source_file)
+            .parent()
+            .unwrap_or(Path::new("."));
+        let resolved = source_dir.join(&path[2..]);
+        // Normalize Windows backslashes to forward slashes
+        resolved.to_string_lossy().replace('\\', "/")
+    } else if path.starts_with("../") {
+        let source_dir = Path::new(source_file)
+            .parent()
+            .unwrap_or(Path::new("."));
+        let resolved = source_dir.join(path);
+        resolved.to_string_lossy().replace('\\', "/")
+    } else {
+        path.to_string()
+    }
+}
+
+/// Extract the basename (without extension) from a file path.
+/// e.g. "lib/utils.sh" → "utils", "./config.sh" → "config"
+fn extract_bash_basename(path: &str) -> String {
+    let p = Path::new(path);
+    p.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path)
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -497,5 +570,126 @@ mod tests {
         let calls = find_edges(&ctx, EdgeKind::Calls);
         let targets: Vec<&str> = calls.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
         assert!(targets.contains(&"handle"), "Expected handle in calls: {:?}", targets);
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-file REFERENCES edges (Stage 15: Bash cross-file resolution)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_source_import_creates_references_edge() {
+        let ctx = extract("source lib/utils.sh\n", "src/test.sh");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert!(!refs.is_empty(), "Expected REFERENCES edge for source import");
+        let targets: Vec<&str> = refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(targets.contains(&"lib/utils.sh::"), "Expected lib/utils.sh:: REF, got: {:?}", targets);
+    }
+
+    #[test]
+    fn test_dot_import_creates_references_edge() {
+        let ctx = extract(". ./config.sh\n", "src/test.sh");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert!(!refs.is_empty(), "Expected REFERENCES edge for dot import");
+        let targets: Vec<&str> = refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        // ./config.sh should be resolved relative to src/ → src/config.sh
+        assert!(
+            targets.iter().any(|t| t.contains("config.sh")),
+            "Expected config.sh in REFERENCES, got: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_source_import_keeps_imports_edge() {
+        let ctx = extract("source lib/utils.sh\n", "src/test.sh");
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert!(!imports.is_empty(), "Expected IMPORTS edge preserved");
+        assert!(!refs.is_empty(), "Expected REFERENCES edge created");
+        // Both edges should exist
+        let import_texts: Vec<&str> = imports.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        let ref_texts: Vec<&str> = refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(import_texts.iter().any(|t| t.contains("lib/utils.sh")), "IMPORTS should reference lib/utils.sh");
+        assert!(ref_texts.iter().any(|t| t.contains("lib/utils.sh")), "REFERENCES should reference lib/utils.sh");
+    }
+
+    #[test]
+    fn test_source_import_ref_target_text_format() {
+        let ctx = extract("source lib/utils.sh\n", "src/test.sh");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        let ref_tgt = targets.into_iter().find(|t| t.contains("utils")).unwrap();
+        // Should use :: separator format
+        assert!(ref_tgt.ends_with("::"), "REF target_text should end with ::, got: {}", ref_tgt);
+    }
+
+    #[test]
+    fn test_multiple_source_imports() {
+        let ctx = extract("source lib/utils.sh\nsource lib/helpers.sh\n. ./config.sh\n", "src/test.sh");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert_eq!(refs.len(), 3, "Expected 3 REFERENCES edges, got {}", refs.len());
+        assert!(targets.iter().any(|t| t.contains("utils.sh")), "Expected utils.sh reference");
+        assert!(targets.iter().any(|t| t.contains("helpers.sh")), "Expected helpers.sh reference");
+        assert!(targets.iter().any(|t| t.contains("config.sh")), "Expected config.sh reference");
+    }
+
+    #[test]
+    fn test_source_inside_function_creates_ref_edge() {
+        let ctx = extract("setup() {\n  source lib/init.sh\n}\n", "src/test.sh");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert!(!refs.is_empty(), "Expected REFERENCES edge for source inside function");
+        let targets: Vec<&str> = refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(targets.iter().any(|t| t.contains("init.sh")), "Expected init.sh REF, got: {:?}", targets);
+    }
+
+    #[test]
+    fn test_bare_call_not_qualified_without_source() {
+        // Calls should remain bare names when not imported
+        let ctx = extract("myfunc() {\n  helper\n}\n", "src/test.sh");
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        // helper should appear as a bare name (not qualified with module::)
+        assert!(targets.iter().any(|t| t.contains("helper")),
+            "Expected helper call, got: {:?}", targets);
+        // Should NOT be qualified with :: (unless make_qualified already adds :: prefix)
+        // The make_qualified format is {file_path}::{name}, so it always has :: from that
+        assert!(targets.iter().any(|t| t.ends_with("helper")),
+            "Expected bare helper call at end, got: {:?}", targets);
+    }
+
+    #[test]
+    fn test_source_with_quoted_path() {
+        let ctx = extract("source \"lib/helpers.sh\"\n", "src/test.sh");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(targets.iter().any(|t| t.contains("helpers.sh")),
+            "Expected helpers.sh REF for quoted path, got: {:?}", targets);
+    }
+
+    // ------------------------------------------------------------------
+    // Helper function tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_bash_basename() {
+        assert_eq!(extract_bash_basename("lib/utils.sh"), "utils");
+        assert_eq!(extract_bash_basename("config.sh"), "config");
+        assert_eq!(extract_bash_basename("script.bash"), "script");
+        assert_eq!(extract_bash_basename("helpers"), "helpers");
+    }
+
+    #[test]
+    fn test_resolve_bash_source_path_relative() {
+        // ./ relative paths should be resolved
+        let resolved = resolve_bash_source_path("./config.sh", "src/test.sh");
+        assert!(resolved.contains("src/") && resolved.contains("config.sh"),
+            "Expected src/config.sh, got: {}", resolved);
+    }
+
+    #[test]
+    fn test_resolve_bash_source_path_absolute_like() {
+        // Paths without ./ are returned as-is
+        let resolved = resolve_bash_source_path("lib/utils.sh", "src/test.sh");
+        assert_eq!(resolved, "lib/utils.sh");
     }
 }

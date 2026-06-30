@@ -66,6 +66,12 @@ impl ModuleIndex {
         self.rev_mapping.get(file_path).map(|s| s.as_str())
     }
 
+    /// Insert a manual mapping entry (useful for testing).
+    pub fn insert(&mut self, module_name: &str, file_path: String) {
+        self.mapping.entry(module_name.to_string()).or_default().push(file_path.clone());
+        self.rev_mapping.entry(file_path).or_insert(module_name.to_string());
+    }
+
     /// Returns the number of module entries in the index.
     pub fn len(&self) -> usize {
         self.mapping.len()
@@ -111,6 +117,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "dart" => infer_dart_module(file_path),
         "swift" => infer_swift_module(file_path),
         "lua" => infer_lua_module(file_path),
+        "bash" => infer_bash_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -880,6 +887,46 @@ fn infer_lua_module(file_path: &str) -> Option<String> {
 /// Strip common Lua source root prefixes.
 fn strip_lua_source_root(path: &str) -> String {
     let prefixes = &["src/", "lib/", "lua/"];
+    for prefix in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+    path.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Bash module name inference (Stage 15)
+// ---------------------------------------------------------------------------
+
+/// Infer a Bash module name from a file path.
+///
+/// Rules:
+/// 1. Only handles .sh, .bash, .zsh files.
+/// 2. Strips common source root prefixes (src/, lib/).
+/// 3. Keeps the file extension (since `source` commands use full filenames).
+/// 4. Does NOT replace path separators — module names are file paths.
+fn infer_bash_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle shell script files
+    if !path.ends_with(".sh") && !path.ends_with(".bash") && !path.ends_with(".zsh") {
+        return None;
+    }
+
+    // Strip common source root prefixes
+    let stripped = strip_bash_source_root(path);
+
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(stripped.to_string())
+    }
+}
+
+/// Strip common Bash source root prefixes from a path.
+fn strip_bash_source_root(path: &str) -> String {
+    let prefixes = &["src/", "lib/"];
     for prefix in prefixes {
         if path.starts_with(prefix) {
             return path[prefix.len()..].to_string();
@@ -1857,5 +1904,81 @@ mod tests {
         assert_eq!(strip_lua_source_root("lib/http"), "http");
         assert_eq!(strip_lua_source_root("lua/mylib"), "mylib");
         assert_eq!(strip_lua_source_root("no_prefix"), "no_prefix");
+    }
+
+    // ------------------------------------------------------------------
+    // Bash module name inference tests (Stage 15)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_bash_module_src() {
+        assert_eq!(
+            infer_module_name("src/lib/utils.sh", "bash"),
+            Some("lib/utils.sh".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/config.sh", "bash"),
+            Some("config.sh".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_bash_module_lib() {
+        assert_eq!(
+            infer_module_name("lib/helpers.sh", "bash"),
+            Some("helpers.sh".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_bash_module_no_prefix() {
+        assert_eq!(
+            infer_module_name("script.sh", "bash"),
+            Some("script.sh".to_string())
+        );
+        assert_eq!(
+            infer_module_name("subdir/tool.sh", "bash"),
+            Some("subdir/tool.sh".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_bash_module_bash_extension() {
+        assert_eq!(
+            infer_module_name("src/setup.bash", "bash"),
+            Some("setup.bash".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_bash_module_zsh_extension() {
+        assert_eq!(
+            infer_module_name("src/env.zsh", "bash"),
+            Some("env.zsh".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_bash_module_non_bash() {
+        assert_eq!(infer_module_name("src/foo.py", "bash"), None);
+        assert_eq!(infer_module_name("src/foo.java", "bash"), None);
+        assert_eq!(infer_module_name("src/foo.rb", "bash"), None);
+        assert_eq!(infer_module_name("src/foo.rs", "bash"), None);
+    }
+
+    #[test]
+    fn test_infer_bash_module_deep_nested() {
+        assert_eq!(
+            infer_module_name("src/features/install/scripts/configure.sh", "bash"),
+            Some("features/install/scripts/configure.sh".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_bash_source_root() {
+        assert_eq!(strip_bash_source_root("src/foo.sh"), "foo.sh");
+        assert_eq!(strip_bash_source_root("lib/utils.sh"), "utils.sh");
+        assert_eq!(strip_bash_source_root("no_prefix.sh"), "no_prefix.sh");
+        assert_eq!(strip_bash_source_root("subdir/script.sh"), "subdir/script.sh");
     }
 }

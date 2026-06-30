@@ -30,13 +30,14 @@ impl LanguageRegistry {
             "dart" => Some(Box::new(DartResolver)),
             "swift" => Some(Box::new(SwiftResolver)),
             "lua" => Some(Box::new(LuaResolver)),
+            "bash" => Some(Box::new(BashResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift", "lua"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift", "lua", "bash"]
     }
 }
 
@@ -2526,6 +2527,133 @@ pub fn is_lua_external(module_name: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Bash module resolver (Stage 15)
+// ---------------------------------------------------------------------------
+
+/// Bash module resolver.
+///
+/// Bash scripts use `source file.sh` or `. file.sh` to import other scripts.
+/// Sourced scripts execute in the current shell, making all functions and
+/// variables available.  There is no namespace — everything is in a flat scope.
+///
+/// Module names are file paths (e.g. `lib/utils.sh`).
+pub struct BashResolver;
+
+impl ModuleResolver for BashResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        if module_name.is_empty() {
+            return Vec::new();
+        }
+
+        // 1. Direct ModuleIndex lookup by module name (the file path)
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Try with common source root prefixes (src/, lib/)
+        for prefix in &["", "src/", "lib/"] {
+            let candidate = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&candidate) {
+                return files.clone();
+            }
+        }
+
+        // 3. Try stripping a prefix that might already exist in module_name
+        //    e.g. module_name = "src/lib/utils.sh" but index has "lib/utils.sh"
+        for prefix in &["src/", "lib/"] {
+            if module_name.starts_with(prefix) {
+                let stripped = &module_name[prefix.len()..];
+                if let Some(files) = module_index.lookup(stripped) {
+                    return files.clone();
+                }
+            }
+        }
+
+        // 4. Resolve relative paths (./) based on source file directory
+        if module_name.starts_with("./") || module_name.starts_with("../") {
+            let source_dir = Path::new(source_file)
+                .parent()
+                .unwrap_or(Path::new("."));
+            let resolved = source_dir.join(module_name);
+            let resolved_str = resolved.to_string_lossy().replace('\\', "/");
+
+            // Try the resolved absolute-like path
+            if let Some(files) = module_index.lookup(&resolved_str) {
+                return files.clone();
+            }
+
+            // Also try stripping src/ from the resolved path
+            for prefix in &["src/", "lib/"] {
+                if resolved_str.starts_with(prefix) {
+                    let stripped = &resolved_str[prefix.len()..];
+                    if let Some(files) = module_index.lookup(stripped) {
+                        return files.clone();
+                    }
+                }
+            }
+
+            // Generate candidate file paths for the resolved path
+            return vec![resolved_str];
+        }
+
+        // 5. Generate candidate file paths (fallback)
+        let mut candidates = Vec::new();
+        for prefix in &["src/", "lib/", ""] {
+            candidates.push(format!("{}{}", prefix, module_name));
+        }
+        candidates
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "bash")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_bash_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "bash"
+    }
+}
+
+/// Check if a module name refers to an external (system) entity.
+///
+/// For Bash, source paths that look like system-level shell imports
+/// (e.g. `/etc/profile`, `/usr/share/...`) are external, as are known
+/// common Unix commands when they appear as call targets.
+///
+/// Local file paths (relative or project-rooted) are internal.
+pub fn is_bash_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    // Absolute system paths are external
+    if module_name.starts_with("/etc/")
+        || module_name.starts_with("/usr/")
+        || module_name.starts_with("/opt/")
+        || module_name.starts_with("/dev/")
+        || module_name.starts_with("/proc/")
+        || module_name.starts_with("/sys/")
+    {
+        return true;
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4568,5 +4696,167 @@ mod tests {
         assert!(is_lua_external("luafilesystem"));
         assert!(is_lua_external("penlight"));
         assert!(is_lua_external("busted"));
+    }
+
+    // ------------------------------------------------------------------
+    // Bash resolver tests (Stage 15)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_bash_resolver_is_external_system_paths() {
+        let resolver = BashResolver;
+        assert!(resolver.is_external("/etc/profile"));
+        assert!(resolver.is_external("/usr/share/bash-completion"));
+        assert!(resolver.is_external("/opt/custom/script.sh"));
+    }
+
+    #[test]
+    fn test_bash_resolver_not_external_local_files() {
+        let resolver = BashResolver;
+        assert!(!resolver.is_external("lib/utils.sh"));
+        assert!(!resolver.is_external("src/config.sh"));
+        assert!(!resolver.is_external("helpers.sh"));
+        assert!(!resolver.is_external("dir/sub/script.sh"));
+    }
+
+    #[test]
+    fn test_bash_resolver_not_external_relative_paths() {
+        let resolver = BashResolver;
+        assert!(!resolver.is_external("./config.sh"));
+        assert!(!resolver.is_external("../lib/utils.sh"));
+    }
+
+    #[test]
+    fn test_bash_resolver_empty_module_name() {
+        let resolver = BashResolver;
+        assert!(!resolver.is_external(""));
+    }
+
+    #[test]
+    fn test_bash_resolver_language() {
+        let resolver = BashResolver;
+        assert_eq!(resolver.language(), "bash");
+    }
+
+    #[test]
+    fn test_bash_resolver_file_to_module_name() {
+        let resolver = BashResolver;
+        // Should delegate to infer_module_name("bash")
+        let result = resolver.file_to_module_name("src/lib/utils.sh", Path::new("."));
+        assert_eq!(result, Some("lib/utils.sh".to_string()));
+        let result2 = resolver.file_to_module_name("config.sh", Path::new("."));
+        assert_eq!(result2, Some("config.sh".to_string()));
+    }
+
+    #[test]
+    fn test_bash_resolver_resolve_module_empty_index() {
+        let resolver = BashResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "lib/utils.sh",
+            "src/test.sh",
+            Path::new("."),
+            &index,
+        );
+        // Should generate candidate file paths
+        assert!(!candidates.is_empty(), "Expected candidate paths for Bash module");
+        assert!(candidates.contains(&"src/lib/utils.sh".to_string()),
+            "Expected src/lib/utils.sh candidate, got: {:?}", candidates);
+        assert!(candidates.contains(&"lib/utils.sh".to_string()),
+            "Expected lib/utils.sh candidate, got: {:?}", candidates);
+    }
+
+    #[test]
+    fn test_bash_resolver_resolve_module_with_index() {
+        let resolver = BashResolver;
+        let mut index = ModuleIndex::empty();
+        // Simulate adding a file to the index
+        index.insert("lib/utils.sh", "src/lib/utils.sh".to_string());
+
+        let candidates = resolver.resolve_module(
+            "lib/utils.sh",
+            "src/test.sh",
+            Path::new("."),
+            &index,
+        );
+        assert_eq!(candidates.len(), 1, "Expected 1 candidate from index");
+        assert_eq!(candidates[0], "src/lib/utils.sh");
+    }
+
+    #[test]
+    fn test_bash_resolver_resolve_relative_path() {
+        let resolver = BashResolver;
+        let mut index = ModuleIndex::empty();
+        // source ./config.sh from src/test.sh → src/config.sh
+        index.insert("src/config.sh", "src/config.sh".to_string());
+
+        let candidates = resolver.resolve_module(
+            "./config.sh",
+            "src/test.sh",
+            Path::new("."),
+            &index,
+        );
+        // Should try to resolve ./config.sh → src/config.sh
+        assert!(!candidates.is_empty(), "Expected candidates for relative path");
+        // The resolved path should contain config.sh
+        assert!(
+            candidates.iter().any(|c| c.contains("config.sh")),
+            "Expected candidates containing config.sh, got: {:?}", candidates
+        );
+    }
+
+    #[test]
+    fn test_bash_resolver_resolve_empty_module() {
+        let resolver = BashResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "",
+            "src/test.sh",
+            Path::new("."),
+            &index,
+        );
+        assert!(candidates.is_empty(), "Empty module should return no candidates");
+    }
+
+    #[test]
+    fn test_bash_resolver_resolve_strips_prefix() {
+        let resolver = BashResolver;
+        let mut index = ModuleIndex::empty();
+        // Index has stripped path, module_name already has src/ prefix
+        index.insert("lib/utils.sh", "src/lib/utils.sh".to_string());
+
+        let candidates = resolver.resolve_module(
+            "src/lib/utils.sh",
+            "src/test.sh",
+            Path::new("."),
+            &index,
+        );
+        // Should strip src/ and find the entry
+        assert!(!candidates.is_empty(), "Expected candidates after prefix stripping");
+        assert!(
+            candidates.iter().any(|c| c.contains("utils.sh")),
+            "Expected candidates containing utils.sh, got: {:?}", candidates
+        );
+    }
+
+    #[test]
+    fn test_language_registry_get_bash() {
+        let r = LanguageRegistry::get("bash");
+        assert!(r.is_some(), "Expected Bash resolver to be registered");
+        assert_eq!(r.unwrap().language(), "bash");
+    }
+
+    #[test]
+    fn test_supported_languages_includes_bash() {
+        let langs = LanguageRegistry::supported_languages();
+        assert!(langs.contains(&"bash"), "Expected 'bash' in supported languages");
+    }
+
+    #[test]
+    fn test_is_bash_external_function() {
+        assert!(is_bash_external("/etc/profile"));
+        assert!(is_bash_external("/usr/local/bin/script"));
+        assert!(!is_bash_external("lib/utils.sh"));
+        assert!(!is_bash_external(""));
     }
 }
