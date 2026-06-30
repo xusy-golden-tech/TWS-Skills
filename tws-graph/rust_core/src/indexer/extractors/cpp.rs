@@ -22,6 +22,7 @@
 //! - `overrides`: virtual method overrides (post-process heuristic)
 //! - `instantiates`: constructor calls
 //! - `type_ref`: template parameters
+//! - `references`: cross-file references for local `#include "..."` headers
 
 use crate::db::hash_id;
 use crate::indexer::context::ExtractionContext;
@@ -931,13 +932,72 @@ fn extract_include(
 ) -> anyhow::Result<()> {
     let line = node.start_position().row as u32 + 1;
 
-    let raw = get_text(source, Some(node));
-    if let Some(after) = raw.strip_prefix("#include") {
-        let header = after.trim().trim_matches(|c| c == '<' || c == '>' || c == '"');
-        if !header.is_empty() && !is_std_header(header) {
-            let target_qn = format!("{}::{}", ctx.file_path, header);
-            let target = hash_id(&ctx.file_path, &target_qn);
-            ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&header));
+    // First attempt: iterate named children for precise detection
+    let mut local_headers: Vec<String> = Vec::new();
+    let mut found = false;
+
+    for i in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(i) {
+            match child.kind() {
+                "string_literal" => {
+                    let header = get_text(source, Some(child));
+                    let header = header.trim_matches(|c| c == '"').to_string();
+                    if !header.is_empty() && !is_std_header(&header) {
+                        let target_qn = format!("{}::{}", ctx.file_path, header);
+                        let target = hash_id(&ctx.file_path, &target_qn);
+                        ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&header));
+                        local_headers.push(header);
+                        found = true;
+                    }
+                }
+                "system_lib_string" => {
+                    let header = get_text(source, Some(child));
+                    let header = header.trim_matches(|c| c == '<' || c == '>').to_string();
+                    if !header.is_empty() && !is_std_header(&header) {
+                        let target_qn = format!("{}::{}", ctx.file_path, header);
+                        let target = hash_id(&ctx.file_path, &target_qn);
+                        ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&header));
+                        found = true;
+                    }
+                }
+                "identifier" | "concatenated_string" => {
+                    let header = get_text(source, Some(child));
+                    if !header.is_empty() && !is_std_header(&header) {
+                        let target_qn = format!("{}::{}", ctx.file_path, header);
+                        let target = hash_id(&ctx.file_path, &target_qn);
+                        ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&header));
+                        found = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Create REFERENCES edges for local includes (cross-file resolution)
+    for header in &local_headers {
+        let ref_text = format!("{}::", header);
+        let ref_qn = format!("{}::{}", ctx.file_path, ref_text);
+        let ref_target = hash_id(&ctx.file_path, &ref_qn);
+        ctx.add_edge(
+            parent_id,
+            &ref_target,
+            EdgeKind::References,
+            line,
+            Some(&ref_text),
+        );
+    }
+
+    // Fallback: extract entire preproc_include text minus #include
+    if !found {
+        let raw = get_text(source, Some(node));
+        if let Some(after) = raw.strip_prefix("#include") {
+            let header = after.trim().trim_matches(|c| c == '<' || c == '>' || c == '"');
+            if !header.is_empty() && !is_std_header(header) {
+                let target_qn = format!("{}::{}", ctx.file_path, header);
+                let target = hash_id(&ctx.file_path, &target_qn);
+                ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&header));
+            }
         }
     }
 
@@ -1408,5 +1468,99 @@ mod tests {
         );
         let methods = find_nodes(&ctx, NodeKind::Method);
         assert!(!methods.is_empty(), "Expected at least one method (constructor)");
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-file REFERENCES edge tests for local includes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_include_local_creates_references_edge() {
+        let ctx = extract("#include \"myheader.hpp\"\n", "src/test.cpp");
+        let references = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = references
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"myheader.hpp::"),
+            "Expected myheader.hpp:: REFERENCES edge, got: {:?}", targets);
+    }
+
+    #[test]
+    fn test_include_local_keeps_imports_edge() {
+        let ctx = extract("#include \"myheader.hpp\"\n", "src/test.cpp");
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        let targets: Vec<&str> = imports
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"myheader.hpp"));
+    }
+
+    #[test]
+    fn test_include_system_only_imports_no_references() {
+        let ctx = extract("#include <myheader.hpp>\n", "src/test.cpp");
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        let targets: Vec<&str> = imports
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"myheader.hpp"));
+
+        let references = find_edges(&ctx, EdgeKind::References);
+        let ref_targets: Vec<&str> = references
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(!ref_targets.contains(&"myheader.hpp::"),
+            "System include should NOT create REFERENCES edge");
+    }
+
+    #[test]
+    fn test_include_local_subdirectory_path() {
+        let ctx = extract("#include \"utils/helpers.hpp\"\n", "src/test.cpp");
+        let references = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = references
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"utils/helpers.hpp::"),
+            "Expected utils/helpers.hpp:: REFERENCES edge");
+    }
+
+    #[test]
+    fn test_multiple_local_includes_all_have_references() {
+        let ctx = extract(
+            "#include \"foo.hpp\"\n#include \"bar.hpp\"\n",
+            "src/test.cpp",
+        );
+        let references = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = references
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(references.len(), 2);
+        assert!(targets.contains(&"foo.hpp::"));
+        assert!(targets.contains(&"bar.hpp::"));
+    }
+
+    #[test]
+    fn test_include_std_cpp_headers_still_filtered() {
+        let ctx = extract("#include <iostream>\n#include <vector>\n", "src/test.cpp");
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        let targets: Vec<&str> = imports
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(!targets.contains(&"iostream"));
+        assert!(!targets.contains(&"vector"));
+
+        let references = find_edges(&ctx, EdgeKind::References);
+        let ref_targets: Vec<&str> = references
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(!ref_targets.contains(&"iostream::"));
+        assert!(!ref_targets.contains(&"vector::"));
     }
 }

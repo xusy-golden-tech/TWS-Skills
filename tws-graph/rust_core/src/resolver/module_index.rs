@@ -103,6 +103,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "rust" => infer_rust_module(file_path),
         "php" => infer_php_module(file_path),
         "ruby" => infer_ruby_module(file_path),
+        "c" | "cpp" | "c++" => infer_c_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -538,6 +539,59 @@ fn strip_ruby_source_root(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+/// C / C++ module name inference.
+///
+/// Rules:
+/// 1. Handle `.c`, `.h`, `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx` files.
+/// 2. The module name is the filename (basename), because `#include "foo.h"`
+///    references the file by its filename.
+/// 3. For relative include paths (e.g., `#include "utils/helpers.h"`), the module
+///    name could be the relative path. We store both the bare filename and subdirectory
+///    variants.
+///
+/// Examples:
+/// - `src/foo.h` → `foo.h`
+/// - `include/bar.hpp` → `bar.hpp`
+/// - `src/test.c` → `test.c`
+/// - `utils/helpers.h` → `helpers.h`
+/// - `src/crypto/sha256.c` → `sha256.c`
+fn infer_c_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // C/C++ source and header extensions
+    let c_extensions = &[
+        ".c", ".h", ".cpp", ".cc", ".cxx", ".c++",
+        ".hpp", ".hh", ".hxx", ".h++",
+    ];
+
+    let mut found_ext = false;
+    for ext in c_extensions {
+        if path.ends_with(ext) {
+            found_ext = true;
+            break;
+        }
+    }
+
+    if !found_ext {
+        return None;
+    }
+
+    // Use the filename (basename) as the module name, since #include uses filenames
+    // But also try to retain subdirectory info for relative includes
+    let basename = if let Some(slash_pos) = path.rfind('/') {
+        path[slash_pos + 1..].to_string()
+    } else {
+        path.to_string()
+    };
+
+    // For includes like "utils/helpers.h", the module name is the basename
+    // but we also want to be able to resolve "utils/helpers.h" directly
+    // So we return just the basename for lookup simplicity.
+    // The resolve_module function also tries path-prefix lookups.
+
+    Some(basename)
 }
 
 // ---------------------------------------------------------------------------
@@ -1110,5 +1164,102 @@ mod tests {
         assert_eq!(strip_ruby_source_root("src/models/user"), "models/user");
         assert_eq!(strip_ruby_source_root("app/controllers"), "controllers");
         assert_eq!(strip_ruby_source_root("foo/bar"), "foo/bar");
+    }
+
+    // ------------------------------------------------------------------
+    // C / C++ module name inference
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_c_module_header() {
+        assert_eq!(
+            infer_module_name("src/foo.h", "c"),
+            Some("foo.h".to_string())
+        );
+        assert_eq!(
+            infer_module_name("include/bar.h", "c"),
+            Some("bar.h".to_string())
+        );
+        assert_eq!(
+            infer_module_name("lib/utils/types.h", "c"),
+            Some("types.h".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_c_module_source() {
+        assert_eq!(
+            infer_module_name("src/main.c", "c"),
+            Some("main.c".to_string())
+        );
+        assert_eq!(
+            infer_module_name("test.c", "c"),
+            Some("test.c".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_cpp_module_header() {
+        assert_eq!(
+            infer_module_name("src/myclass.hpp", "cpp"),
+            Some("myclass.hpp".to_string())
+        );
+        assert_eq!(
+            infer_module_name("include/myclass.hh", "cpp"),
+            Some("myclass.hh".to_string())
+        );
+        assert_eq!(
+            infer_module_name("lib/util.hxx", "cpp"),
+            Some("util.hxx".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_cpp_module_source() {
+        assert_eq!(
+            infer_module_name("src/test.cpp", "cpp"),
+            Some("test.cpp".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/test.cc", "cpp"),
+            Some("test.cc".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/test.cxx", "cpp"),
+            Some("test.cxx".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_c_module_non_c() {
+        assert_eq!(infer_module_name("src/foo.py", "c"), None);
+        assert_eq!(infer_module_name("src/foo.java", "c"), None);
+        assert_eq!(infer_module_name("src/foo.go", "c"), None);
+        assert_eq!(infer_module_name("src/foo.rs", "c"), None);
+        assert_eq!(infer_module_name("src/foo.txt", "c"), None);
+    }
+
+    #[test]
+    fn test_infer_c_module_nested_path() {
+        assert_eq!(
+            infer_module_name("src/crypto/sha256.c", "c"),
+            Some("sha256.c".to_string())
+        );
+        assert_eq!(
+            infer_module_name("include/vendor/json/json.h", "c"),
+            Some("json.h".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_c_module_c_plus_plus_lang() {
+        assert_eq!(
+            infer_module_name("src/foo.c", "c++"),
+            Some("foo.c".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/foo.cpp", "c++"),
+            Some("foo.cpp".to_string())
+        );
     }
 }

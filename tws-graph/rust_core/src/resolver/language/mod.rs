@@ -24,13 +24,14 @@ impl LanguageRegistry {
             "rust" => Some(Box::new(RustResolver)),
             "php" => Some(Box::new(PhpResolver)),
             "ruby" => Some(Box::new(RubyResolver)),
+            "c" | "cpp" | "c++" => Some(Box::new(CppResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin", "go", "rust", "php", "ruby"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "go", "rust", "php", "ruby", "c", "cpp"]
     }
 }
 
@@ -1379,6 +1380,250 @@ fn strip_ruby_source_root(path: &str) -> String {
     path.to_string()
 }
 
+// ---------------------------------------------------------------------------
+// C / C++ module resolver
+// ---------------------------------------------------------------------------
+
+/// C and C++ shared module resolver.
+///
+/// Handles the `#include` preprocessor directive used by both C and C++:
+/// - `#include "foo.h"` → project-local header, resolved via ModuleIndex or
+///   by searching the source file's directory.
+/// - `#include <foo.h>` / `#include <vector>` → system/standard library headers,
+///   classified as external.
+///
+/// Module names for C/C++ are header filenames (e.g. `"foo.h"`, `"bar.hpp"`).
+/// The ModuleIndex maps file paths to their basenames for lookup.
+pub struct CppResolver;
+
+impl ModuleResolver for CppResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        if module_name.is_empty() {
+            return Vec::new();
+        }
+
+        let mut candidates = Vec::new();
+
+        // 1. Direct ModuleIndex lookup by header name
+        if let Some(files) = module_index.lookup(module_name) {
+            candidates.extend(files.clone());
+        }
+
+        // 2. Also try without extension (e.g. "foo" → "foo.h")
+        if let Some(dot_pos) = module_name.rfind('.') {
+            let base = &module_name[..dot_pos];
+            if let Some(files) = module_index.lookup(base) {
+                candidates.extend(files.clone());
+            }
+        }
+
+        // 3. Search in source file's directory
+        let source_dir = Path::new(source_file)
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or(".");
+
+        let source_candidate = if source_dir == "." {
+            module_name.to_string()
+        } else {
+            Path::new(source_dir)
+                .join(module_name)
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+
+        // Check if the candidate path exists in ModuleIndex
+        let check_path = &source_candidate;
+        // Look up by file path (module name might be the full relative path)
+        if module_index.rev_lookup(check_path).is_some() {
+            if !candidates.contains(check_path) {
+                candidates.push(check_path.to_string());
+            }
+        }
+
+        // Also try the filename-only lookup in ModuleIndex
+        let basename = Path::new(&source_candidate)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+        if basename != module_name {
+            if let Some(files) = module_index.lookup(basename) {
+                for f in files {
+                    if !candidates.contains(f) {
+                        candidates.push(f.clone());
+                    }
+                }
+            }
+        }
+
+        // 4. Try common prefix variations
+        for prefix in &["src/", "lib/", "include/", "inc/", ""] {
+            let with_prefix = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&with_prefix) {
+                for f in files {
+                    if !candidates.contains(f) {
+                        candidates.push(f.clone());
+                    }
+                }
+            }
+        }
+
+        candidates
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "c")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_cpp_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "c"
+    }
+}
+
+/// Check if a header/module name is a known C/C++ standard library header or
+/// a common third-party library.
+///
+/// A header is considered external if it matches:
+/// - C standard library headers (stdio.h, stdlib.h, string.h, etc.)
+/// - C++ standard library headers (iostream, vector, string, algorithm, etc.)
+/// - C++ C-compatibility headers (cstdio, cstdlib, cstring, etc.)
+/// - Common third-party libraries (opencv2, boost, Qt, etc.)
+///
+/// Project-local headers (`#include "..."` ) are not considered external
+/// unless they match one of the known stdlib patterns above.
+pub fn is_cpp_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    // C standard library headers (with .h extension)
+    let c_stdlib: &[&str] = &[
+        "assert.h", "complex.h", "ctype.h", "errno.h", "fenv.h", "float.h",
+        "inttypes.h", "iso646.h", "limits.h", "locale.h", "math.h",
+        "setjmp.h", "signal.h", "stdalign.h", "stdarg.h", "stdatomic.h",
+        "stdbool.h", "stddef.h", "stdint.h", "stdio.h", "stdlib.h",
+        "stdnoreturn.h", "string.h", "tgmath.h", "threads.h", "time.h",
+        "uchar.h", "wchar.h", "wctype.h",
+    ];
+
+    if c_stdlib.contains(&module_name) {
+        return true;
+    }
+
+    // C++ standard library headers (without .h extension)
+    let cpp_stdlib: &[&str] = &[
+        "algorithm", "array", "atomic", "bitset", "chrono", "codecvt",
+        "complex", "condition_variable", "deque", "exception", "execution",
+        "filesystem", "forward_list", "fstream", "functional", "future",
+        "initializer_list", "iomanip", "ios", "iosfwd", "iostream", "istream",
+        "iterator", "limits", "list", "locale", "map", "memory", "memory_resource",
+        "mutex", "new", "numbers", "numeric", "optional", "ostream", "queue",
+        "random", "ranges", "ratio", "regex", "scoped_allocator", "set",
+        "shared_mutex", "source_location", "span", "sstream", "stack",
+        "stdexcept", "stop_token", "streambuf", "string", "string_view",
+        "strstream", "syncstream", "system_error", "thread", "tuple",
+        "type_traits", "typeindex", "typeinfo", "unordered_map",
+        "unordered_set", "utility", "valarray", "variant", "vector", "version",
+    ];
+
+    if cpp_stdlib.contains(&module_name) {
+        return true;
+    }
+
+    // C++ C-compatibility headers (c*)
+    let c_stdlib_no_h: &[&str] = &[
+        "cassert", "cctype", "cerrno", "cfenv", "cfloat", "cinttypes",
+        "climits", "clocale", "cmath", "csetjmp", "csignal", "cstdarg",
+        "cstdbool", "cstddef", "cstdint", "cstdio", "cstdlib", "cstring",
+        "ctgmath", "ctime", "cuchar", "cwchar", "cwctype",
+    ];
+
+    if c_stdlib_no_h.contains(&module_name) {
+        return true;
+    }
+
+    // Common third-party C/C++ libraries (by prefix or exact match)
+    let third_party_prefixes: &[&str] = &[
+        "boost/", "boost/",
+        "opencv2/", "opencv/",
+        "QtCore/", "QtGui/", "QtWidgets/", "Qt/",
+        "glib/", "glib-2.0/",
+        "gtk/", "gtk-3.0/",
+        "cairo/",
+        "pango/",
+        "curl/",
+        "openssl/",
+        "zlib.h", "zconf.h",
+        "png.h", "pngconf.h", "pnglibconf.h",
+        "jpeglib.h", "jerror.h", "jmorecfg.h",
+        "tiff.h", "tiffio.h", "tiffconf.h",
+        "expat.h", "expat_external.h",
+        "pcre.h", "pcre2.h",
+        "sqlite3.h",
+        "mysql.h", "mysqld_error.h",
+        "libpq-fe.h",
+        "mongo.h",
+        "hdf5.h",
+        "netcdf.h",
+        "fftw3.h",
+        "gmp.h",
+        "mpfr.h",
+        "mpi.h",
+        "cuda.h", "cuda_runtime.h",
+        "opencl.h",
+        "CL/cl.h", "CL/cl2.h",
+        "vulkan/vulkan.h",
+        "GL/gl.h", "GL/glu.h", "GL/glew.h", "GL/glut.h",
+        "SDL.h", "SDL2/SDL.h",
+        "X11/Xlib.h", "X11/X.h",
+        "pthread.h", "unistd.h", "fcntl.h", "sys/stat.h",
+        "sys/types.h", "sys/socket.h", "netinet/in.h",
+        "arpa/inet.h", "dlfcn.h", "dirent.h",
+        "windows.h", "winsock2.h", "ws2tcpip.h",
+        "objc/NSObject.h", "objc/runtime.h",
+        "Foundation/Foundation.h", "UIKit/UIKit.h",
+        "AppKit/AppKit.h", "CoreFoundation/CoreFoundation.h",
+    ];
+
+    // Check prefixes
+    for prefix in third_party_prefixes {
+        if module_name.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    // Check for dotted paths that might be system includes
+    // (e.g., sys/stat.h, netinet/in.h)
+    if module_name.contains('/') {
+        let root = module_name.split('/').next().unwrap_or(module_name);
+        let system_roots: &[&str] = &[
+            "sys", "netinet", "arpa", "net", "bits", "asm", "linux",
+            "machine", "rpc", "rpcsvc", "nfs", "scsi", "sound",
+            "video", "protocols", "uapi",
+        ];
+        if system_roots.contains(&root) {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2431,5 +2676,186 @@ mod tests {
         assert_eq!(strip_ruby_source_root("src/models/user"), "models/user");
         assert_eq!(strip_ruby_source_root("app/services"), "services");
         assert_eq!(strip_ruby_source_root("foo"), "foo");
+    }
+
+    // ------------------------------------------------------------------
+    // C / C++ resolver tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_cpp_resolver_is_external_c_stdlib() {
+        let resolver = CppResolver;
+        assert!(resolver.is_external("stdio.h"));
+        assert!(resolver.is_external("stdlib.h"));
+        assert!(resolver.is_external("string.h"));
+        assert!(resolver.is_external("math.h"));
+        assert!(resolver.is_external("time.h"));
+    }
+
+    #[test]
+    fn test_cpp_resolver_is_external_cpp_stdlib() {
+        let resolver = CppResolver;
+        assert!(resolver.is_external("iostream"));
+        assert!(resolver.is_external("vector"));
+        assert!(resolver.is_external("string"));
+        assert!(resolver.is_external("map"));
+        assert!(resolver.is_external("algorithm"));
+        assert!(resolver.is_external("memory"));
+        assert!(resolver.is_external("functional"));
+    }
+
+    #[test]
+    fn test_cpp_resolver_is_external_c_compat() {
+        let resolver = CppResolver;
+        assert!(resolver.is_external("cstdio"));
+        assert!(resolver.is_external("cstdlib"));
+        assert!(resolver.is_external("cstring"));
+        assert!(resolver.is_external("cmath"));
+    }
+
+    #[test]
+    fn test_cpp_resolver_is_external_system_prefixes() {
+        let resolver = CppResolver;
+        assert!(resolver.is_external("sys/stat.h"));
+        assert!(resolver.is_external("sys/types.h"));
+        assert!(resolver.is_external("netinet/in.h"));
+        assert!(resolver.is_external("arpa/inet.h"));
+        assert!(resolver.is_external("bits/confname.h"));
+    }
+
+    #[test]
+    fn test_cpp_resolver_is_external_third_party() {
+        let resolver = CppResolver;
+        assert!(resolver.is_external("boost/asio.hpp"));
+        assert!(resolver.is_external("opencv2/core.hpp"));
+        assert!(resolver.is_external("QtWidgets/QApplication"));
+        assert!(resolver.is_external("curl/curl.h"));
+        assert!(resolver.is_external("openssl/ssl.h"));
+        assert!(resolver.is_external("sqlite3.h"));
+        assert!(resolver.is_external("windows.h"));
+        assert!(resolver.is_external("GL/gl.h"));
+        assert!(resolver.is_external("pthread.h"));
+        assert!(resolver.is_external("unistd.h"));
+    }
+
+    #[test]
+    fn test_cpp_resolver_not_external_project_header() {
+        let resolver = CppResolver;
+        assert!(!resolver.is_external("myutils.h"));
+        assert!(!resolver.is_external("helpers.h"));
+        assert!(!resolver.is_external("internal/config.h"));
+        assert!(!resolver.is_external("project_types.h"));
+        assert!(!resolver.is_external("myclass.hpp"));
+    }
+
+    #[test]
+    fn test_cpp_resolver_empty_module_name() {
+        let resolver = CppResolver;
+        assert!(!resolver.is_external(""));
+    }
+
+    #[test]
+    fn test_cpp_resolver_language() {
+        let resolver = CppResolver;
+        assert_eq!(resolver.language(), "c");
+    }
+
+    #[test]
+    fn test_cpp_resolver_file_to_module_name() {
+        let resolver = CppResolver;
+        assert_eq!(
+            resolver.file_to_module_name("src/foo.h", Path::new(".")),
+            Some("foo.h".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("include/bar.hpp", Path::new(".")),
+            Some("bar.hpp".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("src/test.c", Path::new(".")),
+            Some("test.c".to_string())
+        );
+        // Non-C/C++ files return None
+        assert_eq!(
+            resolver.file_to_module_name("src/foo.py", Path::new(".")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_cpp_resolver_resolve_module_empty_index() {
+        let resolver = CppResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "myutils.h",
+            "src/main.c",
+            Path::new("."),
+            &index,
+        );
+        // Should return empty since ModuleIndex is empty
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_cpp_resolver_resolve_module_with_source_dir_candidate() {
+        let resolver = CppResolver;
+        let index = ModuleIndex::empty();
+        let candidates = resolver.resolve_module(
+            "myutils.h",
+            "src/main.c",
+            Path::new("."),
+            &index,
+        );
+        // Empty index → no candidates found
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_language_registry_get_c() {
+        let r = LanguageRegistry::get("c");
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().language(), "c");
+    }
+
+    #[test]
+    fn test_language_registry_get_cpp() {
+        let r = LanguageRegistry::get("cpp");
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().language(), "c");
+    }
+
+    #[test]
+    fn test_language_registry_get_c_plus_plus() {
+        let r = LanguageRegistry::get("c++");
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().language(), "c");
+    }
+
+    #[test]
+    fn test_supported_languages_includes_c_and_cpp() {
+        let langs = LanguageRegistry::supported_languages();
+        assert!(langs.contains(&"c"));
+        assert!(langs.contains(&"cpp"));
+    }
+
+    #[test]
+    fn test_is_cpp_external_mixed_case_paths() {
+        // Check that various common system headers are external
+        assert!(is_cpp_external("stdio.h"));
+        assert!(is_cpp_external("iostream"));
+        assert!(is_cpp_external("cstring"));
+        assert!(is_cpp_external("sys/socket.h"));
+        assert!(is_cpp_external("unistd.h"));
+        assert!(is_cpp_external("fcntl.h"));
+        // Project headers are NOT external
+        assert!(!is_cpp_external("myapp.h"));
+        assert!(!is_cpp_external("lib/helpers.h"));
+    }
+
+    #[test]
+    fn test_is_cpp_external_vulkan_gl() {
+        assert!(is_cpp_external("vulkan/vulkan.h"));
+        assert!(is_cpp_external("GL/gl.h"));
+        assert!(is_cpp_external("GL/glew.h"));
     }
 }
