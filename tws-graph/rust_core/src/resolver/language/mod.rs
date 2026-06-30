@@ -32,13 +32,14 @@ impl LanguageRegistry {
             "lua" => Some(Box::new(LuaResolver)),
             "bash" => Some(Box::new(BashResolver)),
             "groovy" => Some(Box::new(GroovyResolver)),
+            "zig" => Some(Box::new(ZigResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift", "lua", "bash", "groovy"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "scala", "go", "rust", "php", "ruby", "c", "cpp", "csharp", "dart", "swift", "lua", "bash", "groovy", "zig"]
     }
 }
 
@@ -2794,6 +2795,169 @@ pub fn is_groovy_external(module_name: &str) -> bool {
     is_java_external(module_name)
 }
 
+// ---------------------------------------------------------------------------
+// Zig module resolver (Stage 17)
+// ---------------------------------------------------------------------------
+
+/// Zig module resolver.
+///
+/// Handles the `@import` system:
+/// - File imports: `@import("foo.zig")`, `@import("subdir/bar.zig")`
+/// - Relative imports: `@import("../baz.zig")`
+/// - Standard library: `@import("std")` — classified as external
+/// - Builtins: `@import("builtin")` — classified as external
+///
+/// Module names are file paths relative to the project root
+/// (e.g. `"utils.zig"`, `"subdir/bar.zig"`).
+pub struct ZigResolver;
+
+impl ModuleResolver for ZigResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        if module_name.is_empty() {
+            return Vec::new();
+        }
+
+        // 1. Direct ModuleIndex lookup by module name
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Try with common source root prefixes
+        for prefix in &["", "src.", "lib."] {
+            let candidate = format!("{}{}", prefix, module_name);
+            if let Some(files) = module_index.lookup(&candidate) {
+                return files.clone();
+            }
+        }
+
+        // 3. Resolve relative to source file directory.
+        //    Zig @import paths are relative to the importing file.
+        let source_dir = Path::new(source_file)
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or(".");
+
+        // Try the import path as-is from the source file directory
+        let resolved = if source_dir.is_empty() || source_dir == "." {
+            module_name.to_string()
+        } else {
+            Path::new(source_dir)
+                .join(module_name)
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+
+        // Ensure .zig extension
+        let resolved_with_ext = if resolved.ends_with(".zig") {
+            resolved
+        } else {
+            format!("{}.zig", resolved)
+        };
+
+        // Normalize the path (handle .. etc.)
+        let normalized = simplify_zig_path(&resolved_with_ext);
+
+        // Check if the normalized path exists in ModuleIndex
+        if let Some(files) = module_index.lookup(&normalized) {
+            return files.clone();
+        }
+
+        // Try with common prefixes (src/, lib/)
+        for prefix in &["src/", "lib/", ""] {
+            let candidate = format!("{}{}", prefix, normalized);
+            if let Some(files) = module_index.lookup(&candidate) {
+                return files.clone();
+            }
+        }
+
+        // Generate candidate file paths as fallback
+        let mut candidates = Vec::new();
+        for prefix in &["src/", "lib/", ""] {
+            candidates.push(format!("{}{}", prefix, normalized));
+        }
+
+        candidates
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "zig")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_zig_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "zig"
+    }
+}
+
+/// Check if a module name is a known Zig standard library or builtin.
+///
+/// Zig has a small standard library.  Module names without `.zig` extension
+/// that match known stdlib/module names are classified as external.
+pub fn is_zig_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    // If it has a file extension like .zig, it's a local file import
+    if module_name.ends_with(".zig") || module_name.contains('/') {
+        return false;
+    }
+
+    // Zig standard library / builtin modules
+    let zig_stdlib: &[&str] = &[
+        "std",
+        "builtin",
+        "root",
+        "@This",
+    ];
+
+    if zig_stdlib.contains(&module_name) {
+        return true;
+    }
+
+    // Zig standard library sub-modules accessed via @import
+    // These always start with "std."
+    if module_name.starts_with("std.") {
+        return true;
+    }
+
+    false
+}
+
+/// Simplify a Zig file path by resolving `.` and `..` segments.
+fn simplify_zig_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let parts: Vec<&str> = normalized.split('/').collect();
+    let mut stack: Vec<&str> = Vec::new();
+
+    for part in parts {
+        match part {
+            "." | "" => continue,
+            ".." => {
+                stack.pop();
+            }
+            _ => {
+                stack.push(part);
+            }
+        }
+    }
+
+    stack.join("/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5085,5 +5249,181 @@ mod tests {
     fn test_supported_languages_includes_groovy() {
         let langs = LanguageRegistry::supported_languages();
         assert!(langs.contains(&"groovy"), "Expected 'groovy' in supported languages, got: {:?}", langs);
+    }
+
+    // ------------------------------------------------------------------
+    // Zig resolver tests (Stage 17)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_zig_resolver_language() {
+        let resolver = ZigResolver;
+        assert_eq!(resolver.language(), "zig");
+    }
+
+    #[test]
+    fn test_zig_resolver_is_external_stdlib() {
+        let resolver = ZigResolver;
+        assert!(resolver.is_external("std"));
+        assert!(resolver.is_external("builtin"));
+        assert!(resolver.is_external("root"));
+        assert!(resolver.is_external("std.mem"));
+        assert!(resolver.is_external("std.fs"));
+    }
+
+    #[test]
+    fn test_zig_resolver_not_external_file_imports() {
+        let resolver = ZigResolver;
+        // File-based imports are not external
+        assert!(!resolver.is_external("utils.zig"));
+        assert!(!resolver.is_external("subdir/bar.zig"));
+        assert!(!resolver.is_external("foo/bar.zig"));
+        assert!(!resolver.is_external("../baz.zig"));
+    }
+
+    #[test]
+    fn test_zig_resolver_is_external_empty() {
+        let resolver = ZigResolver;
+        assert!(!resolver.is_external(""));
+    }
+
+    #[test]
+    fn test_zig_resolver_resolve_relative_to_source_file() {
+        // ModuleIndex: src/utils.zig → "utils"
+        let mut index = ModuleIndex::empty();
+        index.insert("utils", "src/utils.zig".to_string());
+
+        let resolver = ZigResolver;
+        // When importing "utils.zig" from src/main.zig,
+        // the source_dir is "src", so resolved becomes "src/utils.zig"
+        let candidates = resolver.resolve_module(
+            "utils.zig",
+            "src/main.zig",
+            Path::new("."),
+            &index,
+        );
+        // Should find via ModuleIndex lookup of "utils"
+        assert!(
+            candidates.contains(&"src/utils.zig".to_string()),
+            "Expected to find src/utils.zig, got: {:?}", candidates
+        );
+    }
+
+    #[test]
+    fn test_zig_resolver_resolve_module_by_name() {
+        // ModuleIndex maps "foo.bar" → "src/foo/bar.zig"
+        let mut index = ModuleIndex::empty();
+        index.insert("foo.bar", "src/foo/bar.zig".to_string());
+
+        let resolver = ZigResolver;
+        let candidates = resolver.resolve_module(
+            "foo.bar",
+            "src/main.zig",
+            Path::new("."),
+            &index,
+        );
+        assert!(
+            candidates.contains(&"src/foo/bar.zig".to_string()),
+            "Expected to find src/foo/bar.zig, got: {:?}", candidates
+        );
+    }
+
+    #[test]
+    fn test_zig_resolver_resolve_empty_module() {
+        let index = ModuleIndex::empty();
+        let resolver = ZigResolver;
+        let candidates = resolver.resolve_module(
+            "",
+            "src/main.zig",
+            Path::new("."),
+            &index,
+        );
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_zig_resolver_resolve_subdir_import() {
+        // When importing "subdir/bar.zig" from src/main.zig
+        let mut index = ModuleIndex::empty();
+        index.insert("subdir.bar", "src/subdir/bar.zig".to_string());
+
+        let resolver = ZigResolver;
+        let candidates = resolver.resolve_module(
+            "subdir/bar.zig",
+            "src/main.zig",
+            Path::new("."),
+            &index,
+        );
+        // Should find via source_dir resolution: src/subdir/bar.zig
+        // Then ModuleIndex lookup of "subdir.bar" should find it
+        assert!(
+            !candidates.is_empty(),
+            "Expected to find subdir/bar.zig, got: {:?}", candidates
+        );
+    }
+
+    #[test]
+    fn test_zig_resolver_file_to_module_name() {
+        let resolver = ZigResolver;
+        assert_eq!(
+            resolver.file_to_module_name("src/main.zig", Path::new(".")),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("src/utils.zig", Path::new(".")),
+            Some("utils".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("src/foo/bar.zig", Path::new(".")),
+            Some("foo.bar".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("src/main.py", Path::new(".")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_language_registry_get_zig() {
+        let r = LanguageRegistry::get("zig");
+        assert!(r.is_some(), "Expected ZigResolver to be registered");
+        assert_eq!(r.unwrap().language(), "zig");
+    }
+
+    #[test]
+    fn test_supported_languages_includes_zig() {
+        let langs = LanguageRegistry::supported_languages();
+        assert!(langs.contains(&"zig"), "Expected 'zig' in supported languages, got: {:?}", langs);
+    }
+
+    #[test]
+    fn test_is_zig_external_function() {
+        assert!(is_zig_external("std"));
+        assert!(is_zig_external("builtin"));
+        assert!(is_zig_external("root"));
+        assert!(is_zig_external("std.mem"));
+        assert!(is_zig_external("std.fs.path"));
+        assert!(!is_zig_external("utils.zig"));
+        assert!(!is_zig_external("foo/bar.zig"));
+        assert!(!is_zig_external("my_project"));
+        assert!(!is_zig_external(""));
+    }
+
+    #[test]
+    fn test_simplify_zig_path_basic() {
+        assert_eq!(simplify_zig_path("src/utils.zig"), "src/utils.zig");
+        assert_eq!(simplify_zig_path("src/foo/bar.zig"), "src/foo/bar.zig");
+    }
+
+    #[test]
+    fn test_simplify_zig_path_with_dot_dot() {
+        assert_eq!(simplify_zig_path("src/foo/../utils.zig"), "src/utils.zig");
+        assert_eq!(simplify_zig_path("src/foo/bar/../../baz.zig"), "src/baz.zig");
+    }
+
+    #[test]
+    fn test_simplify_zig_path_with_dot() {
+        assert_eq!(simplify_zig_path("src/./utils.zig"), "src/utils.zig");
+        assert_eq!(simplify_zig_path("./utils.zig"), "utils.zig");
     }
 }

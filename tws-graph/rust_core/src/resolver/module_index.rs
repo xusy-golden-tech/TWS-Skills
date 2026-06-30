@@ -101,6 +101,7 @@ impl ModuleIndex {
 /// | Scala        | `src/com/foo/Bar.scala` → `com.foo.Bar`                       |
 /// | Go           | `pkg/foo/bar.go` → `foo` (parent directory = package name)  |
 /// | Rust         | `src/foo/bar.rs` → `foo::bar`, `src/foo/mod.rs` → `foo`    |
+/// | Zig          | `src/foo.zig` → `foo`, `src/foo/bar.zig` → `foo.bar`          |
 pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
     match language {
         "python" => infer_python_module(file_path),
@@ -119,6 +120,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "lua" => infer_lua_module(file_path),
         "groovy" => infer_groovy_module(file_path),
         "bash" => infer_bash_module(file_path),
+        "zig" => infer_zig_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -993,6 +995,58 @@ fn infer_bash_module(file_path: &str) -> Option<String> {
 
 /// Strip common Bash source root prefixes from a path.
 fn strip_bash_source_root(path: &str) -> String {
+    let prefixes = &["src/", "lib/"];
+    for prefix in prefixes {
+        if path.starts_with(prefix) {
+            return path[prefix.len()..].to_string();
+        }
+    }
+    path.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Zig module name inference (Stage 17)
+// ---------------------------------------------------------------------------
+
+/// Zig module name inference.
+///
+/// Rules:
+/// 1. Only handle `.zig` files.
+/// 2. Strip the `.zig` extension.
+/// 3. Strip common source root prefixes (`src/`, `lib/`).
+/// 4. Replace path separators with dots.
+///
+/// Examples:
+/// - `src/main.zig` → `main`
+/// - `src/utils.zig` → `utils`
+/// - `src/foo/bar.zig` → `foo.bar`
+/// - `lib/my_module.zig` → `my_module`
+fn infer_zig_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle .zig files
+    if !path.ends_with(".zig") {
+        return None;
+    }
+
+    // Strip .zig extension
+    let without_ext = &path[..path.len() - 4];
+
+    // Strip common source root prefixes
+    let stripped = strip_zig_source_root(without_ext);
+
+    // Replace / with . for Zig module convention
+    let module = stripped.replace('/', ".");
+
+    if module.is_empty() {
+        None
+    } else {
+        Some(module)
+    }
+}
+
+/// Strip common Zig source root prefixes.
+fn strip_zig_source_root(path: &str) -> String {
     let prefixes = &["src/", "lib/"];
     for prefix in prefixes {
         if path.starts_with(prefix) {
@@ -2113,5 +2167,76 @@ mod tests {
     fn test_strip_groovy_source_root() {
         assert_eq!(strip_groovy_source_root("com/foo/bar"), "com/foo/bar");
         assert_eq!(strip_groovy_source_root("scripts/deploy"), "scripts/deploy");
+    }
+
+    // ------------------------------------------------------------------
+    // Zig module name inference (Stage 17)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_zig_module_src() {
+        assert_eq!(
+            infer_module_name("src/main.zig", "zig"),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/utils.zig", "zig"),
+            Some("utils".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_zig_module_lib() {
+        assert_eq!(
+            infer_module_name("lib/my_module.zig", "zig"),
+            Some("my_module".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_zig_module_nested() {
+        assert_eq!(
+            infer_module_name("src/foo/bar.zig", "zig"),
+            Some("foo.bar".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/models/user.zig", "zig"),
+            Some("models.user".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_zig_module_no_prefix() {
+        assert_eq!(
+            infer_module_name("main.zig", "zig"),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            infer_module_name("foo/bar.zig", "zig"),
+            Some("foo.bar".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_zig_module_non_zig() {
+        assert_eq!(infer_module_name("src/foo.py", "zig"), None);
+        assert_eq!(infer_module_name("src/foo.java", "zig"), None);
+        assert_eq!(infer_module_name("src/foo.rs", "zig"), None);
+        assert_eq!(infer_module_name("src/foo.kt", "zig"), None);
+    }
+
+    #[test]
+    fn test_infer_zig_module_deep_nested() {
+        assert_eq!(
+            infer_module_name("src/features/auth/service.zig", "zig"),
+            Some("features.auth.service".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_zig_source_root() {
+        assert_eq!(strip_zig_source_root("src/foo"), "foo");
+        assert_eq!(strip_zig_source_root("lib/bar"), "bar");
+        assert_eq!(strip_zig_source_root("no_prefix"), "no_prefix");
     }
 }
