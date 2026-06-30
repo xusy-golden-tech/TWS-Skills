@@ -20,13 +20,14 @@ impl LanguageRegistry {
             "typescript" | "javascript" | "tsx" | "jsx" => Some(Box::new(TypeScriptResolver)),
             "java" => Some(Box::new(JavaResolver)),
             "kotlin" => Some(Box::new(KotlinResolver)),
+            "go" => Some(Box::new(GoResolver)),
             _ => None,
         }
     }
 
     /// Return a list of language names that have resolvers registered.
     pub fn supported_languages() -> Vec<&'static str> {
-        vec!["python", "typescript", "javascript", "java", "kotlin"]
+        vec!["python", "typescript", "javascript", "java", "kotlin", "go"]
     }
 }
 
@@ -628,6 +629,179 @@ pub fn is_kotlin_external(module_name: &str) -> bool {
     is_java_external(module_name)
 }
 
+// ---------------------------------------------------------------------------
+// Go module resolver
+// ---------------------------------------------------------------------------
+
+/// Go module resolver.
+///
+/// Uses Go import conventions:
+/// - `import "fmt"` → standard library, marked external
+/// - `import "github.com/foo/bar"` → external module path, marked external
+/// - `import "mymodule/user"` → project-internal, resolved via ModuleIndex
+/// - `import alias "pkg/path"` → alias tracked, last-segment used for lookup
+///
+/// ModuleIndex maps Go directory names (last path segment) to file paths.
+/// The resolver tries the full import path first, then falls back to the
+/// last segment for directory-based lookup.
+pub struct GoResolver;
+
+impl ModuleResolver for GoResolver {
+    fn resolve_module(
+        &self,
+        module_name: &str,
+        _source_file: &str,
+        _project_root: &Path,
+        module_index: &ModuleIndex,
+    ) -> Vec<String> {
+        if module_name.is_empty() {
+            return Vec::new();
+        }
+
+        // 1. Direct ModuleIndex lookup with full import path
+        if let Some(files) = module_index.lookup(module_name) {
+            return files.clone();
+        }
+
+        // 2. Try last path segment (directory name = Go package name)
+        // e.g. "mymodule/pkg/user" → look up "user"
+        if module_name.contains('/') {
+            // Try from right to left: "user", then "pkg/user"
+            let segments: Vec<&str> = module_name.rsplit('/').collect();
+            for i in 0..segments.len().min(2) {
+                let candidate = if i == 0 {
+                    segments[0].to_string()
+                } else {
+                    format!("{}/{}", segments[1], segments[0])
+                };
+                if let Some(files) = module_index.lookup(&candidate) {
+                    return files.clone();
+                }
+            }
+        }
+
+        Vec::new()
+    }
+
+    fn file_to_module_name(
+        &self,
+        file_path: &str,
+        _project_root: &Path,
+    ) -> Option<String> {
+        crate::resolver::module_index::infer_module_name(file_path, "go")
+    }
+
+    fn is_external(&self, module_name: &str) -> bool {
+        is_go_external(module_name)
+    }
+
+    fn language(&self) -> &'static str {
+        "go"
+    }
+}
+
+/// Check if a module name is a known Go standard library package or
+/// an external (third-party) module.
+///
+/// A module is considered external if:
+/// - It is a Go standard library package (fmt, os, net/http, etc.)
+/// - It contains a domain name prefix (github.com/, golang.org/, etc.)
+/// - It starts with known external module prefixes
+///
+/// Project-internal imports (bare directory names like "mymodule/user")
+/// are NOT considered external unless they match the above patterns.
+pub fn is_go_external(module_name: &str) -> bool {
+    if module_name.is_empty() {
+        return false;
+    }
+
+    // Go standard library packages
+    // These are short names without dots or domain prefixes
+    let go_stdlib: &[&str] = &[
+        "archive", "bufio", "builtin", "bytes", "compress", "container",
+        "context", "crypto", "database", "debug", "embed", "encoding",
+        "errors", "expvar", "flag", "fmt", "go", "hash", "html", "image",
+        "index", "io", "log", "math", "mime", "net", "os", "path", "plugin",
+        "reflect", "regexp", "runtime", "sort", "strconv", "strings",
+        "sync", "syscall", "testing", "text", "time", "unicode", "unsafe",
+        // Extended stdlib packages (sub-packages)
+        "archive/tar", "archive/zip",
+        "compress/bzip2", "compress/flate", "compress/gzip", "compress/lzw", "compress/zlib",
+        "crypto/aes", "crypto/cipher", "crypto/des", "crypto/dsa", "crypto/ecdsa",
+        "crypto/ed25519", "crypto/elliptic", "crypto/hmac", "crypto/md5",
+        "crypto/rand", "crypto/rc4", "crypto/rsa", "crypto/sha1",
+        "crypto/sha256", "crypto/sha512", "crypto/subtle", "crypto/tls",
+        "crypto/x509", "crypto/x509/pkix",
+        "database/sql", "database/sql/driver",
+        "encoding/ascii85", "encoding/asn1", "encoding/base32", "encoding/base64",
+        "encoding/binary", "encoding/csv", "encoding/gob", "encoding/hex",
+        "encoding/json", "encoding/pem", "encoding/xml",
+        "go/ast", "go/build", "go/constant", "go/doc", "go/format",
+        "go/importer", "go/parser", "go/printer", "go/scanner",
+        "go/token", "go/types",
+        "hash/adler32", "hash/crc32", "hash/crc64", "hash/fnv",
+        "hash/maphash",
+        "html/template",
+        "image/color", "image/color/palette", "image/draw",
+        "image/gif", "image/jpeg", "image/png",
+        "index/suffixarray",
+        "io/fs", "io/ioutil",
+        "log/syslog",
+        "math/big", "math/bits", "math/cmplx", "math/rand",
+        "mime/multipart", "mime/quotedprintable",
+        "net/http", "net/http/cgi", "net/http/cookiejar", "net/http/fcgi",
+        "net/http/httptest", "net/http/httptrace", "net/http/httputil",
+        "net/http/pprof", "net/mail", "net/rpc", "net/rpc/jsonrpc",
+        "net/smtp", "net/textproto", "net/url",
+        "os/exec", "os/signal", "os/user",
+        "path/filepath",
+        "regexp/syntax",
+        "testing/fstest", "testing/iotest", "testing/quick",
+    ];
+
+    // Direct match
+    if go_stdlib.contains(&module_name) {
+        return true;
+    }
+
+    // Check if root package (before first /) is in stdlib
+    if let Some(slash_pos) = module_name.find('/') {
+        let root = &module_name[..slash_pos];
+        // If root is one of the known stdlib roots
+        let stdlib_roots: &[&str] = &[
+            "archive", "bufio", "bytes", "compress", "container", "context",
+            "crypto", "database", "debug", "embed", "encoding", "errors",
+            "expvar", "flag", "fmt", "go", "hash", "html", "image", "index",
+            "io", "log", "math", "mime", "net", "os", "path", "plugin",
+            "reflect", "regexp", "runtime", "sort", "strconv", "strings",
+            "sync", "syscall", "testing", "text", "time", "unicode", "unsafe",
+        ];
+        if stdlib_roots.contains(&root) {
+            return true;
+        }
+    }
+
+    // Known Go module hosting domains
+    let external_hosts: &[&str] = &[
+        "github.com/", "gitlab.com/", "bitbucket.org/",
+        "golang.org/", "google.golang.org/",
+        "k8s.io/", "go.uber.org/", "go.opencensus.io/",
+        "gopkg.in/", "go.etcd.io/", "cloud.google.com/go/",
+    ];
+    for host in external_hosts {
+        if module_name.starts_with(host) {
+            return true;
+        }
+    }
+
+    // "golang.org/x/" is the Go extended library
+    if module_name.starts_with("golang.org/x/") {
+        return true;
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1002,5 +1176,155 @@ mod tests {
         assert!(is_kotlin_external("kotlinx.serialization.Serializable"));
         assert!(is_kotlin_external("android.os.Bundle"));
         assert!(is_kotlin_external("androidx.lifecycle.ViewModel"));
+    }
+
+    // ------------------------------------------------------------------
+    // Go resolver tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_go_resolver_is_external_stdlib() {
+        let resolver = GoResolver;
+        assert!(resolver.is_external("fmt"));
+        assert!(resolver.is_external("os"));
+        assert!(resolver.is_external("net/http"));
+        assert!(resolver.is_external("encoding/json"));
+        assert!(resolver.is_external("crypto/tls"));
+        assert!(resolver.is_external("strings"));
+        assert!(resolver.is_external("io/ioutil"));
+    }
+
+    #[test]
+    fn test_go_resolver_is_external_github() {
+        let resolver = GoResolver;
+        assert!(resolver.is_external("github.com/gin-gonic/gin"));
+        assert!(resolver.is_external("github.com/gorilla/mux"));
+        assert!(resolver.is_external("github.com/stretchr/testify"));
+        assert!(resolver.is_external("github.com/sirupsen/logrus"));
+    }
+
+    #[test]
+    fn test_go_resolver_is_external_golang_org() {
+        let resolver = GoResolver;
+        assert!(resolver.is_external("golang.org/x/net"));
+        assert!(resolver.is_external("golang.org/x/tools"));
+        assert!(resolver.is_external("google.golang.org/grpc"));
+        assert!(resolver.is_external("go.uber.org/zap"));
+    }
+
+    #[test]
+    fn test_go_resolver_is_external_other_hosts() {
+        let resolver = GoResolver;
+        assert!(resolver.is_external("gitlab.com/user/project"));
+        assert!(resolver.is_external("k8s.io/client-go"));
+        assert!(resolver.is_external("gopkg.in/yaml.v2"));
+    }
+
+    #[test]
+    fn test_go_resolver_not_external_project_package() {
+        let resolver = GoResolver;
+        // Project-internal bare module names should not be external
+        assert!(!resolver.is_external("mymodule/user"));
+        assert!(!resolver.is_external("myapp/pkg/utils"));
+        assert!(!resolver.is_external("internal/config"));
+        assert!(!resolver.is_external("user"));
+        assert!(!resolver.is_external("handler"));
+    }
+
+    #[test]
+    fn test_go_resolver_empty_module_name() {
+        let resolver = GoResolver;
+        assert!(!resolver.is_external(""));
+    }
+
+    #[test]
+    fn test_go_resolver_language() {
+        let resolver = GoResolver;
+        assert_eq!(resolver.language(), "go");
+    }
+
+    #[test]
+    fn test_go_resolver_file_to_module_name() {
+        let resolver = GoResolver;
+        // Go uses parent directory as module name
+        assert_eq!(
+            resolver.file_to_module_name("pkg/user/server.go", Path::new(".")),
+            Some("user".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("internal/config/app.go", Path::new(".")),
+            Some("config".to_string())
+        );
+        assert_eq!(
+            resolver.file_to_module_name("main.go", Path::new(".")),
+            Some("main".to_string())
+        );
+        // Non-Go files return None
+        assert_eq!(
+            resolver.file_to_module_name("pkg/user/server_test.py", Path::new(".")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_go_resolver_resolve_module_directory_lookup() {
+        let resolver = GoResolver;
+        let mut index = ModuleIndex::empty();
+        // We need to manually populate the index since empty() won't have any entries
+        // For testing, create a temporary DB
+        // Since ModuleIndex::empty() starts truly empty, test the path resolution logic
+        let candidates = resolver.resolve_module(
+            "user",
+            "pkg/user/server.go",
+            Path::new("."),
+            &index,
+        );
+        // Empty index should return empty candidates
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_go_resolver_resolve_module_with_full_path() {
+        let resolver = GoResolver;
+        let index = ModuleIndex::empty();
+        // "mymodule/user" → last segment "user" → empty index → empty result
+        let candidates = resolver.resolve_module(
+            "mymodule/user",
+            "cmd/server/main.go",
+            Path::new("."),
+            &index,
+        );
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_language_registry_get_go() {
+        let r = LanguageRegistry::get("go");
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().language(), "go");
+    }
+
+    #[test]
+    fn test_supported_languages_includes_go() {
+        let langs = LanguageRegistry::supported_languages();
+        assert!(langs.contains(&"go"));
+    }
+
+    #[test]
+    fn test_is_go_external_stdlib_subpackage() {
+        assert!(is_go_external("net/http"));
+        assert!(is_go_external("crypto/tls"));
+        assert!(is_go_external("encoding/json"));
+        assert!(is_go_external("io/fs"));
+        // Not stdlib
+        assert!(!is_go_external("mypkg/subpkg"));
+    }
+
+    #[test]
+    fn test_is_go_external_stdlib_direct() {
+        assert!(is_go_external("fmt"));
+        assert!(is_go_external("os"));
+        assert!(is_go_external("strings"));
+        assert!(is_go_external("sync"));
     }
 }

@@ -91,7 +91,7 @@ impl ModuleIndex {
 /// |              | `src/foo/bar/__init__.py` → `foo.bar`                        |
 /// | TypeScript   | `src/foo/bar.ts` → `src/foo/bar` (relative path, stripped ext)|
 /// | Java         | `src/com/foo/Bar.java` → `com.foo.Bar`                       |
-/// | Go           | `pkg/foo/bar.go` → `foo` (package name, not implemented yet) |
+/// | Go           | `pkg/foo/bar.go` → `foo` (parent directory = package name)  |
 /// | Rust         | crate-based, not implemented yet                             |
 pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
     match language {
@@ -99,6 +99,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "typescript" | "javascript" | "tsx" | "jsx" => infer_typescript_module(file_path),
         "java" => infer_java_module(file_path),
         "kotlin" => infer_kotlin_module(file_path),
+        "go" => infer_go_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -304,6 +305,52 @@ fn strip_kotlin_source_root(path: &str) -> String {
     path.to_string()
 }
 
+/// Go module name inference.
+///
+/// Rules:
+/// 1. Only handle `.go` files.
+/// 2. Use the parent directory name as the module name (Go convention:
+///    directory name = package name).
+/// 3. For root-level `.go` files, use `main` (the common top-level package).
+///
+/// Examples:
+/// - `pkg/user/server.go` → `user`
+/// - `internal/config/app.go` → `config`
+/// - `main.go` → `main`
+/// - `cmd/server/main.go` → `server`
+fn infer_go_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle .go files
+    if !path.ends_with(".go") {
+        return None;
+    }
+
+    // Strip .go extension → "pkg/user/server"
+    let without_ext = &path[..path.len() - 3];
+
+    // Get the directory part (strip filename)
+    // For "pkg/user/server" → directory = "pkg/user"
+    // For "main" → no directory (root level)
+    let dir_path = if let Some(slash_pos) = without_ext.rfind('/') {
+        &without_ext[..slash_pos]
+    } else {
+        // Root-level .go file (no parent directory)
+        return Some("main".to_string());
+    };
+
+    // Get the parent directory name (last segment of directory path)
+    // For "pkg/user" → "user"
+    // For "cmd/server" → "server"
+    let module_name = if let Some(last_slash) = dir_path.rfind('/') {
+        dir_path[last_slash + 1..].to_string()
+    } else {
+        dir_path.to_string()
+    };
+
+    Some(module_name)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -393,7 +440,10 @@ mod tests {
 
     #[test]
     fn test_infer_module_unknown_lang_graceful() {
-        assert_eq!(infer_module_name("src/foo/bar.go", "go"), None);
+        // Go is now supported — should return the parent directory
+        assert_eq!(infer_module_name("src/foo/bar.go", "go"), Some("foo".to_string()));
+        // Still unknown languages should return None
+        assert_eq!(infer_module_name("src/foo/bar.rs", "rust"), None);
     }
 
     // ------------------------------------------------------------------
@@ -606,5 +656,48 @@ mod tests {
         assert!(utils_files.contains(&"src/pkg/utils.py".to_string()));
 
         cleanup(&path);
+    }
+
+    // ------------------------------------------------------------------
+    // Go module name inference
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_go_module_basic() {
+        assert_eq!(
+            infer_module_name("pkg/user/server.go", "go"),
+            Some("user".to_string())
+        );
+        assert_eq!(
+            infer_module_name("internal/config/app.go", "go"),
+            Some("config".to_string())
+        );
+        assert_eq!(
+            infer_module_name("cmd/server/main.go", "go"),
+            Some("server".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_go_module_root_file() {
+        assert_eq!(
+            infer_module_name("main.go", "go"),
+            Some("main".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_go_module_non_go() {
+        assert_eq!(infer_module_name("pkg/user/server.py", "go"), None);
+        assert_eq!(infer_module_name("pkg/user/server.java", "go"), None);
+        assert_eq!(infer_module_name("pkg/user/server.ts", "go"), None);
+    }
+
+    #[test]
+    fn test_infer_go_module_nested() {
+        assert_eq!(
+            infer_module_name("services/api/handler/health.go", "go"),
+            Some("handler".to_string())
+        );
     }
 }

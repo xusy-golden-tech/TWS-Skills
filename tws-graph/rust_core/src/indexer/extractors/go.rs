@@ -99,12 +99,16 @@ impl Extractor for GoExtractor {
 struct Walker {
     /// Stack of type/struct names for contextual resolution.
     type_stack: Vec<String>,
+    /// Maps import alias or last-segment name → full import path.
+    /// E.g. "fmt" → "fmt", "user" → "mymodule/user", "myalias" → "github.com/foo/bar"
+    imported_names: HashMap<String, String>,
 }
 
 impl Walker {
     fn new() -> Self {
         Self {
             type_stack: Vec::new(),
+            imported_names: HashMap::new(),
         }
     }
 
@@ -709,7 +713,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_import(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -722,35 +726,13 @@ impl Walker {
             if let Some(child) = node.named_child(i) {
                 match child.kind() {
                     "import_spec" => {
-                        let import_path = extract_import_path(source, child);
-                        if !import_path.is_empty() {
-                            let target_qn = build_qualified_target(&ctx.file_path, &import_path);
-                            let target = hash_id(&ctx.file_path, &target_qn);
-                            ctx.add_edge(
-                                parent_id,
-                                &target,
-                                EdgeKind::Imports,
-                                line,
-                                Some(&import_path),
-                            );
-                        }
+                        self.process_import_spec(source, child, ctx, parent_id, line)?;
                     }
                     "import_spec_list" => {
                         for j in 0..child.named_child_count() {
                             if let Some(spec) = child.named_child(j) {
                                 if spec.kind() == "import_spec" {
-                                    let import_path = extract_import_path(source, spec);
-                                    if !import_path.is_empty() {
-                                        let target_qn = build_qualified_target(&ctx.file_path, &import_path);
-                                        let target = hash_id(&ctx.file_path, &target_qn);
-                                        ctx.add_edge(
-                                            parent_id,
-                                            &target,
-                                            EdgeKind::Imports,
-                                            line,
-                                            Some(&import_path),
-                                        );
-                                    }
+                                    self.process_import_spec(source, spec, ctx, parent_id, line)?;
                                 }
                             }
                         }
@@ -759,6 +741,65 @@ impl Walker {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Process a single import_spec: extract alias/name, path, create IMPORTS
+    /// and REFERENCES edges, and populate imported_names.
+    fn process_import_spec(
+        &mut self,
+        source: &[u8],
+        node: Node,
+        ctx: &mut ExtractionContext,
+        parent_id: &str,
+        line: u32,
+    ) -> anyhow::Result<()> {
+        let import_path = extract_import_path(source, node);
+        if import_path.is_empty() {
+            return Ok(());
+        }
+
+        // Extract alias name if present
+        let alias = extract_import_alias(source, node);
+
+        // Determine the local name for this import:
+        // - If alias is provided, use that
+        // - Otherwise use the last segment of the import path
+        let local_name = if !alias.is_empty() {
+            alias.clone()
+        } else {
+            import_path.rsplit('/').next().unwrap_or(&import_path).to_string()
+        };
+
+        // Track in imported_names: local_name → full import path
+        self.imported_names.insert(local_name.clone(), import_path.clone());
+
+        // Create IMPORTS edge
+        let target_qn = build_qualified_target(&ctx.file_path, &import_path);
+        let target = hash_id(&ctx.file_path, &target_qn);
+        ctx.add_edge(
+            parent_id,
+            &target,
+            EdgeKind::Imports,
+            line,
+            Some(&import_path),
+        );
+
+        // Create REFERENCES edge with target_text = "{import_path}::{local_name}"
+        // Uses :: separator so resolver can parse: module = import_path, symbol = local_name
+        // For external packages (e.g. "fmt"), is_external() will classify them correctly.
+        // For internal packages (e.g. "mymodule/user"), resolver can look up ModuleIndex.
+        let ref_target_text = format!("{}::{}", import_path, local_name);
+        let ref_target_qn = build_qualified_target(&ctx.file_path, &ref_target_text);
+        let ref_target = hash_id(&ctx.file_path, &ref_target_qn);
+        ctx.add_edge(
+            parent_id,
+            &ref_target,
+            EdgeKind::References,
+            line,
+            Some(&ref_target_text),
+        );
+
         Ok(())
     }
 
@@ -1002,29 +1043,51 @@ impl Walker {
                 "identifier" => {
                     let name = get_text(source, Some(function));
                     if !name.is_empty() && !is_go_builtin(&name) {
-                        let target_qn = build_qualified_target(&ctx.file_path, &name);
+                        // Check if this is an imported name (e.g. dot-import or
+                        // an alias that was brought in scope)
+                        let target_text = if let Some(full_path) = self.imported_names.get(&name) {
+                            let last_seg = full_path.rsplit('/').next().unwrap_or(full_path);
+                            format!("{}::{}", last_seg, name)
+                        } else {
+                            name.clone()
+                        };
+                        let target_qn = build_qualified_target(&ctx.file_path, &target_text);
                         let target = hash_id(&ctx.file_path, &target_qn);
                         ctx.add_edge(
                             parent_id,
                             &target,
                             EdgeKind::Calls,
                             line,
-                            Some(&name),
+                            Some(&target_text),
                         );
                     }
                 }
                 "selector_expression" => {
-                    // obj.method() — extract method name from field
+                    // pkg.Func() or obj.Method() — extract operand and field
                     let field_name = get_text(source, function.child_by_field_name("field"));
                     if !field_name.is_empty() && !is_go_builtin(&field_name) {
-                        let target_qn = build_qualified_target(&ctx.file_path, &field_name);
+                        // Check operand to see if it's an imported package
+                        let operand_name = get_text(source, function.child_by_field_name("operand"));
+                        let target_text = if !operand_name.is_empty() {
+                            if let Some(full_path) = self.imported_names.get(&operand_name) {
+                                // Cross-package call: pkg.Func() → qualify with package name
+                                let last_seg = full_path.rsplit('/').next().unwrap_or(full_path);
+                                format!("{}::{}", last_seg, field_name)
+                            } else {
+                                // Same-package or unknown: use bare field name
+                                field_name.clone()
+                            }
+                        } else {
+                            field_name.clone()
+                        };
+                        let target_qn = build_qualified_target(&ctx.file_path, &target_text);
                         let target = hash_id(&ctx.file_path, &target_qn);
                         ctx.add_edge(
                             parent_id,
                             &target,
                             EdgeKind::Calls,
                             line,
-                            Some(&field_name),
+                            Some(&target_text),
                         );
                     }
                 }
@@ -1147,6 +1210,44 @@ fn resolve_go_type_name(source: &[u8], node: Node) -> String {
         }
         _ => get_text(source, Some(node)),
     }
+}
+
+/// Extract the alias name from an import_spec, if any.
+/// For `import alias "path"`, returns "alias".
+/// For `import "path"`, returns empty string.
+fn extract_import_alias(source: &[u8], node: Node) -> String {
+    // The alias is in a package_identifier or "." child of import_spec
+    for i in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(i) {
+            match child.kind() {
+                "package_identifier" => return get_text(source, Some(child)),
+                "dot" => {
+                    // `.` alias means import everything into current scope
+                    // Return "." as the alias marker
+                    return ".".to_string();
+                }
+                "blank_identifier" => {
+                    // `_` alias means import for side effects only
+                    return "_".to_string();
+                }
+                _ => {}
+            }
+        }
+    }
+    // Check unnamed child for package_identifier (some tree-sitter versions
+    // don't mark it as named)
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if !child.is_named() {
+                // Skip unnamed syntax nodes
+                continue;
+            }
+            if child.kind() == "package_identifier" {
+                return get_text(source, Some(child));
+            }
+        }
+    }
+    String::new()
 }
 
 /// Extract the import path from an import_spec.
@@ -1636,6 +1737,168 @@ func main() {
 
         let classes = find_nodes(&ctx, NodeKind::Class);
         assert!(!classes.is_empty(), "Expected at least one struct");
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-file reference: import REFERENCES edges
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_import_creates_references_edge() {
+        let ctx = extract(
+            "package main\n\nimport \"fmt\"\n",
+            "src/main.go",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        // Should have a REFERENCES edge with "fmt::fmt" as target_text
+        assert!(
+            targets.contains(&"fmt::fmt"),
+            "Expected REFERENCES edge with target_text 'fmt::fmt', got: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_aliased_import_creates_references() {
+        let ctx = extract(
+            "package main\n\nimport myfmt \"fmt\"\n",
+            "src/main.go",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        // Should have REFERENCES edge with target_text containing alias
+        assert!(
+            targets.contains(&"fmt::myfmt"),
+            "Expected REFERENCES edge with target_text 'fmt::myfmt', got: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_multiple_imports_create_references() {
+        let ctx = extract(
+            "package main\n\nimport (\n    \"fmt\"\n    \"strings\"\n)\n",
+            "src/main.go",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"fmt::fmt"), "Expected 'fmt::fmt', got: {:?}", targets);
+        assert!(targets.contains(&"strings::strings"), "Expected 'strings::strings', got: {:?}", targets);
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-file reference: imported call qualification
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_imported_selector_call_uses_qualified_target() {
+        let ctx = extract(
+            r#"package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("hello")
+}
+"#,
+            "src/main.go",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        // fmt.Println should be qualified as "fmt::Println"
+        assert!(
+            targets.contains(&"fmt::Println"),
+            "Expected calls edge with target_text 'fmt::Println', got: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_selector_call_without_import_uses_bare_name() {
+        let ctx = extract(
+            r#"package main
+
+type Foo struct{}
+
+func (f *Foo) Bar() {}
+
+func main() {
+    f := &Foo{}
+    f.Bar()
+}
+"#,
+            "src/main.go",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        // f.Bar() should use bare name "Bar" (f is not an import)
+        assert!(
+            targets.contains(&"Bar"),
+            "Expected calls edge with target_text 'Bar', got: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_imported_nested_path_call_qualified() {
+        let ctx = extract(
+            r#"package main
+
+import "mymodule/pkg/user"
+
+func main() {
+    user.GetName()
+}
+"#,
+            "src/main.go",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        // user.GetName() should be qualified as "user::GetName"
+        assert!(
+            targets.contains(&"user::GetName"),
+            "Expected calls edge with target_text 'user::GetName', got: {:?}", targets
+        );
+    }
+
+    #[test]
+    fn test_aliased_import_call_uses_package_segment() {
+        let ctx = extract(
+            r#"package main
+
+import myhttp "net/http"
+
+func main() {
+    myhttp.ListenAndServe(":8080", nil)
+}
+"#,
+            "src/main.go",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls
+            .iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        // aliased import: myhttp → "net/http", call qualified as "http::ListenAndServe"
+        assert!(
+            targets.contains(&"http::ListenAndServe"),
+            "Expected calls edge with target_text 'http::ListenAndServe', got: {:?}", targets
+        );
     }
 
 }
