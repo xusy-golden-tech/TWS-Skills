@@ -13,7 +13,8 @@
 //! # Edge kinds produced
 //! - `calls`: function/method calls (including `self.method`, `module.func`)
 //! - `contains`: containment (file -> class -> method)
-//! - `imports`: import statements
+//! - `imports`: import statements (including relative imports resolved to absolute paths)
+//! - `references`: per-symbol import references from `from X import Y` (target_text = "X.Y")
 //! - `extends`: class inheritance
 //! - `implements`: metaclass=ABCMeta detection
 //! - `decorates`: decorator application
@@ -713,10 +714,17 @@ impl Walker {
         let line = node.start_position().row as u32 + 1;
         let module_node = node.child_by_field_name("module_name");
         let module_id = module_node.map(|m| m.id());
-        let module_name = get_text(source, module_node);
+        let raw_module_name = get_text(source, module_node);
+
+        // Resolve relative imports (e.g. ".foo", "..sibling") to absolute module paths
+        let module_name = if raw_module_name.starts_with('.') {
+            resolve_relative_import(&raw_module_name, &ctx.file_path)
+        } else {
+            raw_module_name
+        };
 
         if !module_name.is_empty() {
-            // 1. Module-level IMPORTS edge (existing logic)
+            // 1. Module-level IMPORTS edge
             let target_qn = format!("{}::{}", ctx.file_path, module_name);
             let target = hash_id(&ctx.file_path, &target_qn);
             ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&module_name));
@@ -990,6 +998,66 @@ impl Walker {
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+/// Resolve a Python relative import module name to its absolute dotted module path.
+///
+/// Python relative imports use leading dots to indicate the current and parent
+/// packages. For example, given a file at `src/pkg/subpkg/module.py`:
+/// - `.foo` → `pkg.subpkg.foo`
+/// - `..sibling` → `pkg.sibling`
+/// - `...grandparent` → `grandparent`
+///
+/// Non-relative names (no leading dot) are returned unchanged.
+fn resolve_relative_import(relative_name: &str, file_path: &str) -> String {
+    if !relative_name.starts_with('.') {
+        return relative_name.to_string();
+    }
+
+    let dots = relative_name.chars().take_while(|c| *c == '.').count();
+    let rest = &relative_name[dots..]; // remove leading dots
+
+    // Get directory of current file
+    let dir = std::path::Path::new(file_path)
+        .parent()
+        .unwrap_or(std::path::Path::new(""));
+    let dir_str = dir.to_str().unwrap_or("");
+
+    // Split into segments (both forward and backslashes)
+    let mut segments: Vec<&str> = dir_str
+        .split(&['/', '\\'][..])
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // N dots means go up N-1 levels:
+    // .foo   → 1 dot → pop 0 → stay in current dir, append foo
+    // ..foo  → 2 dots → pop 1 → go up one dir, append foo
+    // ...foo → 3 dots → pop 2 → go up two dirs, append foo
+    let pop_count = dots.saturating_sub(1);
+    for _ in 0..pop_count {
+        segments.pop();
+    }
+
+    if !rest.is_empty() {
+        segments.push(rest);
+    }
+
+    let module = segments.join(".");
+    strip_source_root_prefix(&module)
+}
+
+/// Strip common source root prefixes from a dotted module name.
+///
+/// Mirrors the logic in `resolver::module_index::strip_src_prefix`.
+/// Prefixes like `src.`, `lib.`, `test.`, `tests.` are not part of the
+/// Python package hierarchy — they are source directory conventions.
+fn strip_source_root_prefix(module: &str) -> String {
+    for prefix in &["src.", "lib.", "test.", "tests."] {
+        if module.starts_with(prefix) {
+            return module[prefix.len()..].to_string();
+        }
+    }
+    module.to_string()
+}
 
 /// Qualify a dotted chain (e.g. `mylib.helper`) by replacing the first segment
 /// with its imported qualified name if it exists in `imported_names`.
@@ -1624,5 +1692,159 @@ mod tests {
         let ctx = extract("# just a comment\n", "src/comments.py");
         let files = find_nodes(&ctx, NodeKind::File);
         assert_eq!(files.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Relative import resolution (resolve_relative_import)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_relative_import_dot_sibling() {
+        // .foo in src/pkg/subpkg/module.py → pkg.subpkg.foo
+        let result = resolve_relative_import(".foo", "src/pkg/subpkg/module.py");
+        assert_eq!(result, "pkg.subpkg.foo");
+    }
+
+    #[test]
+    fn test_resolve_relative_import_dotdot_sibling() {
+        // ..sibling in src/pkg/subpkg/module.py → pkg.sibling
+        let result = resolve_relative_import("..sibling", "src/pkg/subpkg/module.py");
+        assert_eq!(result, "pkg.sibling");
+    }
+
+    #[test]
+    fn test_resolve_relative_import_triple_dot() {
+        // ...grandparent in src/pkg/subpkg/module.py → grandparent
+        let result = resolve_relative_import("...grandparent", "src/pkg/subpkg/module.py");
+        assert_eq!(result, "grandparent");
+    }
+
+    #[test]
+    fn test_resolve_relative_import_dot_only() {
+        // . alone in src/pkg/module.py → pkg (current package)
+        let result = resolve_relative_import(".", "src/pkg/module.py");
+        assert_eq!(result, "pkg");
+    }
+
+    #[test]
+    fn test_resolve_relative_import_non_relative_passthrough() {
+        // Regular absolute import should pass through unchanged
+        let result = resolve_relative_import("os.path", "src/pkg/module.py");
+        assert_eq!(result, "os.path");
+    }
+
+    #[test]
+    fn test_resolve_relative_import_windows_path() {
+        // Should also work with Windows backslash paths
+        let result = resolve_relative_import("..sibling", r"src\pkg\subpkg\module.py");
+        assert_eq!(result, "pkg.sibling");
+    }
+
+    // ------------------------------------------------------------------
+    // Relative import from extractor integration
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_relative_import_dot() {
+        // from .foo import Bar → IMPORTS + REFERENCES with resolved absolute module
+        let ctx = extract(
+            "from .foo import Bar\n",
+            "src/pkg/subpkg/module.py",
+        );
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(
+            imports[0].target_text.as_deref().unwrap_or(""),
+            "pkg.subpkg.foo"
+        );
+
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].target_text.as_deref().unwrap_or(""),
+            "pkg.subpkg.foo.Bar"
+        );
+    }
+
+    #[test]
+    fn test_extract_relative_import_dotdot() {
+        // from ..sibling import Baz → IMPORTS + REFERENCES with resolved absolute module
+        let ctx = extract(
+            "from ..sibling import Baz\n",
+            "src/pkg/subpkg/module.py",
+        );
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(
+            imports[0].target_text.as_deref().unwrap_or(""),
+            "pkg.sibling"
+        );
+
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].target_text.as_deref().unwrap_or(""),
+            "pkg.sibling.Baz"
+        );
+    }
+
+    #[test]
+    fn test_extract_relative_import_with_alias() {
+        // from .foo import Bar as B → REFERENCES target_text = "pkg.subpkg.foo.Bar"
+        let ctx = extract(
+            "from .foo import Bar as B\n",
+            "src/pkg/subpkg/module.py",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].target_text.as_deref().unwrap_or(""),
+            "pkg.subpkg.foo.Bar"
+        );
+    }
+
+    #[test]
+    fn test_extract_relative_import_qualified_call() {
+        // Imported symbol from relative import should use qualified target_text in CALLS
+        let ctx = extract(
+            "from .utils import helper\ndef foo():\n    helper()\n",
+            "src/pkg/subpkg/module.py",
+        );
+        let refs = find_edges(&ctx, EdgeKind::References);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].target_text.as_deref().unwrap_or(""),
+            "pkg.subpkg.utils.helper"
+        );
+
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> =
+            calls.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(
+            targets.contains(&"pkg.subpkg.utils.helper"),
+            "Expected 'pkg.subpkg.utils.helper' in call targets: {:?}",
+            targets
+        );
+    }
+
+    #[test]
+    fn test_extract_non_relative_import_unaffected() {
+        // Non-relative imports should still work as before
+        let ctx = extract(
+            "from os.path import join\nfrom utils import helper\n",
+            "src/test.py",
+        );
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        assert_eq!(imports.len(), 2);
+        let targets: Vec<&str> =
+            imports.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(targets.contains(&"os.path"));
+        assert!(targets.contains(&"utils"));
+
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let ref_targets: Vec<&str> =
+            refs.iter().map(|e| e.target_text.as_deref().unwrap_or("")).collect();
+        assert!(ref_targets.contains(&"os.path.join"));
+        assert!(ref_targets.contains(&"utils.helper"));
     }
 }
