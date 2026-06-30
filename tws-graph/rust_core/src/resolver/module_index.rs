@@ -92,7 +92,7 @@ impl ModuleIndex {
 /// | TypeScript   | `src/foo/bar.ts` → `src/foo/bar` (relative path, stripped ext)|
 /// | Java         | `src/com/foo/Bar.java` → `com.foo.Bar`                       |
 /// | Go           | `pkg/foo/bar.go` → `foo` (parent directory = package name)  |
-/// | Rust         | crate-based, not implemented yet                             |
+/// | Rust         | `src/foo/bar.rs` → `foo::bar`, `src/foo/mod.rs` → `foo`    |
 pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
     match language {
         "python" => infer_python_module(file_path),
@@ -100,6 +100,7 @@ pub fn infer_module_name(file_path: &str, language: &str) -> Option<String> {
         "java" => infer_java_module(file_path),
         "kotlin" => infer_kotlin_module(file_path),
         "go" => infer_go_module(file_path),
+        "rust" => infer_rust_module(file_path),
         _ => None, // not yet implemented, graceful degradation
     }
 }
@@ -351,6 +352,96 @@ fn infer_go_module(file_path: &str) -> Option<String> {
     Some(module_name)
 }
 
+/// Rust module name inference.
+///
+/// Rules:
+/// 1. Only handle `.rs` files.
+/// 2. If the filename is `mod.rs`, use the parent directory as the module.
+/// 3. If the filename is `lib.rs`, use the parent directory (often root-level).
+/// 4. If the filename is `main.rs`, use the parent directory.
+/// 5. For regular `.rs` files, replace `/` with `::` and strip the extension.
+/// 6. Strip common source root prefixes (`src/`).
+///
+/// Examples:
+/// - `src/foo/bar.rs` → `foo::bar`
+/// - `src/foo/mod.rs` → `foo`
+/// - `src/lib.rs` → empty string (crate root)
+/// - `src/main.rs` → empty string (crate root / main is a special module)
+/// - `foo.rs` → `foo`
+/// - `src/handler/ws.rs` → `handler::ws`
+fn infer_rust_module(file_path: &str) -> Option<String> {
+    let path = file_path.trim_end_matches('/');
+
+    // Only handle .rs files
+    if !path.ends_with(".rs") {
+        return None;
+    }
+
+    // Strip .rs extension
+    let without_ext = &path[..path.len() - 3];
+
+    // Handle mod.rs: `src/foo/mod.rs` → module = "foo"
+    if without_ext.ends_with("/mod") {
+        let dir_part = &without_ext[..without_ext.len() - 4]; // strip "/mod"
+        if dir_part.is_empty() {
+            return Some(String::new()); // root level mod.rs
+        }
+        let module = dir_part.replace('/', "::");
+        return Some(strip_rust_src_prefix(&module));
+    }
+
+    // Handle bare mod.rs at root
+    if without_ext == "mod" {
+        return Some(String::new());
+    }
+
+    // Handle lib.rs: `src/lib.rs` → root module
+    if without_ext.ends_with("/lib") || without_ext == "lib" {
+        let dir_part = if without_ext.ends_with("/lib") {
+            &without_ext[..without_ext.len() - 4]
+        } else {
+            return Some(String::new()); // bare lib.rs is crate root
+        };
+        if dir_part.is_empty() {
+            return Some(String::new());
+        }
+        let module = dir_part.replace('/', "::");
+        return Some(strip_rust_src_prefix(&module));
+    }
+
+    // Handle main.rs: `src/main.rs` → root or parent directory module
+    if without_ext.ends_with("/main") || without_ext == "main" {
+        let dir_part = if without_ext.ends_with("/main") {
+            &without_ext[..without_ext.len() - 5]
+        } else {
+            return Some("main".to_string());
+        };
+        if dir_part.is_empty() {
+            return Some(String::new());
+        }
+        let module = dir_part.replace('/', "::");
+        return Some(strip_rust_src_prefix(&module));
+    }
+
+    // Regular .rs file: replace / with ::
+    let module = without_ext.replace('/', "::");
+    Some(strip_rust_src_prefix(&module))
+}
+
+/// Strip common Rust source root prefixes.
+/// - `src::foo::bar` → `foo::bar`
+/// - `src` → `` (crate root)
+/// - `foo::bar` → `foo::bar` (no change)
+fn strip_rust_src_prefix(module: &str) -> String {
+    if module.starts_with("src::") {
+        return module[5..].to_string();
+    }
+    if module == "src" {
+        return String::new();
+    }
+    module.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -442,8 +533,10 @@ mod tests {
     fn test_infer_module_unknown_lang_graceful() {
         // Go is now supported — should return the parent directory
         assert_eq!(infer_module_name("src/foo/bar.go", "go"), Some("foo".to_string()));
+        // Rust is now supported — should return the module path
+        assert_eq!(infer_module_name("src/foo/bar.rs", "rust"), Some("foo::bar".to_string()));
         // Still unknown languages should return None
-        assert_eq!(infer_module_name("src/foo/bar.rs", "rust"), None);
+        assert_eq!(infer_module_name("src/foo/bar.hpp", "ruby"), None);
     }
 
     // ------------------------------------------------------------------
@@ -698,6 +791,113 @@ mod tests {
         assert_eq!(
             infer_module_name("services/api/handler/health.go", "go"),
             Some("handler".to_string())
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Rust module name inference
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_rust_module_regular() {
+        assert_eq!(
+            infer_module_name("src/foo/bar.rs", "rust"),
+            Some("foo::bar".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/models/user.rs", "rust"),
+            Some("models::user".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/handler/ws.rs", "rust"),
+            Some("handler::ws".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_rust_module_mod_rs() {
+        assert_eq!(
+            infer_module_name("src/foo/mod.rs", "rust"),
+            Some("foo".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/mod.rs", "rust"),
+            Some("".to_string())
+        );
+        // Bare mod.rs at root
+        assert_eq!(
+            infer_module_name("mod.rs", "rust"),
+            Some("".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_rust_module_lib_rs() {
+        assert_eq!(
+            infer_module_name("src/lib.rs", "rust"),
+            Some("".to_string())
+        );
+        // Bare lib.rs
+        assert_eq!(
+            infer_module_name("lib.rs", "rust"),
+            Some("".to_string())
+        );
+        // lib in subdirectory (rare but possible)
+        assert_eq!(
+            infer_module_name("src/core/lib.rs", "rust"),
+            Some("core".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_rust_module_main_rs() {
+        assert_eq!(
+            infer_module_name("src/main.rs", "rust"),
+            Some("".to_string())
+        );
+        // Bare main.rs at root
+        assert_eq!(
+            infer_module_name("main.rs", "rust"),
+            Some("main".to_string())
+        );
+    }
+
+    #[test]
+    fn test_infer_rust_module_non_rust() {
+        assert_eq!(infer_module_name("src/foo/bar.py", "rust"), None);
+        assert_eq!(infer_module_name("src/foo/bar.java", "rust"), None);
+        assert_eq!(infer_module_name("src/foo/bar.go", "rust"), None);
+        assert_eq!(infer_module_name("src/foo/bar.ts", "rust"), None);
+    }
+
+    #[test]
+    fn test_infer_rust_module_without_src_prefix() {
+        assert_eq!(
+            infer_module_name("foo/bar.rs", "rust"),
+            Some("foo::bar".to_string())
+        );
+        assert_eq!(
+            infer_module_name("models/user.rs", "rust"),
+            Some("models::user".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_rust_src_prefix() {
+        assert_eq!(strip_rust_src_prefix("src::foo::bar"), "foo::bar");
+        assert_eq!(strip_rust_src_prefix("foo::bar"), "foo::bar");
+        assert_eq!(strip_rust_src_prefix("src::models"), "models");
+    }
+
+    #[test]
+    fn test_infer_module_rust_via_lang() {
+        assert_eq!(
+            infer_module_name("src/core/database.rs", "rust"),
+            Some("core::database".to_string())
+        );
+        assert_eq!(
+            infer_module_name("src/core/mod.rs", "rust"),
+            Some("core".to_string())
         );
     }
 }

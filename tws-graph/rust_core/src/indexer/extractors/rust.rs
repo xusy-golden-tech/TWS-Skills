@@ -108,6 +108,9 @@ struct Walker {
     type_stack: Vec<String>,
     /// Pending attribute items to apply to the next declaration.
     pending_attrs: Vec<String>,
+    /// Track `use` imports: imported_name → full module path.
+    /// e.g. `use crate::foo::bar::Baz;` → "Baz" → "foo::bar::Baz"
+    imported_names: HashMap<String, String>,
 }
 
 impl Walker {
@@ -115,6 +118,7 @@ impl Walker {
         Self {
             type_stack: Vec::new(),
             pending_attrs: Vec::new(),
+            imported_names: HashMap::new(),
         }
     }
 
@@ -507,9 +511,11 @@ impl Walker {
         if let Some(ret_type) = node.child_by_field_name("return_type") {
             let type_text = resolve_type_name(source, ret_type);
             if !type_text.is_empty() && !is_rust_builtin(&type_text) {
-                let target_qn = build_qualified_target(&ctx.file_path, &type_text);
+                // Check imported_names for qualified type reference
+                let qualified_type = qualify_rust_scoped(&self.imported_names, &type_text);
+                let target_qn = build_qualified_target(&ctx.file_path, &qualified_type);
                 let target = hash_id(&ctx.file_path, &target_qn);
-                ctx.add_edge(&func_id, &target, EdgeKind::TypeRef, line, Some(&type_text));
+                ctx.add_edge(&func_id, &target, EdgeKind::TypeRef, line, Some(&qualified_type));
             }
         }
 
@@ -666,9 +672,11 @@ impl Walker {
                 "identifier" => {
                     let name = get_text(source, Some(f));
                     if !name.is_empty() && !is_rust_builtin(&name) {
-                        let target_qn = build_call_target(&ctx.file_path, &self.type_stack, &name);
+                        // Check imported_names for qualified target_text
+                        let call_text = self.imported_names.get(&name).cloned().unwrap_or_else(|| name.clone());
+                        let target_qn = build_call_target(&ctx.file_path, &self.type_stack, &call_text);
                         let target = hash_id(&ctx.file_path, &target_qn);
-                        ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&name));
+                        ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&call_text));
                     }
                 }
                 "field_expression" => {
@@ -677,20 +685,22 @@ impl Walker {
                     if !full.is_empty() {
                         let callee = full.rsplitn(2, '.').next().unwrap_or(&full);
                         if !is_rust_builtin(callee) {
-                            let target_qn = build_call_target(&ctx.file_path, &self.type_stack, callee);
+                            let qualified_chain = qualify_rust_scoped(&self.imported_names, &full);
+                            let target_qn = build_call_target(&ctx.file_path, &self.type_stack, &qualified_chain);
                             let target = hash_id(&ctx.file_path, &target_qn);
-                            ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&full));
+                            ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&qualified_chain));
                         }
                     }
                 }
                 "scoped_identifier" => {
                     let name = get_text(source, Some(f));
                     if !name.is_empty() {
+                        let qualified_name = qualify_rust_scoped(&self.imported_names, &name);
                         let ident = name.rsplitn(2, "::").next().unwrap_or(&name);
-                        if !is_rust_builtin(ident) && !is_rust_stdlib(&name) {
-                            let target_qn = build_qualified_target(&ctx.file_path, ident);
+                        if !is_rust_builtin(ident) && !is_rust_stdlib(&qualified_name) {
+                            let target_qn = build_qualified_target(&ctx.file_path, &qualified_name);
                             let target = hash_id(&ctx.file_path, &target_qn);
-                            ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&name));
+                            ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&qualified_name));
                         }
                     }
                 }
@@ -730,9 +740,10 @@ impl Walker {
             };
 
             if !macro_name.is_empty() && !is_rust_builtin(&macro_name) {
-                let target_qn = build_qualified_target(&ctx.file_path, &macro_name);
+                let qualified_macro = qualify_rust_scoped(&self.imported_names, &macro_name);
+                let target_qn = build_qualified_target(&ctx.file_path, &qualified_macro);
                 let target = hash_id(&ctx.file_path, &target_qn);
-                ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&macro_name));
+                ctx.add_edge(parent_id, &target, EdgeKind::Calls, line, Some(&qualified_macro));
             }
         }
 
@@ -803,9 +814,10 @@ impl Walker {
                 if let Some(type_node) = node.child_by_field_name("type") {
                     let type_text = resolve_type_name(source, type_node);
                     if !type_text.is_empty() && !is_rust_builtin(&type_text) {
-                        let target_qn = build_qualified_target(&ctx.file_path, &type_text);
+                        let qualified_type = qualify_rust_scoped(&self.imported_names, &type_text);
+                        let target_qn = build_qualified_target(&ctx.file_path, &qualified_type);
                         let target = hash_id(&ctx.file_path, &target_qn);
-                        ctx.add_edge(&field_id, &target, EdgeKind::TypeRef, line, Some(&type_text));
+                        ctx.add_edge(&field_id, &target, EdgeKind::TypeRef, line, Some(&qualified_type));
                     }
                 }
             }
@@ -819,7 +831,7 @@ impl Walker {
     // ------------------------------------------------------------------
 
     fn extract_use(
-        &self,
+        &mut self,
         source: &[u8],
         node: Node,
         ctx: &mut ExtractionContext,
@@ -827,17 +839,116 @@ impl Walker {
     ) -> anyhow::Result<()> {
         let line = node.start_position().row as u32 + 1;
 
-        // Extract all imported paths
+        // Extract all imported paths (preserves existing behavior)
         let paths = self.extract_use_paths(source, node);
+
+        // Collect alias mappings: full_path → alias_name
+        let aliases = self.collect_use_aliases(source, node);
+
         for path in paths {
-            if !path.is_empty() {
-                let target_qn = build_qualified_target(&ctx.file_path, &path);
-                let target = hash_id(&ctx.file_path, &target_qn);
-                ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&path));
+            if path.is_empty() {
+                continue;
             }
+
+            // Create IMPORTS edge (existing behavior)
+            let target_qn = build_qualified_target(&ctx.file_path, &path);
+            let target = hash_id(&ctx.file_path, &target_qn);
+            ctx.add_edge(parent_id, &target, EdgeKind::Imports, line, Some(&path));
+
+            // Build the reference target_text for cross-file resolution.
+            // Strip crate:: prefix for cleaner module paths that the resolver
+            // can convert to file system paths.
+            let ref_target_text = if let Some(stripped) = path.strip_prefix("crate::") {
+                stripped.to_string()
+            } else {
+                path.clone()
+            };
+
+            // Create REFERENCES edge with clean module path as target_text
+            let ref_target_qn = build_qualified_target(&ctx.file_path, &ref_target_text);
+            let ref_target = hash_id(&ctx.file_path, &ref_target_qn);
+            ctx.add_edge(parent_id, &ref_target, EdgeKind::References, line, Some(&ref_target_text));
+
+            // Populate imported_names: map the imported name → full module path
+            let imported_name = path.rsplitn(2, "::").next().unwrap_or(&path);
+            let effective_name = aliases.get(&path).cloned().unwrap_or_else(|| imported_name.to_string());
+            // Don't override existing entries from nested scopes
+            self.imported_names.entry(effective_name).or_insert(ref_target_text);
         }
 
         Ok(())
+    }
+
+    /// Collect alias mappings from `use_as_clause` nodes within a use_declaration.
+    /// Returns a map from full_path → alias_name.
+    fn collect_use_aliases(&self, source: &[u8], node: Node) -> HashMap<String, String> {
+        let mut aliases = HashMap::new();
+        self.collect_aliases_recurse(source, node, &String::new(), &mut aliases);
+        aliases
+    }
+
+    fn collect_aliases_recurse(
+        &self,
+        source: &[u8],
+        node: Node,
+        prefix: &str,
+        aliases: &mut HashMap<String, String>,
+    ) {
+        match node.kind() {
+            "use_as_clause" => {
+                let path_text = node
+                    .child_by_field_name("path")
+                    .map(|p| get_text(source, Some(p)))
+                    .unwrap_or_default();
+                let alias_text = node
+                    .child_by_field_name("alias")
+                    .map(|a| get_text(source, Some(a)))
+                    .unwrap_or_default();
+                if !path_text.is_empty() && !alias_text.is_empty() {
+                    let full_path = if prefix.is_empty() {
+                        path_text
+                    } else {
+                        format!("{}::{}", prefix, path_text)
+                    };
+                    aliases.insert(full_path, alias_text);
+                }
+            }
+            "scoped_use_list" => {
+                let path_text = node
+                    .child_by_field_name("path")
+                    .map(|p| get_text(source, Some(p)))
+                    .unwrap_or_default();
+                let new_prefix = if prefix.is_empty() {
+                    path_text
+                } else if path_text.is_empty() {
+                    prefix.to_string()
+                } else {
+                    format!("{}::{}", prefix, path_text)
+                };
+                for i in 0..node.named_child_count() {
+                    if let Some(child) = node.named_child(i) {
+                        let ck = child.kind();
+                        if ck == "use_list" || ck == "use_as_clause" {
+                            self.collect_aliases_recurse(source, child, &new_prefix, aliases);
+                        }
+                    }
+                }
+            }
+            "use_list" => {
+                for i in 0..node.named_child_count() {
+                    if let Some(child) = node.named_child(i) {
+                        self.collect_aliases_recurse(source, child, prefix, aliases);
+                    }
+                }
+            }
+            _ => {
+                for i in 0..node.named_child_count() {
+                    if let Some(child) = node.named_child(i) {
+                        self.collect_aliases_recurse(source, child, prefix, aliases);
+                    }
+                }
+            }
+        }
     }
 
     /// Recursively extract all use paths (handles use tree syntax).
@@ -1023,6 +1134,30 @@ fn build_call_target(file_path: &str, type_stack: &[String], callee: &str) -> St
 /// Build a qualified target for cross-reference edges.
 fn build_qualified_target(file_path: &str, name: &str) -> String {
     format!("{file_path}::{name}")
+}
+
+/// Qualify a Rust scoped name (identifier or `::`-separated path) through
+/// the imported_names map.
+///
+/// - Bare name: if imported, use the qualified import path.
+/// - Scoped name like `Foo::method`: if `Foo` is imported as `path::Foo`,
+///   return `path::Foo::method`.
+/// - Otherwise return the original name unchanged.
+fn qualify_rust_scoped(imported_names: &HashMap<String, String>, name: &str) -> String {
+    // Bare name: check direct import
+    if !name.contains("::") {
+        if let Some(qualified) = imported_names.get(name) {
+            return qualified.clone();
+        }
+        return name.to_string();
+    }
+    // Scoped name: check if first segment is imported
+    if let Some((first, rest)) = name.split_once("::") {
+        if let Some(qualified_first) = imported_names.get(first) {
+            return format!("{}::{}", qualified_first, rest);
+        }
+    }
+    name.to_string()
 }
 
 /// Get the UTF-8 text of a node from the source bytes.
@@ -1512,5 +1647,171 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             "src/service.rs",
         );
         assert!(!ctx.result.nodes.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Use statement REFERENCES edges (Stage 6: cross-file resolution)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_use_crate_creates_references_edge() {
+        // use crate::foo::bar::Baz; → REFERENCES edge with target_text = "foo::bar::Baz"
+        let ctx = extract("use crate::foo::bar::Baz;\nfn main() {}\n", "src/main.rs");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"foo::bar::Baz"), "Expected 'foo::bar::Baz' in REFERENCES: {:?}", targets);
+    }
+
+    #[test]
+    fn test_use_super_creates_references_edge() {
+        // use super::foo::Bar; → REFERENCES edge with target_text = "super::foo::Bar"
+        let ctx = extract("use super::foo::Bar;\nfn main() {}\n", "src/module/sub.rs");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"super::foo::Bar"), "Expected 'super::foo::Bar' in REFERENCES: {:?}", targets);
+    }
+
+    #[test]
+    fn test_use_self_creates_references_edge() {
+        // use self::inner::Helper; → REFERENCES edge with target_text = "self::inner::Helper"
+        let ctx = extract("use self::inner::Helper;\nfn main() {}\n", "src/mod.rs");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"self::inner::Helper"), "Expected 'self::inner::Helper' in REFERENCES: {:?}", targets);
+    }
+
+    #[test]
+    fn test_use_group_import_creates_multiple_references() {
+        // use crate::models::{User, Product}; → 2 REFERENCES edges
+        let ctx = extract("use crate::models::{User, Product};\nfn main() {}\n", "src/main.rs");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"models::User"), "Expected 'models::User' in REFERENCES: {:?}", targets);
+        assert!(targets.contains(&"models::Product"), "Expected 'models::Product' in REFERENCES: {:?}", targets);
+    }
+
+    #[test]
+    fn test_use_external_crate_creates_references_edge() {
+        // use serde::Serialize; → REFERENCES edge with target_text = "serde::Serialize"
+        let ctx = extract("use serde::Serialize;\nfn main() {}\n", "src/main.rs");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"serde::Serialize"), "Expected 'serde::Serialize' in REFERENCES: {:?}", targets);
+    }
+
+    #[test]
+    fn test_use_still_creates_imports_edge() {
+        // use crate::foo::bar::Baz; → IMPORTS edge still created
+        let ctx = extract("use crate::foo::bar::Baz;\nfn main() {}\n", "src/main.rs");
+        let imports = find_edges(&ctx, EdgeKind::Imports);
+        let targets: Vec<&str> = imports.iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"crate::foo::bar::Baz"), "Expected IMPORTS edge: {:?}", targets);
+    }
+
+    #[test]
+    fn test_imported_call_uses_qualified_target_text() {
+        // use crate::db::connect; → connect() call uses "db::connect" as target_text
+        let ctx = extract(
+            "use crate::db::connect;\nfn main() {\n    connect();\n}\n",
+            "src/main.rs",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls.iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"db::connect"), "Expected 'db::connect' in calls: {:?}", targets);
+    }
+
+    #[test]
+    fn test_imported_scoped_call_qualified() {
+        // use crate::models::User; → User::new() call uses "models::User::new" as target_text
+        let ctx = extract(
+            "use crate::models::User;\nfn main() {\n    User::new();\n}\n",
+            "src/main.rs",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls.iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.iter().any(|t| t.contains("models::User::new")),
+            "Expected qualified call target: {:?}", targets);
+    }
+
+    #[test]
+    fn test_non_imported_call_uses_bare_name() {
+        // Local call without use → bare name as target_text
+        let ctx = extract(
+            "fn helper() {}\nfn main() {\n    helper();\n}\n",
+            "src/main.rs",
+        );
+        let calls = find_edges(&ctx, EdgeKind::Calls);
+        let targets: Vec<&str> = calls.iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"helper"), "Expected bare 'helper' in calls: {:?}", targets);
+    }
+
+    #[test]
+    fn test_imported_type_annotation_qualified() {
+        // use crate::models::User; → fn get() -> User uses qualified type_ref target_text
+        let ctx = extract(
+            "use crate::models::User;\nfn get() -> User { unimplemented!() }\n",
+            "src/main.rs",
+        );
+        let type_refs = find_edges(&ctx, EdgeKind::TypeRef);
+        let targets: Vec<&str> = type_refs.iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"models::User"), "Expected 'models::User' in type_refs: {:?}", targets);
+    }
+
+    #[test]
+    fn test_use_statement_does_not_qualify_stdlib() {
+        // use std::collections::HashMap; → REFERENCES created but stdlib calls filtered
+        let ctx = extract(
+            "use std::collections::HashMap;\nfn main() {\n    let _m = HashMap::new();\n}\n",
+            "src/main.rs",
+        );
+        // REFERENCES edge should still be created for the use itself
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let ref_targets: Vec<&str> = refs.iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(ref_targets.contains(&"std::collections::HashMap"),
+            "Expected REFERENCES for std::collections::HashMap: {:?}", ref_targets);
+    }
+
+    #[test]
+    fn test_pub_use_creates_references_edge() {
+        // pub use crate::foo::Bar; → re-export is just use_declaration with visibility
+        let ctx = extract("pub use crate::foo::Bar;\nfn main() {}\n", "src/lib.rs");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"foo::Bar"), "Expected 'foo::Bar' in REFERENCES for pub use: {:?}", targets);
+    }
+
+    #[test]
+    fn test_use_simple_module_creates_references_edge() {
+        // use my_module; → REFERENCES edge with target_text = "my_module"
+        let ctx = extract("use my_module;\nfn main() {}\n", "src/main.rs");
+        let refs = find_edges(&ctx, EdgeKind::References);
+        let targets: Vec<&str> = refs.iter()
+            .map(|e| e.target_text.as_deref().unwrap_or(""))
+            .collect();
+        assert!(targets.contains(&"my_module"), "Expected 'my_module' in REFERENCES: {:?}", targets);
     }
 }
