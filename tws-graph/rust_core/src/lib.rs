@@ -634,7 +634,7 @@ fn search(py: Python<'_>, db_path: &str, query_text: &str, limit: Option<usize>,
         item.set_item("kind", &r.kind)?;
         item.set_item("file_path", &r.file_path)?;
         item.set_item("language", &r.language)?;
-        item.set_item("line_number", r.start_line.unwrap_or(0))?;
+        item.set_item("start_line", r.start_line.unwrap_or(0))?;
         list.append(item)?;
     }
     Ok(list.into())
