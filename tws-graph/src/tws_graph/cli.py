@@ -2047,6 +2047,7 @@ _export_db_opt = typer.Option(None, "--db", "-d", help="数据库路径")
 _export_depth_opt = typer.Option(5, "--depth", help="BFS 导出深度 (用 --from 指定起始节点时)")
 _export_kind_opt = typer.Option(None, "--kind", "-k", help="只导出指定边类型 (如 calls, data_flows)")
 _export_from_opt = typer.Option(None, "--from", "-f", help="起始节点 ID，导出以该节点为中心的子图")
+_export_to_opt = typer.Option(None, "--to", "-t", help="目标节点 ID，从该节点沿入站边反向 BFS（与 --from 互斥）")
 _export_limit_opt = typer.Option(500, "--limit", "-l", help="最大导出边数")
 
 # Create a parent app for export subcommands
@@ -2059,6 +2060,7 @@ def export_dot_cmd(
     depth: int = _export_depth_opt,
     kind: str | None = _export_kind_opt,
     from_node: str | None = _export_from_opt,
+    to_node: Optional[str] = _export_to_opt,
     limit: int = _export_limit_opt,
     output: str | None = typer.Option(None, "--output", "-o", help="输出文件路径 (默认: stdout)"),
     include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
@@ -2071,7 +2073,13 @@ def export_dot_cmd(
       tws-graph export dot --from NODE_ID --depth 2 -o subgraph.dot
       tws-graph export dot --exclude "tests/"
     """
-    _run_export("dot", db, depth, kind, from_node, limit, output, include_paths, exclude_paths)
+    if from_node and to_node:
+        typer.echo("错误: --from 和 --to 互斥，只能指定其中一个", err=True)
+        raise typer.Exit(code=1)
+    if not from_node and not to_node:
+        typer.echo("错误: 必须指定 --from 或 --to", err=True)
+        raise typer.Exit(code=1)
+    _run_export("dot", db, depth, kind, from_node, limit, output, include_paths, exclude_paths, to_node=to_node)
 
 
 @export_app.command("mermaid")
@@ -2080,6 +2088,7 @@ def export_mermaid_cmd(
     depth: int = _export_depth_opt,
     kind: str | None = _export_kind_opt,
     from_node: str | None = _export_from_opt,
+    to_node: Optional[str] = _export_to_opt,
     limit: int = _export_limit_opt,
     output: str | None = typer.Option(None, "--output", "-o", help="输出文件路径 (默认: stdout)"),
     include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
@@ -2093,7 +2102,13 @@ def export_mermaid_cmd(
       tws-graph export mermaid --from NODE_ID --depth 2 -m > arch.md
       tws-graph export mermaid --from NODE_ID -m -g  # 按文件分组
     """
-    _run_export("mermaid", db, depth, kind, from_node, limit, output, include_paths, exclude_paths, markdown=markdown, group_by_file=group_by_file)
+    if from_node and to_node:
+        typer.echo("错误: --from 和 --to 互斥，只能指定其中一个", err=True)
+        raise typer.Exit(code=1)
+    if not from_node and not to_node:
+        typer.echo("错误: 必须指定 --from 或 --to", err=True)
+        raise typer.Exit(code=1)
+    _run_export("mermaid", db, depth, kind, from_node, limit, output, include_paths, exclude_paths, markdown=markdown, group_by_file=group_by_file, to_node=to_node)
 
 
 @export_app.command("json")
@@ -2118,7 +2133,7 @@ def export_json_cmd(
 
 def _run_export(fmt: str, db, depth, kind, from_node, limit, output,
                 include_paths=None, exclude_paths=None, markdown=False,
-                group_by_file=False):
+                group_by_file=False, to_node=None):
     """Common export logic."""
     resolved_db = os.path.abspath(db or DEFAULT_DB)
 
@@ -2129,13 +2144,15 @@ def _run_export(fmt: str, db, depth, kind, from_node, limit, output,
             result = None
             if fmt == "dot":
                 from .rust_bridge import rust_export_dot
-                result = rust_export_dot(resolved_db, from_node or "", depth, kind,
-                                        include_paths, exclude_paths)
+                result = rust_export_dot(resolved_db, from_node, depth, kind,
+                                        include_paths, exclude_paths,
+                                        to_node=to_node)
             elif fmt == "mermaid":
                 from .rust_bridge import rust_export_mermaid
-                result = rust_export_mermaid(resolved_db, from_node or "", depth, kind,
+                result = rust_export_mermaid(resolved_db, from_node, depth, kind,
                                             include_paths, exclude_paths,
-                                            group_by_file=group_by_file)
+                                            group_by_file=group_by_file,
+                                            to_node=to_node)
             elif fmt == "json":
                 from .rust_bridge import rust_export_json
                 result = rust_export_json(resolved_db, kind, limit,

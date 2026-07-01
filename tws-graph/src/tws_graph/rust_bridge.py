@@ -132,36 +132,44 @@ def rust_resolve(db_path: str, project_root: str) -> str:
     return resolve_refs(db_path, project_root)
 
 
-def rust_export_dot(db_path: str, from_node: str, depth: int = 3, kind: str | None = None,
+def rust_export_dot(db_path: str, from_node: str | None = None, depth: int = 3, kind: str | None = None,
                     include_paths: list[str] | None = None,
-                    exclude_paths: list[str] | None = None) -> str:
+                    exclude_paths: list[str] | None = None,
+                    to_node: str | None = None) -> str:
     """Export graph in Graphviz DOT format using Rust.
 
     Args:
+        from_node: Optional starting node ID for forward BFS (outbound edges).
         include_paths: Optional list of glob patterns. Only nodes whose
             file_path matches at least one pattern are included.
         exclude_paths: Optional list of glob patterns. Nodes whose
             file_path matches any pattern are excluded.
+        to_node: Optional target node ID for reverse BFS (inbound edges).
+            Mutually exclusive with from_node.
     """
     from _core._core import export_dot
-    return export_dot(db_path, from_node, depth, kind, include_paths, exclude_paths)
+    return export_dot(db_path, from_node, depth, kind, include_paths, exclude_paths, to_node)
 
 
-def rust_export_mermaid(db_path: str, from_node: str, depth: int = 3, kind: str | None = None,
+def rust_export_mermaid(db_path: str, from_node: str | None = None, depth: int = 3, kind: str | None = None,
                         include_paths: list[str] | None = None,
                         exclude_paths: list[str] | None = None,
-                        group_by_file: bool = False) -> str:
+                        group_by_file: bool = False,
+                        to_node: str | None = None) -> str:
     """Export graph in Mermaid format using Rust.
 
     Args:
+        from_node: Optional starting node ID for forward BFS (outbound edges).
         include_paths: Optional list of glob patterns. Only nodes whose
             file_path matches at least one pattern are included.
         exclude_paths: Optional list of glob patterns. Nodes whose
             file_path matches any pattern are excluded.
         group_by_file: If True, wrap nodes in subgraphs grouped by source file.
+        to_node: Optional target node ID for reverse BFS (inbound edges).
+            Mutually exclusive with from_node.
     """
     from _core._core import export_mermaid
-    return export_mermaid(db_path, from_node, depth, kind, include_paths, exclude_paths, group_by_file)
+    return export_mermaid(db_path, from_node, depth, kind, include_paths, exclude_paths, group_by_file, to_node)
 
 
 def rust_export_json(db_path: str, kind: str | None = None, limit: int | None = None,
