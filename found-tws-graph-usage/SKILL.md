@@ -169,8 +169,8 @@ tests/
 
 | 命令 | 用途 | 示例 |
 |------|------|------|
-| `tws-graph export dot` | 导出 Graphviz DOT 格式 | `tws-graph export dot --from my_func --depth 2` |
-| `tws-graph export mermaid` | 导出 Mermaid 图（-m 包裹代码块，节点标签含文件名；-g 按文件分组 subgraph） | `tws-graph export mermaid --from my_class -m -g` |
+| `tws-graph export dot` | 导出 Graphviz DOT 格式（--from 正向/--to 反向 BFS） | `tws-graph export dot --from my_func --depth 2` |
+| `tws-graph export mermaid` | 导出 Mermaid 图（-m 包裹代码块，节点标签含文件名；-g 按文件分组 subgraph；--from 正向/--to 反向 BFS） | `tws-graph export mermaid --from my_class -m -g` |
 | `tws-graph export json` | 导出 JSON 格式（节点+边） | `tws-graph export json --kind calls` |
 | `tws-graph serve` | 启动 MCP 服务器（21 工具 + 3 资源） | `tws-graph serve --root . --db .tws/codegraph/index.db` |
 | `tws-graph lint` | 校验 skill 文件结构 | `tws-graph lint` |
@@ -403,6 +403,10 @@ tws-graph export dot --from main --depth 2     # DOT 格式（Graphviz）
 tws-graph export mermaid --from MyClass -m     # Mermaid 格式（节点标签含文件名，-g 按文件分组）
 tws-graph export json --kind calls             # JSON 格式
 tws-graph export json --kind calls --exclude "tests/"
+
+# 反向遍历（--to）：查谁调了指定符号
+tws-graph export mermaid --to MyClass -m       # Mermaid 反向遍历（谁调了 MyClass）
+tws-graph export dot --to MyFunc --depth 2     # DOT 反向遍历（谁调了 MyFunc）
 ```
 
 ### 代码质量

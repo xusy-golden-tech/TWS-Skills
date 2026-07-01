@@ -148,7 +148,7 @@ def rust_export_dot(db_path: str, from_node: str | None = None, depth: int = 3, 
             Mutually exclusive with from_node.
     """
     from _core._core import export_dot
-    return export_dot(db_path, from_node, depth, kind, include_paths, exclude_paths, to_node)
+    return export_dot(db_path, from_node, to_node, depth, kind, include_paths, exclude_paths)
 
 
 def rust_export_mermaid(db_path: str, from_node: str | None = None, depth: int = 3, kind: str | None = None,
@@ -169,7 +169,7 @@ def rust_export_mermaid(db_path: str, from_node: str | None = None, depth: int =
             Mutually exclusive with from_node.
     """
     from _core._core import export_mermaid
-    return export_mermaid(db_path, from_node, depth, kind, include_paths, exclude_paths, group_by_file, to_node)
+    return export_mermaid(db_path, from_node, to_node, depth, kind, include_paths, exclude_paths, group_by_file)
 
 
 def rust_export_json(db_path: str, kind: str | None = None, limit: int | None = None,
