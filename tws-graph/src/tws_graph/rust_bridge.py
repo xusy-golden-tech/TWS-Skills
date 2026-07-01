@@ -149,7 +149,8 @@ def rust_export_dot(db_path: str, from_node: str, depth: int = 3, kind: str | No
 
 def rust_export_mermaid(db_path: str, from_node: str, depth: int = 3, kind: str | None = None,
                         include_paths: list[str] | None = None,
-                        exclude_paths: list[str] | None = None) -> str:
+                        exclude_paths: list[str] | None = None,
+                        group_by_file: bool = False) -> str:
     """Export graph in Mermaid format using Rust.
 
     Args:
@@ -157,9 +158,10 @@ def rust_export_mermaid(db_path: str, from_node: str, depth: int = 3, kind: str 
             file_path matches at least one pattern are included.
         exclude_paths: Optional list of glob patterns. Nodes whose
             file_path matches any pattern are excluded.
+        group_by_file: If True, wrap nodes in subgraphs grouped by source file.
     """
     from _core._core import export_mermaid
-    return export_mermaid(db_path, from_node, depth, kind, include_paths, exclude_paths)
+    return export_mermaid(db_path, from_node, depth, kind, include_paths, exclude_paths, group_by_file)
 
 
 def rust_export_json(db_path: str, kind: str | None = None, limit: int | None = None,

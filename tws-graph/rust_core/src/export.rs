@@ -100,12 +100,14 @@ pub fn export_dot(
 /// Mermaid flowchart (graph TD), suitable for embedding in Markdown.
 ///
 /// If `allowed_nodes` is provided, only nodes in the set are included in the output.
+/// If `group_by_file` is true, nodes from the same file are wrapped in subgraphs.
 pub fn export_mermaid(
     db: &Database,
     from_node: &str,
     depth: usize,
     kind: Option<&str>,
     allowed_nodes: Option<&HashSet<String>>,
+    group_by_file: bool,
 ) -> String {
     let node_id = match db.find_node_id_by_name(from_node).unwrap_or(None) {
         Some(id) => id,
@@ -141,38 +143,109 @@ pub fn export_mermaid(
     let mut mmd = String::new();
     mmd.push_str("graph TD\n");
 
-    // Generate short aliases for nodes (n0, n1, n2, ...)
-    let mut node_aliases: Vec<(String, String, String)> = Vec::new();
-    let mut idx = 0;
+    // Collect node data: (id, kind, name, file_basename)
+    let mut node_data: Vec<(String, String, String, String)> = Vec::new();
     for nid in &all_nodes {
-        if let Ok(Some((_, node_kind, name, _, _, _))) = db.get_node(nid) {
-            let alias = format!("n{}", idx);
-            let escaped_name = name.replace('(', "[").replace(')', "]");
-            mmd.push_str(&format!(
-                "  {}[\"{}<br/>({})\"]\n",
-                alias, escaped_name, node_kind
-            ));
-            node_aliases.push((nid.clone(), alias, name));
-            idx += 1;
+        if let Ok(Some((_, node_kind, name, _, _, file_path))) = db.get_node(nid) {
+            let file_basename = std::path::Path::new(&file_path)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or(&file_path)
+                .to_string();
+            node_data.push((nid.clone(), node_kind, name, file_basename));
         }
     }
 
-    mmd.push('\n');
+    // Generate short aliases for nodes (n0, n1, n2, ...)
+    let mut node_aliases: Vec<(String, String)> = Vec::new(); // (node_id, alias)
+    let mut idx = 0;
 
-    // Render edges using aliases
-    let alias_map: std::collections::HashMap<String, String> = node_aliases
-        .iter()
-        .map(|(nid, alias, _)| (nid.clone(), alias.clone()))
-        .collect();
+    if group_by_file {
+        // Group nodes by file, render each file as a subgraph
+        let mut file_groups: std::collections::BTreeMap<String, Vec<usize>> = std::collections::BTreeMap::new();
+        for (i, (nid, _kind, _name, file_basename)) in node_data.iter().enumerate() {
+            file_groups.entry(file_basename.clone()).or_default().push(i);
+            node_aliases.push((nid.clone(), format!("n{}", idx)));
+            idx += 1;
+        }
 
-    for (src, tgt, edge_kind, _target_text) in &edges {
-        if let (Some(src_alias), Some(tgt_alias)) =
-            (alias_map.get(src), alias_map.get(tgt))
-        {
+        // Pre-compute all aliases for edge rendering
+        let alias_map: std::collections::HashMap<String, String> = node_aliases
+            .iter()
+            .map(|(nid, alias)| (nid.clone(), alias.clone()))
+            .collect();
+
+        // Render nodes grouped by file
+        for (file_name, node_indices) in &file_groups {
+            if node_indices.len() > 1 || file_groups.len() > 1 {
+                mmd.push_str(&format!("  subgraph \"{}\"\n", file_name));
+                for &i in node_indices {
+                    let (_, ref node_kind, ref name, _) = node_data[i];
+                    let alias = &node_aliases[i].1;
+                    let escaped_name = name.replace('(', "[").replace(')', "]");
+                    mmd.push_str(&format!(
+                        "    {}[\"{}<br/>({})\"]\n",
+                        alias, escaped_name, node_kind
+                    ));
+                }
+                mmd.push_str("  end\n");
+            } else {
+                // Single node in file: render at top level with file label
+                for &i in node_indices {
+                    let (_, ref node_kind, ref name, ref file_basename) = node_data[i];
+                    let alias = &node_aliases[i].1;
+                    let escaped_name = name.replace('(', "[").replace(')', "]");
+                    mmd.push_str(&format!(
+                        "  {}[\"{}<br/>({})<br/><i>{}</i>\"]\n",
+                        alias, escaped_name, node_kind, file_basename
+                    ));
+                }
+            }
+        }
+
+        mmd.push('\n');
+
+        // Render edges
+        for (src, tgt, edge_kind, _target_text) in &edges {
+            if let (Some(src_alias), Some(tgt_alias)) =
+                (alias_map.get(src), alias_map.get(tgt))
+            {
+                mmd.push_str(&format!(
+                    "  {} -->|{}| {}\n",
+                    src_alias, edge_kind, tgt_alias
+                ));
+            }
+        }
+    } else {
+        // Flat mode: show file name inline in each node label
+        for (nid, node_kind, name, file_basename) in &node_data {
+            let alias = format!("n{}", idx);
+            let escaped_name = name.replace('(', "[").replace(')', "]");
             mmd.push_str(&format!(
-                "  {} -->|{}| {}\n",
-                src_alias, edge_kind, tgt_alias
+                "  {}[\"{}<br/>({})<br/><i>{}</i>\"]\n",
+                alias, escaped_name, node_kind, file_basename
             ));
+            node_aliases.push((nid.clone(), alias));
+            idx += 1;
+        }
+
+        mmd.push('\n');
+
+        // Render edges using aliases
+        let alias_map: std::collections::HashMap<String, String> = node_aliases
+            .iter()
+            .map(|(nid, alias)| (nid.clone(), alias.clone()))
+            .collect();
+
+        for (src, tgt, edge_kind, _target_text) in &edges {
+            if let (Some(src_alias), Some(tgt_alias)) =
+                (alias_map.get(src), alias_map.get(tgt))
+            {
+                mmd.push_str(&format!(
+                    "  {} -->|{}| {}\n",
+                    src_alias, edge_kind, tgt_alias
+                ));
+            }
         }
     }
 
@@ -440,7 +513,7 @@ mod tests {
     #[test]
     fn test_export_mermaid_not_found() {
         let (db, path) = setup_db("mmd_not_found");
-        let result = export_mermaid(&db, "nonexistent", 2, None, None);
+        let result = export_mermaid(&db, "nonexistent", 2, None, None, false);
         assert!(result.contains("node not found"));
         cleanup(&path);
     }
@@ -451,9 +524,11 @@ mod tests {
         let conn = db.connection();
         insert_node(conn, "main_func", "src/main.py", "function");
 
-        let result = export_mermaid(&db, "main_func", 1, None, None);
+        let result = export_mermaid(&db, "main_func", 1, None, None, false);
         assert!(result.contains("graph TD"));
         assert!(result.contains("main_func"));
+        // Flat mode shows file basename in label
+        assert!(result.contains("main.py"));
         cleanup(&path);
     }
 
@@ -465,9 +540,30 @@ mod tests {
         let b = insert_node(conn, "func_b", "src/b.py", "function");
         insert_edge(conn, &a, &b, "CALLS");
 
-        let result = export_mermaid(&db, "func_a", 2, None, None);
+        let result = export_mermaid(&db, "func_a", 2, None, None, false);
         assert!(result.contains("graph TD"));
         assert!(result.contains("CALLS"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_export_mermaid_group_by_file() {
+        let (db, path) = setup_db("mmd_group");
+        let conn = db.connection();
+        let a = insert_node(conn, "func_a", "src/module.py", "function");
+        let b = insert_node(conn, "func_b", "src/module.py", "function");
+        let c = insert_node(conn, "func_c", "src/other.py", "function");
+        insert_edge(conn, &a, &b, "CALLS");
+        insert_edge(conn, &b, &c, "CALLS");
+
+        let result = export_mermaid(&db, "func_a", 2, None, None, true);
+        // Grouped mode should have subgraph for module.py (with 2 nodes)
+        assert!(result.contains("subgraph"));
+        assert!(result.contains("module.py"));
+        assert!(result.contains("func_a"));
+        assert!(result.contains("func_b"));
+        // Single-node file (other.py) should show file in label
+        assert!(result.contains("other.py"));
         cleanup(&path);
     }
 
@@ -481,7 +577,7 @@ mod tests {
         insert_edge(conn, &a, &b, "CALLS");
         insert_edge(conn, &b, &c, "CALLS");
 
-        let result = export_mermaid(&db, "first", 1, None, None);
+        let result = export_mermaid(&db, "first", 1, None, None, false);
         assert!(result.contains("second"));
         assert!(!result.contains("third"));
         cleanup(&path);

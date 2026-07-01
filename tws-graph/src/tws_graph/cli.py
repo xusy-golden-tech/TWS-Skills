@@ -2085,14 +2085,15 @@ def export_mermaid_cmd(
     include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
     exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
     markdown: bool = typer.Option(False, "--markdown", "-m", help="Wrap output in ```mermaid code fence, ready to paste into .md files"),
+    group_by_file: bool = typer.Option(False, "--group-by-file", "-g", help="Group nodes into subgraphs by source file"),
 ):
-    """导出为 Mermaid 格式（可嵌入 Markdown）。
+    """导出为 Mermaid 格式（可嵌入 Markdown）。节点标签自动包含所属文件名。
 
     例：
       tws-graph export mermaid --from NODE_ID --depth 2 -m > arch.md
-      tws-graph export mermaid --from NODE_ID -o arch.md --markdown
+      tws-graph export mermaid --from NODE_ID -m -g  # 按文件分组
     """
-    _run_export("mermaid", db, depth, kind, from_node, limit, output, include_paths, exclude_paths, markdown=markdown)
+    _run_export("mermaid", db, depth, kind, from_node, limit, output, include_paths, exclude_paths, markdown=markdown, group_by_file=group_by_file)
 
 
 @export_app.command("json")
@@ -2116,7 +2117,8 @@ def export_json_cmd(
 
 
 def _run_export(fmt: str, db, depth, kind, from_node, limit, output,
-                include_paths=None, exclude_paths=None, markdown=False):
+                include_paths=None, exclude_paths=None, markdown=False,
+                group_by_file=False):
     """Common export logic."""
     resolved_db = os.path.abspath(db or DEFAULT_DB)
 
@@ -2132,7 +2134,8 @@ def _run_export(fmt: str, db, depth, kind, from_node, limit, output,
             elif fmt == "mermaid":
                 from .rust_bridge import rust_export_mermaid
                 result = rust_export_mermaid(resolved_db, from_node or "", depth, kind,
-                                            include_paths, exclude_paths)
+                                            include_paths, exclude_paths,
+                                            group_by_file=group_by_file)
             elif fmt == "json":
                 from .rust_bridge import rust_export_json
                 result = rust_export_json(resolved_db, kind, limit,

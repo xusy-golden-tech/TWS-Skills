@@ -836,8 +836,8 @@ fn export_dot(db_path: &str, from_node: &str, depth: Option<usize>, kind: Option
 
 /// Export a subgraph in Mermaid format.
 #[pyfunction]
-#[pyo3(signature = (db_path, from_node, depth=None, kind=None, include_paths=None, exclude_paths=None))]
-fn export_mermaid(db_path: &str, from_node: &str, depth: Option<usize>, kind: Option<&str>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
+#[pyo3(signature = (db_path, from_node, depth=None, kind=None, include_paths=None, exclude_paths=None, group_by_file=None))]
+fn export_mermaid(db_path: &str, from_node: &str, depth: Option<usize>, kind: Option<&str>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>, group_by_file: Option<bool>) -> PyResult<String> {
     let db = open_db(db_path)?;
     let allowed_nodes = if has_scope(include_paths.as_ref(), exclude_paths.as_ref()) {
         let (inc, exc) = resolve_scope(&include_paths, &exclude_paths);
@@ -845,7 +845,7 @@ fn export_mermaid(db_path: &str, from_node: &str, depth: Option<usize>, kind: Op
     } else {
         None
     };
-    Ok(export::export_mermaid(&db, from_node, depth.unwrap_or(2), kind, allowed_nodes.as_ref()))
+    Ok(export::export_mermaid(&db, from_node, depth.unwrap_or(2), kind, allowed_nodes.as_ref(), group_by_file.unwrap_or(false)))
 }
 
 /// Export nodes and edges as JSON string.
