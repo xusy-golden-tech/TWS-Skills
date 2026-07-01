@@ -142,6 +142,7 @@ impl ExtractionContext {
 
         // Extract known fields from extra before serialising the rest
         let signature = extra.remove("signature");
+        let docstring = extra.remove("docstring");
         let decorators_json = extra.remove("decorators");
         let is_abstract_val = extra
             .remove("is_abstract")
@@ -164,7 +165,7 @@ impl ExtractionContext {
             start_line: (start_pos.row + 1) as i64,
             end_line: (end_pos.row + 1) as i64,
             signature,
-            docstring: None,
+            docstring,
             visibility: None,
             is_abstract: if is_abstract_val { 1 } else { 0 },
             is_exported: 0,
