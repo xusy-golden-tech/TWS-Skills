@@ -1,6 +1,6 @@
 ---
 name: tws-graph-usage
-description: tws-graph 代码图使用指南（v7.3.1）。所有需要查图的子 agent 必须加载此 skill。包含安装检查、命令语法、错误处理和最佳实践
+description: tws-graph 代码图使用指南（v7.3.2）。所有需要查图的子 agent 必须加载此 skill。包含安装检查、命令语法、错误处理和最佳实践
 ---
 
 # tws-graph 代码图使用指南
@@ -170,7 +170,7 @@ tests/
 | 命令 | 用途 | 示例 |
 |------|------|------|
 | `tws-graph export dot` | 导出 Graphviz DOT 格式 | `tws-graph export dot --from my_func --depth 2` |
-| `tws-graph export mermaid` | 导出 Mermaid 图（适合 Markdown） | `tws-graph export mermaid --from my_class` |
+| `tws-graph export mermaid` | 导出 Mermaid 图（-m 包裹 ```mermaid 代码块，可直接贴入 .md 文件） | `tws-graph export mermaid --from my_class -m` |
 | `tws-graph export json` | 导出 JSON 格式（节点+边） | `tws-graph export json --kind calls` |
 | `tws-graph serve` | 启动 MCP 服务器（21 工具 + 3 资源） | `tws-graph serve --root . --db .tws/codegraph/index.db` |
 | `tws-graph lint` | 校验 skill 文件结构 | `tws-graph lint` |
@@ -400,7 +400,7 @@ tws-graph predict-impact my_func --exclude "tests/"
 
 ```
 tws-graph export dot --from main --depth 2     # DOT 格式（Graphviz）
-tws-graph export mermaid --from MyClass        # Mermaid 格式（Markdown）
+tws-graph export mermaid --from MyClass -m     # Mermaid 格式（-m 包裹 ```mermaid，可直接贴入 .md）
 tws-graph export json --kind calls             # JSON 格式
 tws-graph export json --kind calls --exclude "tests/"
 ```

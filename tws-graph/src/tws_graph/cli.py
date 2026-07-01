@@ -2084,14 +2084,15 @@ def export_mermaid_cmd(
     output: str | None = typer.Option(None, "--output", "-o", help="输出文件路径 (默认: stdout)"),
     include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
     exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
+    markdown: bool = typer.Option(False, "--markdown", "-m", help="Wrap output in ```mermaid code fence, ready to paste into .md files"),
 ):
     """导出为 Mermaid 格式（可嵌入 Markdown）。
 
     例：
-      tws-graph export mermaid --kind imports > deps.md
-      tws-graph export mermaid --from NODE_ID -o arch.mermaid
+      tws-graph export mermaid --from NODE_ID --depth 2 -m > arch.md
+      tws-graph export mermaid --from NODE_ID -o arch.md --markdown
     """
-    _run_export("mermaid", db, depth, kind, from_node, limit, output, include_paths, exclude_paths)
+    _run_export("mermaid", db, depth, kind, from_node, limit, output, include_paths, exclude_paths, markdown=markdown)
 
 
 @export_app.command("json")
@@ -2115,7 +2116,7 @@ def export_json_cmd(
 
 
 def _run_export(fmt: str, db, depth, kind, from_node, limit, output,
-                include_paths=None, exclude_paths=None):
+                include_paths=None, exclude_paths=None, markdown=False):
     """Common export logic."""
     resolved_db = os.path.abspath(db or DEFAULT_DB)
 
@@ -2137,6 +2138,8 @@ def _run_export(fmt: str, db, depth, kind, from_node, limit, output,
                 result = rust_export_json(resolved_db, kind, limit,
                                          include_paths, exclude_paths)
             if result is not None:
+                if markdown and fmt == "mermaid":
+                    result = "```mermaid\n" + result + "```\n"
                 if output:
                     with open(output, "w", encoding="utf-8") as f:
                         f.write(result)
@@ -2163,6 +2166,9 @@ def _run_export(fmt: str, db, depth, kind, from_node, limit, output,
         from tws_graph.export import export_json
         data = export_json(queries, from_node=from_node, depth=depth, kind=kind, limit=limit)
         result = _json.dumps(data, ensure_ascii=False, indent=2)
+
+    if markdown and fmt == "mermaid":
+        result = "```mermaid\n" + result + "```\n"
 
     if output:
         with open(output, "w", encoding="utf-8") as f:
