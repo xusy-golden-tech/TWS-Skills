@@ -26,7 +26,7 @@ tws-graph 从 v7.0.0 起已从纯 Python 重写为 Rust 核心 + Python CLI 包�
 **执行前必须：** 通过 Skill 工具加载 `found-tws-graph-usage`（Skill(skill: "found-tws-graph-usage")），获取准确的命令语法和错误处理策略。以下各步骤的命令仅为流程描述，实际执行以 found-tws-graph-usage 为准。
 
 ```
-① 检测环境 → ② 安装 Python 包 → ③ 编译 Rust 核心 → ④ 部署原生库 → ⑤ 构建索引 → ⑥ 创建基线快照 → ⑦ 安装 git hooks
+① 检测环境 → ② 安装 Python 包 → ③ 编译 Rust 核心 → ④ 部署原生库 → ⑤ 构建索引 → ⑥ 解析跨文件引用 → ⑦ 创建基线快照 → ⑧ 安装 git hooks
 ```
 
 ## ① 检测环境
@@ -152,7 +152,27 @@ Bash: cd <项目根目录> && tws-graph index 2>&1
 
 > **.twsignore（v7.2.0）**：首次索引前，建议在项目根目录创建 `.twsignore` 文件，排除测试用例、构建产物、设计书等不需要索引的内容。格式与 `.gitignore` 一致（支持 `#` 注释、`!` 反选）。索引时自动读取。详见 `found-tws-graph-usage` 的「.twsignore 忽略文件」节。
 
-## ⑥ 创建基线快照
+## ⑥ 解析跨文件引用
+
+索引构建完成后，各文件的符号和关系已经入库，但**跨文件的 import/call/type 引用尚未连接**。`tws-graph index` 只做单文件符号提取，`tws-graph resolve` 扫描所有跨文件边，通过语言特定的模块解析器（覆盖 21 种语言）解析引用目标，更新边的指向。
+
+```
+Bash: tws-graph resolve 2>&1
+
+→ 输出解析统计（已解析 N 条引用，未解析 M 条）
+→ 解析后，calls/impact/trace 等跨文件查询才能正常工作
+→ 未解析的引用记录在 unresolved_refs 表中，可通过 tws-graph unresolved 查看
+```
+
+```
+→ 成功 → 继续步骤 ⑦
+→ 如果全部未解析 → 检查项目语言是否在 21 种支持语言之列、import 路径是否规范
+→ 失败不阻塞，标注「跨文件引用未解析，calls/impact/trace 跨文件查询可能不完整」
+```
+
+> **为什么需要 resolve？** `tws-graph index` 提取了 `import X from Y` 和 `X.method()` 调用，但不知道 `X` 对应哪个文件的哪个符号。`resolve` 通过语言的模块解析规则，将 `from .utils import helper` 连接到 `utils.py` 中的 `helper` 函数，将 `Class.method()` 调用连接到 `Class.method` 定义。没有 resolve，跨文件的 calls/impact/trace 结果将不完整。
+
+## ⑦ 创建基线快照
 
 ```
 Bash: tws-graph snapshot initial 2>&1
@@ -161,7 +181,7 @@ Bash: tws-graph snapshot initial 2>&1
 → 后续 design-sync 可以 diff 到这个基线
 ```
 
-## ⑦ 安装 git hooks
+## ⑧ 安装 git hooks
 
 ```
 Bash: tws-graph hooks install 2>&1
@@ -182,8 +202,9 @@ tws-graph v7.0.0+ 在新服务器上需要从头初始化整个工具链。以�
 4. cd tws-graph/rust_core && cargo build --release
 5. 部署原生库（步骤 ④）
 6. tws-graph index
-7. tws-graph snapshot initial
-8. tws-graph hooks install
+7. tws-graph resolve
+8. tws-graph snapshot initial
+9. tws-graph hooks install
 ```
 
 > **关于 target/ 目录**：`tws-graph/rust_core/target/` 是 Cargo 构建输出目录，包含 debug 和 release 构建产物、增量编译缓存、依赖库等，通常 4-5G。该目录已在 `.gitignore` 中排除，**发布和部署不需要此目录**。在源服务器上完成构建和部署后，可以安全删除：
@@ -199,6 +220,7 @@ tws-graph v7.0.0+ 在新服务器上需要从头初始化整个工具链。以�
 - [ ] `python -c "from _core._core import ping; print(ping())"` 输出 "pong"
 - [ ] tws-graph index 成功运行
 - [ ] .tws/codegraph/index.db 文件存在且 > 0
+- [ ] tws-graph resolve 成功运行
 - [ ] tws-graph snapshot initial 已创建基线
 - [ ] tws-graph hooks install 已安装
 
@@ -220,6 +242,7 @@ tws-graph v7.0.0+ 在新服务器上需要从头初始化整个工具链。以�
 | 原生库部署失败 | 检查 EXT_SUFFIX 和文件路径，手动复制 |
 | tws-graph index 部分失败 | 继续，标注不完整 |
 | tws-graph index 全部失败 | 标注失败，退回 grep |
+| tws-graph resolve 失败 | 不阻塞，标注跨文件引用未解析 |
 | tws-graph snapshot 失败 | 不阻塞，下次 design-sync 用最新 DB 比 |
 
 ## 后续使用
@@ -240,6 +263,7 @@ tws-graph index    ← 增量索引（只处理修改过的文件）
 ```
 rm .tws/codegraph/index.db
 tws-graph index
+tws-graph resolve
 tws-graph snapshot initial
 ```
 
@@ -255,7 +279,8 @@ tws-graph snapshot initial
 3. cargo build --release
 4. 重新部署原生库（步骤 ④）
 5. 验证: python -c "from _core._core import ping; print(ping())"
-6. tws-graph index  # 全量重建索引以利用新提取器/符号类型
+6. tws-graph index   # 全量重建索引以利用新提取器/符号类型
+7. tws-graph resolve
 ```
 
 ## Rationalization Prevention
