@@ -1,4 +1,4 @@
-# tws-graph 用户手册 v7.3.3
+# tws-graph 用户手册 v7.3.4
 
 > 面向人类的完整 CLI + MCP 工具参考。Agent 使用指南见 `found-tws-graph-usage`。
 
@@ -97,7 +97,7 @@ Callers for 'execute_search':
 
 ```
 $ tws-graph --version
-tws-graph 7.3.3
+tws-graph 7.3.4
 ```
 
 版本号取自此项目的 `pyproject.toml`。tws-graph 从 v7.0.0 起已从纯 Python 重写为 **Rust 核心 + Python CLI 包装**，核心引擎（索引器、查询引擎、图算法）全部使用 Rust 实现，通过 PyO3 作为原生库暴露给 Python。
@@ -283,7 +283,7 @@ tws-graph hooks install
 
 ```bash
 $ tws-graph --version
-tws-graph 7.3.3
+tws-graph 7.3.4
 
 $ python -c "from _core._core import ping; print(ping())"
 pong
@@ -537,7 +537,7 @@ $ tws-graph search kind:class --include "src/**" --exclude "tests/"
 
 ## 4. CLI 命令详解
 
-tws-graph 7.3.3 提供 25 个 CLI 子命令，覆盖索引构建、符号搜索、关系查询、影响分析、架构分析、导出和工具等多个维度。本章按使用频率和功能类别依次介绍每个命令。
+tws-graph 7.3.4 提供 25 个 CLI 子命令，覆盖索引构建、符号搜索、关系查询、影响分析、架构分析、导出和工具等多个维度。本章按使用频率和功能类别依次介绍每个命令。
 
 ### 4.1 索引与同步 (index / sync / hooks / watch)
 
@@ -1361,7 +1361,7 @@ tws-graph diff before-refactor after-refactor --brief
 
 ### 4.8 图导出 (export dot/mermaid/json)
 
-`tws-graph export` 支持三种导出格式：DOT（Graphviz）、Mermaid（Markdown 友好）和 JSON（结构化数据）。这是 v7.3.3 重点改进的功能，特别是 Mermaid 格式新增了 `-m`（Markdown 代码块包裹）和 `-g`（按文件分组 subgraph）参数。
+`tws-graph export` 支持三种导出格式：DOT（Graphviz）、Mermaid（Markdown 友好）和 JSON（结构化数据）。这是 v7.3.4 重点改进的功能，特别是 Mermaid 格式新增了 `-m`（Markdown 代码块包裹）和 `-g`（按文件分组 subgraph）参数。
 
 #### 4.8.1 DOT 格式
 
@@ -1981,7 +1981,7 @@ $ tws-graph lsp setup
 TypeError: _core._core.lsp_setup() takes no arguments (1 given)
 ```
 
-> **已知问题**: `tws-graph lsp setup` 在 7.3.3 版本中，Python CLI 层向 Rust 核心函数 `lsp_setup()` 传入了一个参数，但 Rust 核心的函数签名不接受任何参数。这是 `rust_bridge.py:421` 中 `lsp_setup(db_path)` 与 `_core._core.lsp_setup()` 签名不匹配导致的问题。预计将在后续版本修复。
+> **已知问题**: `tws-graph lsp setup` 在 7.3.4 版本中，Python CLI 层向 Rust 核心函数 `lsp_setup()` 传入了一个参数，但 Rust 核心的函数签名不接受任何参数。这是 `rust_bridge.py:421` 中 `lsp_setup(db_path)` 与 `_core._core.lsp_setup()` 签名不匹配导致的问题。预计将在后续版本修复。
 
 #### 4.11.4 federate -- 多仓库联邦
 
@@ -2001,7 +2001,7 @@ $ tws-graph federate list
 ModuleNotFoundError: No module named 'tws_graph.federation'
 ```
 
-> **已知问题**: `tws-graph federate` 在 7.3.3 版本中，Python CLI 层尝试导入 `tws_graph.federation` 模块，但该模块尚未创建。此功能处于开发中状态。
+> **已知问题**: `tws-graph federate` 在 7.3.4 版本中，Python CLI 层尝试导入 `tws_graph.federation` 模块，但该模块尚未创建。此功能处于开发中状态。
 
 ---
 
@@ -2261,7 +2261,7 @@ tws-graph serve mcp-config
 
 ## 6. 实战工作流
 
-> **说明**：以下 5 个场景的所有命令均在 tws-graph v7.3.3 环境下实际运行，输出为真实结果。
+> **说明**：以下 5 个场景的所有命令均在 tws-graph v7.3.4 环境下实际运行，输出为真实结果。
 
 ### 场景 1：接手新项目，快速理解代码结构
 
@@ -2859,7 +2859,7 @@ $ cargo build --release
 验证修复：
 ```bash
 $ tws-graph --version
-tws-graph 7.3.3
+tws-graph 7.3.4
 ```
 
 ---
