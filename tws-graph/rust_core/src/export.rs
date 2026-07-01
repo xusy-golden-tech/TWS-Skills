@@ -8,21 +8,33 @@ use crate::db::Database;
 use crate::query::traversal::{GraphTraverser, TraversalDirection};
 use std::collections::HashSet;
 
-/// Export a subgraph starting from `from_node` in Graphviz DOT format.
+/// Export a subgraph in Graphviz DOT format.
 ///
-/// Traverses `depth` hops outbound from the named node, then renders the
-/// reachable nodes and edges as a directed graph. If `kind` is provided,
-/// only edges of that kind are included in the traversal.
+/// Traverses from either `from_node` (outbound, following call targets) or
+/// `to_node` (inbound, following callers) for `depth` hops. The two are
+/// mutually exclusive — if both are provided, `to_node` takes precedence.
+/// If neither is provided, returns an empty graph.
 ///
+/// If `kind` is provided, only edges of that kind are included in the traversal.
 /// If `allowed_nodes` is provided, only nodes in the set are included in the output.
 pub fn export_dot(
     db: &Database,
-    from_node: &str,
+    from_node: Option<&str>,
+    to_node: Option<&str>,
     depth: usize,
     kind: Option<&str>,
     allowed_nodes: Option<&HashSet<String>>,
 ) -> String {
-    let node_id = match db.find_node_id_by_name(from_node).unwrap_or(None) {
+    // Determine which node to start from and the traversal direction
+    let (start_name, direction) = if let Some(to_name) = to_node {
+        (to_name, TraversalDirection::Inbound)
+    } else if let Some(from_name) = from_node {
+        (from_name, TraversalDirection::Outbound)
+    } else {
+        return String::from("digraph G {\n  // no from_node or to_node provided\n}\n");
+    };
+
+    let node_id = match db.find_node_id_by_name(start_name).unwrap_or(None) {
         Some(id) => id,
         None => return String::from("digraph G {\n  // node not found\n}\n"),
     };
@@ -35,7 +47,7 @@ pub fn export_dot(
         Err(_) => return String::from("digraph G {\n  // traversal error\n}\n"),
     };
 
-    let reachable = traverser.impact_radius(&node_id, depth, TraversalDirection::Outbound);
+    let reachable = traverser.impact_radius(&node_id, depth, direction);
 
     // Collect all relevant nodes (start + reachable)
     let mut all_nodes: HashSet<String> = HashSet::new();
@@ -94,22 +106,34 @@ pub fn export_dot(
     dot
 }
 
-/// Export a subgraph starting from `from_node` in Mermaid format.
+/// Export a subgraph in Mermaid format.
 ///
-/// Traverses `depth` hops outbound from the named node and renders as a
-/// Mermaid flowchart (graph TD), suitable for embedding in Markdown.
+/// Traverses from either `from_node` (outbound, following call targets) or
+/// `to_node` (inbound, following callers) for `depth` hops. The two are
+/// mutually exclusive — if both are provided, `to_node` takes precedence.
+/// If neither is provided, returns an empty graph.
 ///
 /// If `allowed_nodes` is provided, only nodes in the set are included in the output.
 /// If `group_by_file` is true, nodes from the same file are wrapped in subgraphs.
 pub fn export_mermaid(
     db: &Database,
-    from_node: &str,
+    from_node: Option<&str>,
+    to_node: Option<&str>,
     depth: usize,
     kind: Option<&str>,
     allowed_nodes: Option<&HashSet<String>>,
     group_by_file: bool,
 ) -> String {
-    let node_id = match db.find_node_id_by_name(from_node).unwrap_or(None) {
+    // Determine which node to start from and the traversal direction
+    let (start_name, direction) = if let Some(to_name) = to_node {
+        (to_name, TraversalDirection::Inbound)
+    } else if let Some(from_name) = from_node {
+        (from_name, TraversalDirection::Outbound)
+    } else {
+        return String::from("graph TD\n  %% no from_node or to_node provided\n");
+    };
+
+    let node_id = match db.find_node_id_by_name(start_name).unwrap_or(None) {
         Some(id) => id,
         None => return String::from("graph TD\n  %% node not found\n"),
     };
@@ -122,7 +146,7 @@ pub fn export_mermaid(
         Err(_) => return String::from("graph TD\n  %% traversal error\n"),
     };
 
-    let reachable = traverser.impact_radius(&node_id, depth, TraversalDirection::Outbound);
+    let reachable = traverser.impact_radius(&node_id, depth, direction);
 
     let mut all_nodes: HashSet<String> = HashSet::new();
     all_nodes.insert(node_id.clone());
@@ -435,7 +459,7 @@ mod tests {
     #[test]
     fn test_export_dot_not_found() {
         let (db, path) = setup_db("dot_not_found");
-        let result = export_dot(&db, "nonexistent", 2, None, None);
+        let result = export_dot(&db, Some("nonexistent"), None, 2, None, None);
         assert!(result.contains("node not found"));
         cleanup(&path);
     }
@@ -446,7 +470,7 @@ mod tests {
         let conn = db.connection();
         let nid = insert_node(conn, "main_func", "src/main.py", "function");
 
-        let result = export_dot(&db, "main_func", 1, None, None);
+        let result = export_dot(&db, Some("main_func"), None, 1, None, None);
         assert!(result.contains("digraph G"));
         assert!(result.contains(&nid));
         assert!(result.contains("main_func"));
@@ -462,7 +486,7 @@ mod tests {
         let b = insert_node(conn, "func_b", "src/b.py", "function");
         insert_edge(conn, &a, &b, "CALLS");
 
-        let result = export_dot(&db, "func_a", 2, None, None);
+        let result = export_dot(&db, Some("func_a"), None, 2, None, None);
         assert!(result.contains("CALLS"));
         assert!(result.contains("func_b"));
         cleanup(&path);
@@ -479,12 +503,12 @@ mod tests {
         insert_edge(conn, &b, &c, "CALLS");
 
         // depth=1 should only reach beta, not gamma
-        let result = export_dot(&db, "alpha_func", 1, None, None);
+        let result = export_dot(&db, Some("alpha_func"), None, 1, None, None);
         assert!(result.contains("beta_func"));
         assert!(!result.contains("gamma_func")); // gamma is at depth 2
 
         // depth=2 should reach both
-        let result2 = export_dot(&db, "alpha_func", 2, None, None);
+        let result2 = export_dot(&db, Some("alpha_func"), None, 2, None, None);
         assert!(result2.contains("beta_func"));
         assert!(result2.contains("gamma_func"));
         cleanup(&path);
@@ -500,7 +524,7 @@ mod tests {
         insert_edge(conn, &a, &b, "CALLS");
         insert_edge(conn, &a, &c, "IMPORTS");
 
-        let result = export_dot(&db, "alpha", 2, Some("CALLS"), None);
+        let result = export_dot(&db, Some("alpha"), None, 2, Some("CALLS"), None);
         assert!(result.contains("beta"));
         assert!(!result.contains("gamma")); // Only CALLS edges traversed
         cleanup(&path);
@@ -513,7 +537,7 @@ mod tests {
     #[test]
     fn test_export_mermaid_not_found() {
         let (db, path) = setup_db("mmd_not_found");
-        let result = export_mermaid(&db, "nonexistent", 2, None, None, false);
+        let result = export_mermaid(&db, Some("nonexistent"), None, 2, None, None, false);
         assert!(result.contains("node not found"));
         cleanup(&path);
     }
@@ -524,7 +548,7 @@ mod tests {
         let conn = db.connection();
         insert_node(conn, "main_func", "src/main.py", "function");
 
-        let result = export_mermaid(&db, "main_func", 1, None, None, false);
+        let result = export_mermaid(&db, Some("main_func"), None, 1, None, None, false);
         assert!(result.contains("graph TD"));
         assert!(result.contains("main_func"));
         // Flat mode shows file basename in label
@@ -540,7 +564,7 @@ mod tests {
         let b = insert_node(conn, "func_b", "src/b.py", "function");
         insert_edge(conn, &a, &b, "CALLS");
 
-        let result = export_mermaid(&db, "func_a", 2, None, None, false);
+        let result = export_mermaid(&db, Some("func_a"), None, 2, None, None, false);
         assert!(result.contains("graph TD"));
         assert!(result.contains("CALLS"));
         cleanup(&path);
@@ -556,7 +580,7 @@ mod tests {
         insert_edge(conn, &a, &b, "CALLS");
         insert_edge(conn, &b, &c, "CALLS");
 
-        let result = export_mermaid(&db, "func_a", 2, None, None, true);
+        let result = export_mermaid(&db, Some("func_a"), None, 2, None, None, true);
         // Grouped mode should have subgraph for module.py (with 2 nodes)
         assert!(result.contains("subgraph"));
         assert!(result.contains("module.py"));
@@ -577,7 +601,7 @@ mod tests {
         insert_edge(conn, &a, &b, "CALLS");
         insert_edge(conn, &b, &c, "CALLS");
 
-        let result = export_mermaid(&db, "first", 1, None, None, false);
+        let result = export_mermaid(&db, Some("first"), None, 1, None, None, false);
         assert!(result.contains("second"));
         assert!(!result.contains("third"));
         cleanup(&path);
