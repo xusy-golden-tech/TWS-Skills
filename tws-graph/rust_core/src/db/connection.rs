@@ -496,7 +496,41 @@ impl Database {
     }
 
     /// Find a node by name or qualified_name and return its TEXT id.
+    ///
+    /// Supports the following input formats:
+    /// 1. `chat_with_tools` — simple name (existing behaviour)
+    /// 2. `LLMGateway.chat_with_tools` — Class.method notation
+    /// 3. `LLMGateway.chat_with_tools()` — Class.method with trailing parens
+    /// 4. `modules/llm/gateway.py::LLMGateway::chat_with_tools` — full qualified_name
+    ///
+    /// For Class.method notation the method splits on the last `.`, matches
+    /// `name = method_part` and `qualified_name LIKE '%class_part%'`.  If no
+    /// result is found it falls back to the original query.
     pub fn find_node_id_by_name(&self, name: &str) -> rusqlite::Result<Option<String>> {
+        // Detect Class.method notation: contains '.' but not '::'
+        // Full qualified_names use '::' as separator so we skip those.
+        if name.contains('.') && !name.contains("::") {
+            // Strip trailing () if present (e.g. "MyClass.method()")
+            let cleaned = name.strip_suffix("()").unwrap_or(name);
+            if let Some(dot_pos) = cleaned.rfind('.') {
+                let class_part = &cleaned[..dot_pos];
+                let method_part = &cleaned[dot_pos + 1..];
+
+                // Try Class.method query: match name + partial qualified_name
+                let like_pattern = format!("%{}%", class_part);
+                match self.conn.query_row(
+                    "SELECT id FROM nodes WHERE name = ?1 AND qualified_name LIKE ?2 LIMIT 1",
+                    rusqlite::params![method_part, like_pattern],
+                    |row| row.get(0),
+                ) {
+                    Ok(id) => return Ok(Some(id)),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {} // fall through
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        // Original query (also serves as fallback for Class.method notation)
         let mut stmt = self.conn.prepare(
             "SELECT id FROM nodes WHERE name = ?1 OR qualified_name = ?1 LIMIT 1",
         )?;
@@ -1155,6 +1189,151 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 1);
         }
+
+        cleanup(&path);
+    }
+
+    // ------------------------------------------------------------------
+    // find_node_id_by_name tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn find_node_id_by_name_simple_name() {
+        let path = temp_db_path("fnidn_simple");
+        cleanup(&path);
+
+        let db = Database::initialize(&path).unwrap();
+        let conn = db.connection();
+        let ts = now_ms();
+
+        // Insert: name="chat_with_tools", qualified_name="modules/llm/gateway.py::LLMGateway::chat_with_tools"
+        let nid = hash_id("modules/llm/gateway.py", "modules/llm/gateway.py::LLMGateway::chat_with_tools");
+        conn.execute(
+            "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, \
+             start_line, end_line, updated_at) \
+             VALUES (?1, 'method', 'chat_with_tools', \
+             'modules/llm/gateway.py::LLMGateway::chat_with_tools', \
+             'modules/llm/gateway.py', 'python', 42, 50, ?2)",
+            params![nid, ts],
+        )
+        .unwrap();
+
+        let result = db.find_node_id_by_name("chat_with_tools").unwrap();
+        assert_eq!(result, Some(nid.clone()));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn find_node_id_by_name_class_dot_method() {
+        let path = temp_db_path("fnidn_class_dot");
+        cleanup(&path);
+
+        let db = Database::initialize(&path).unwrap();
+        let conn = db.connection();
+        let ts = now_ms();
+
+        let nid = hash_id("modules/llm/gateway.py", "modules/llm/gateway.py::LLMGateway::chat_with_tools");
+        conn.execute(
+            "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, \
+             start_line, end_line, updated_at) \
+             VALUES (?1, 'method', 'chat_with_tools', \
+             'modules/llm/gateway.py::LLMGateway::chat_with_tools', \
+             'modules/llm/gateway.py', 'python', 42, 50, ?2)",
+            params![nid, ts],
+        )
+        .unwrap();
+
+        // Class.method notation
+        let result = db.find_node_id_by_name("LLMGateway.chat_with_tools").unwrap();
+        assert_eq!(result, Some(nid));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn find_node_id_by_name_class_dot_method_with_parens() {
+        let path = temp_db_path("fnidn_parens");
+        cleanup(&path);
+
+        let db = Database::initialize(&path).unwrap();
+        let conn = db.connection();
+        let ts = now_ms();
+
+        let nid = hash_id("modules/llm/gateway.py", "modules/llm/gateway.py::LLMGateway::chat_with_tools");
+        conn.execute(
+            "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, \
+             start_line, end_line, updated_at) \
+             VALUES (?1, 'method', 'chat_with_tools', \
+             'modules/llm/gateway.py::LLMGateway::chat_with_tools', \
+             'modules/llm/gateway.py', 'python', 42, 50, ?2)",
+            params![nid, ts],
+        )
+        .unwrap();
+
+        // Class.method() — trailing parens should be stripped
+        let result = db.find_node_id_by_name("LLMGateway.chat_with_tools()").unwrap();
+        assert_eq!(result, Some(nid));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn find_node_id_by_name_nonexistent() {
+        let path = temp_db_path("fnidn_nonexistent");
+        cleanup(&path);
+
+        let db = Database::initialize(&path).unwrap();
+        let conn = db.connection();
+        let ts = now_ms();
+
+        let nid = hash_id("modules/llm/gateway.py", "modules/llm/gateway.py::LLMGateway::chat_with_tools");
+        conn.execute(
+            "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, \
+             start_line, end_line, updated_at) \
+             VALUES (?1, 'method', 'chat_with_tools', \
+             'modules/llm/gateway.py::LLMGateway::chat_with_tools', \
+             'modules/llm/gateway.py', 'python', 42, 50, ?2)",
+            params![nid, ts],
+        )
+        .unwrap();
+
+        // Non-existent symbol
+        let result = db.find_node_id_by_name("NonExistent.method").unwrap();
+        assert_eq!(result, None);
+
+        // Original node still queryable by simple name
+        let result2 = db.find_node_id_by_name("chat_with_tools").unwrap();
+        assert_eq!(result2, Some(nid));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn find_node_id_by_name_fallback_to_original() {
+        let path = temp_db_path("fnidn_fallback");
+        cleanup(&path);
+
+        let db = Database::initialize(&path).unwrap();
+        let conn = db.connection();
+        let ts = now_ms();
+
+        let nid = hash_id("modules/llm/gateway.py", "modules/llm/gateway.py::LLMGateway::chat_with_tools");
+        conn.execute(
+            "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, \
+             start_line, end_line, updated_at) \
+             VALUES (?1, 'method', 'chat_with_tools', \
+             'modules/llm/gateway.py::LLMGateway::chat_with_tools', \
+             'modules/llm/gateway.py', 'python', 42, 50, ?2)",
+            params![nid, ts],
+        )
+        .unwrap();
+
+        // Full qualified_name with :: — goes through original query path
+        let result = db
+            .find_node_id_by_name("modules/llm/gateway.py::LLMGateway::chat_with_tools")
+            .unwrap();
+        assert_eq!(result, Some(nid));
 
         cleanup(&path);
     }
