@@ -1,1 +1,2 @@
 - [Skill source location](feedback_skill_source_location.md) — SKILL.md 源码在根目录，`.claude/skills/` 是部署产物，不可手动修改
+- [Root-level skills are source](feedback_root_level_skills.md) — 根目录文件是源码，.claude/skills/ 是编译部署结果，更新必须先改根目录

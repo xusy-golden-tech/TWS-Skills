@@ -1,6 +1,6 @@
 ---
 name: tws-graph-usage
-description: tws-graph 代码图使用指南（v7.2.0）。所有需要查图的子 agent 必须加载此 skill。包含安装检查、命令语法、错误处理和最佳实践
+description: tws-graph 代码图使用指南（v7.3.1）。所有需要查图的子 agent 必须加载此 skill。包含安装检查、命令语法、错误处理和最佳实践
 ---
 
 # tws-graph 代码图使用指南
@@ -296,6 +296,11 @@ tws-graph search myapp
 tws-graph impact <被改符号> --depth 2
 tws-graph calls <被改符号> --inbound
 tws-graph snapshot before
+
+# <被改符号> 支持多种记法：
+tws-graph impact ClassName.method_name --depth 2        # Class.method 记法（v7.3.1）
+tws-graph impact method_name --depth 2                  # 裸方法名
+tws-graph impact file::Class::method --depth 2          # qualified_name 记法
 ```
 
 ### 设计同步时
@@ -309,6 +314,10 @@ tws-graph diff before after
 ```
 tws-graph trace <入口函数> <报错函数>
 tws-graph calls <报错函数> --inbound --depth 3
+
+# trace/calls 支持 Class.method 记法（v7.3.1）：
+tws-graph trace "ClassName.method_name" "TargetClass.target_method"
+tws-graph calls "ClassName.method_name" --inbound
 ```
 
 ### 查找符号
@@ -320,6 +329,26 @@ tws-graph search kind:function <关键词>
 tws-graph search lang:sql kind:sql_table <关键词>
 tws-graph search lang:hcl kind:hcl_resource <关键词>
 ```
+
+### 查函数/方法实现（排除测试文件）
+
+**关键规则：查实现时必须排除测试目录，否则实现会被测试调用淹没。**
+
+```
+# 查找方法/函数的真正实现（排除 tests/ 目录）
+tws-graph search kind:method <方法名> --exclude "tests/"
+tws-graph search kind:function <函数名> --exclude "tests/"
+
+# 如果还需要缩小范围，叠加路径过滤：
+tws-graph search kind:method <方法名> --exclude "tests/" --include "src/"
+
+# 查类定义：
+tws-graph search kind:class <类名> --exclude "tests/"
+```
+
+**为什么需要 `--exclude "tests/"`：** 测试文件中对函数的调用会产生同名节点（如 `test_*` 方法调用目标），搜索时测试文件中的引用会淹没真正的实现。不加此过滤时，前 20 条结果可能全在 tests/ 里。
+
+> **范围过滤（v7.2.0）**：`search`/`calls`/`impact`/`trace`/`unresolved` 均支持 `--include`/`-I` 和 `--exclude`/`-X`。
 
 ### 语义搜索
 
