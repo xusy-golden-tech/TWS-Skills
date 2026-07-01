@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 TWS (Thoughtful Workflow System) is a collection of structured AI skill prompts that enforce disciplined software development workflows. It has two parts:
 
 1. **Skill files** — 41 `SKILL.md` markdown files, each containing YAML frontmatter + instructions for Claude Code agents. These are the "product."
-2. **tws-graph** — a Rust-powered (v7.0.0) CLI that pre-builds a tree-sitter-based code symbol graph (SQLite). Agents query it via bash instead of grep + read. Python CLI is now a thin wrapper around the Rust core (_core native library). Lives in `tws-graph/`.
+2. **tws-graph** — a Rust-powered (v7.3.0) CLI that pre-builds a tree-sitter-based code symbol graph (SQLite). Agents query it via bash instead of grep + read. Python CLI is now a thin wrapper around the Rust core (_core native library). Lives in `tws-graph/`.
 
 See `USAGE.md` for user-facing setup instructions.
 
@@ -44,11 +44,11 @@ Full dependency graph can be queried via `tws-graph search kind:skill`.
 
 ## tws-graph
 
-### Architecture (v7.0.0)
+### Architecture (v7.3.0)
 
-tws-graph 7.0.0 has been rewritten from Python to Rust. The Python package (`tws-graph/`) is now a thin CLI wrapper that delegates all core operations to the Rust native library (`_core`). The bridge module is `src/tws_graph/rust_bridge.py`.
+tws-graph 7.3.0 has been rewritten from Python to Rust. The Python package (`tws-graph/`) is now a thin CLI wrapper that delegates all core operations to the Rust native library (`_core`). The bridge module is `src/tws_graph/rust_bridge.py`.
 
-- **Rust core** (`_core/_core` native library): indexer, query engine, graph algorithms, analysis, GQL, lint, LSP setup, watch, federate, hooks, snapshots, taint, health, metrics, layers, cycles
+- **Rust core** (`_core/_core` native library): indexer, query engine, graph algorithms, analysis, GQL, lint, LSP setup, watch, federate, hooks, snapshots, taint, health, metrics, layers, cycles, resolver (cross-file reference resolution, 21 languages)
 - **Python CLI** (`src/tws_graph/cli.py`): typer-based command-line interface, thin wrapper calling rust_bridge
 - **Python MCP** (`src/tws_graph/mcp/`): MCP server (21 tools + 3 resources), uses Python store/analysis modules
 - **Python Store** (`src/tws_graph/store/`): SQLite data layer used by MCP and CLI helpers
@@ -61,7 +61,7 @@ pip install -e tws-graph/
 
 The Rust core is built separately. See `tws-graph/_core/` for build instructions.
 
-### Commands (18 CLI commands, all backed by Rust core)
+### Commands (19 CLI commands, all backed by Rust core)
 
 | Command | Purpose |
 |---------|---------|
@@ -71,7 +71,8 @@ The Rust core is built separately. See `tws-graph/_core/` for build instructions
 | `tws-graph calls <node>` | Show call targets/callers from a node |
 | `tws-graph impact <node>` | Show what would break if node changes |
 | `tws-graph trace <src> <tgt>` | Find paths between two nodes |
-| `tws-graph unresolved` | List unresolved cross-file references |
+| `tws-graph resolve` | Resolve cross-file import/call/type references (post-index) |
+| `tws-graph unresolved` | List unresolved cross-file references (classified internal/external) |
 | `tws-graph snapshot <name>` | Create named snapshot |
 | `tws-graph diff` | Compare snapshots (before/after) |
 | `tws-graph hooks install/remove` | Git hooks for auto-sync |
@@ -101,7 +102,7 @@ pytest tests/test_fts.py        # single file
 pytest -k "test_edit"           # name filter
 ```
 
-Python tests use temporary SQLite databases (`tmp_path` fixture). Rust core has its own test suite (1025 tests).
+Python tests use temporary SQLite databases (`tmp_path` fixture). Rust core has its own test suite (1710 tests).
 
 ### Skill Validation
 

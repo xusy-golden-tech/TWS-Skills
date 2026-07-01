@@ -88,10 +88,12 @@ TWS 判断完场景后会输出一个执行计划，问你"要开始吗？"。�
 ```
 tws-graph sync              ← 增量同步（日常使用）
 tws-graph index             ← 全量重建索引
+tws-graph resolve           ← 解析跨文件引用（index 后执行）
 tws-graph impact <节点>     ← 查变更影响范围
 tws-graph calls <节点>      ← 查调用关系
 tws-graph trace <A> <B>     ← 查 A 到 B 的路径
 tws-graph search <关键词>   ← FTS5 全文搜索符号
+tws-graph unresolved        ← 列出未解析引用（分类 internal/external）
 tws-graph lint              ← 校验 skill 文件完整性
 tws-graph hooks install     ← 安装 git hooks 自动同步
 tws-graph diff              ← 对比快照
