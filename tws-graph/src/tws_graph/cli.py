@@ -23,6 +23,8 @@ import typer
 
 from . import __version__
 from .store import SqliteStore
+from .store.query_builder import QueryBuilder
+from .search.semantic import semantic_query
 
 app = typer.Typer(
     name="tws-graph",
@@ -108,6 +110,15 @@ def _get_store(db_path: str) -> SqliteStore:
         conn.close()
 
     return SqliteStore(db_path)
+
+
+def _get_db(db_path: str) -> SqliteStore:
+    """Open an existing index database (thin wrapper over _get_store).
+
+    Used by query commands (search, calls, impact, trace, etc.) that expect
+    the database to already exist.
+    """
+    return _get_store(db_path)
 
 
 def _sync_files_from_nodes(store: SqliteStore, root_dir: str = "") -> None:
@@ -1155,6 +1166,10 @@ def _run_p9_analyzer(analyzer_name: str, db_path: Optional[str],
 
             elapsed_ms = (time.perf_counter() - start) * 1000
 
+            # Apply include/exclude path filters on list results
+            if isinstance(result, list) and (include_paths or exclude_paths):
+                result = _filter_results_by_path(result, include_paths, exclude_paths)
+
             # Serialize results (dataclasses -> dicts).
             if isinstance(result, list):
                 serialized = [_dc_to_dict(r) for r in result]
@@ -1217,6 +1232,59 @@ def _dc_to_dict(obj) -> dict:
     if hasattr(obj, "value"):
         return obj.value
     return obj
+
+
+def _serialize(obj):
+    """Convert objects to JSON-serializable form.
+
+    Handles dataclasses, sqlite3.Row, lists, dicts, and scalars.
+    """
+    import dataclasses
+
+    if obj is None:
+        return None
+    if isinstance(obj, list):
+        return [_serialize(item) for item in obj]
+    if isinstance(obj, dict):
+        return {k: _serialize(v) for k, v in obj.items()}
+    if hasattr(obj, "__dataclass_fields__"):
+        return {f.name: _serialize(getattr(obj, f.name)) for f in dataclasses.fields(obj)}
+    if hasattr(obj, "keys") and hasattr(obj, "__getitem__"):
+        try:
+            return {k: _serialize(obj[k]) for k in obj.keys()}
+        except (TypeError, KeyError):
+            pass
+    if hasattr(obj, "value"):
+        return obj.value
+    return obj
+
+
+def _filter_results_by_path(
+    results: list,
+    include_paths: list[str] | None,
+    exclude_paths: list[str] | None,
+) -> list:
+    """Filter analyzer results by include/exclude glob patterns on file_path."""
+    import fnmatch
+
+    filtered = []
+    for r in results:
+        fpath = getattr(r, "file_path", "")
+        if not fpath:
+            filtered.append(r)
+            continue
+
+        if exclude_paths:
+            if any(fnmatch.fnmatch(fpath, pat) for pat in exclude_paths):
+                continue
+
+        if include_paths:
+            if not any(fnmatch.fnmatch(fpath, pat) for pat in include_paths):
+                continue
+
+        filtered.append(r)
+
+    return filtered
 
 
 def _print_algorithm_result(algo_name: str, result) -> None:

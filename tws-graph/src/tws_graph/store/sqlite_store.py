@@ -185,6 +185,11 @@ class SqliteStore(Store):
     # 1. Connection management
     # =========================================================================
 
+    @property
+    def conn(self):
+        """Return the ConnectionManager for use by QueryBuilder and other consumers."""
+        return self._conn_mgr
+
     def close(self) -> None:
         """Close the connection and release resources. Idempotent.
 
