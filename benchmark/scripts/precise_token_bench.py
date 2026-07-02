@@ -35,6 +35,17 @@ PROMPT_TWS = """通过 Skill 工具加载 found-tws-graph-usage: Skill(skill="fo
 ## 工具说明
 优先使用 tws-graph (search/calls/impact/trace) 进行代码调查。Grep 仅作回退手段。"""
 
+PROMPT_TWS_BRIEF = """通过 Skill 工具加载 found-tws-graph-usage: Skill(skill="found-tws-graph-usage")
+
+""" + TASK + """
+## 工具说明
+优先使用 tws-graph (search/calls/impact/trace) 进行代码调查。Grep 仅作回退手段。
+
+## 重要：tws-graph calls 使用 --brief
+每次调用 tws-graph calls 命令时必须添加 --brief flag，减少不必要的信息输出。例如：
+- tws-graph calls <node> --brief
+- tws-graph calls <node> --inbound --brief"""
+
 
 def run_bench(mode, prompt, extra_args=None):
     """Run claude --print and return usage stats."""
@@ -107,26 +118,26 @@ def run_bench(mode, prompt, extra_args=None):
 def main():
     results = {}
 
-    # Run Grep mode — restrict to Grep + Read only
-    r = run_bench("Grep", PROMPT_GREP, extra_args=["--allowedTools", "Grep", "Read"])
-    results["grep"] = r
-
-    time.sleep(3)
-
-    # Run tws-graph mode — allow all tools including Bash for tws-graph CLI
+    # Run tws-graph mode (rich) — allow all tools including Bash for tws-graph CLI
     r = run_bench("tws-graph", PROMPT_TWS, extra_args=["--dangerously-skip-permissions"])
     results["twsgraph"] = r
 
-    # Print comparison
-    g = results.get("grep")
-    t = results.get("twsgraph")
+    time.sleep(3)
 
-    if not g or not t:
+    # Run tws-graph mode (--brief) — same but calls uses --brief
+    r = run_bench("tws-graph-brief", PROMPT_TWS_BRIEF, extra_args=["--dangerously-skip-permissions"])
+    results["twsgraph_brief"] = r
+
+    # Print comparison
+    t = results.get("twsgraph")       # rich (default)
+    b = results.get("twsgraph_brief") # --brief
+
+    if not t or not b:
         print("\n无法完成对比")
         return
 
     print("\n" + "=" * 65)
-    print("精确 Token 对比: Grep vs tws-graph (真实 bug 调查)")
+    print("精确 Token 对比: tws-graph rich vs --brief (真实 bug 调查)")
     print("=" * 65)
 
     rows = [
@@ -137,26 +148,28 @@ def main():
     ]
 
     for label, key in rows:
-        gv, tv = g[key], t[key]
-        diff = gv - tv
-        pct = diff / gv * 100 if gv else 0
-        print(f"  {label:<22} {gv:>10,} → {tv:>10,}  |  {diff:>+10,}  ({pct:>+5.1f}%)")
+        tv, bv = t[key], b[key]
+        diff = tv - bv
+        pct = diff / tv * 100 if tv else 0
+        print(f"  {label:<22} {tv:>10,} → {bv:>10,}  |  {diff:>+10,}  ({pct:>+5.1f}%)")
 
     print(f"  {'-'*55}")
-    print(f"  {'Turns':<22} {g['num_turns']:>10} → {t['num_turns']:>10}")
-    print(f"  {'Duration (s)':<22} {g['duration_s']:>10.1f} → {t['duration_s']:>10.1f}")
+    print(f"  {'Turns':<22} {t['num_turns']:>10} → {b['num_turns']:>10}")
+    print(f"  {'Duration (s)':<22} {t['duration_s']:>10.1f} → {b['duration_s']:>10.1f}")
 
-    g_total = g["input_tokens"] + g["output_tokens"]
     t_total = t["input_tokens"] + t["output_tokens"]
-    diff = g_total - t_total
-    pct = diff / g_total * 100
+    b_total = b["input_tokens"] + b["output_tokens"]
+    diff = t_total - b_total
+    pct = diff / t_total * 100
     print(f"  {'='*55}")
-    print(f"  {'TOTAL tokens':<22} {g_total:>10,} → {t_total:>10,}  |  {diff:>+10,}  ({pct:>+5.1f}%)")
-    print(f"  {'TOTAL cost':<22} ${g['cost_usd']:.4f} → ${t['cost_usd']:.4f}")
+    print(f"  {'TOTAL tokens':<22} {t_total:>10,} → {b_total:>10,}  |  {diff:>+10,}  ({pct:>+5.1f}%)")
+    print(f"  {'TOTAL cost':<22} ${t['cost_usd']:.4f} → ${b['cost_usd']:.4f}")
 
-    in_save = (g["input_tokens"] - t["input_tokens"]) / g["input_tokens"] * 100
-    print(f"\n  输入 token 节省: {in_save:.1f}%")
-    print(f"  核心发现: tws-graph 组 {'少用了' if diff > 0 else '多用了'} {abs(diff):,} total tokens")
+    print(f"\n  --brief 节省了 {diff:,} total tokens ({pct:.1f}%)")
+    if b['num_turns'] > t['num_turns']:
+        print(f"  [!] --brief group +{b['num_turns'] - t['num_turns']} turns vs rich (less info -> more queries)")
+    else:
+        print(f"  [OK] --brief group turns: {b['num_turns']} (<= rich: {t['num_turns']})")
 
     # Save
     os.makedirs("benchmark/results", exist_ok=True)

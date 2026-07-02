@@ -1,0 +1,24 @@
+{
+  "twsgraph_rich": {
+    "mode": "tws-graph (rich)",
+    "input_tokens": 57283,
+    "output_tokens": 17159,
+    "cache_read": 1265536,
+    "cache_creation": 0,
+    "num_turns": 59,
+    "duration_s": 335,
+    "cost_usd": 1.3482,
+    "stop_reason": "end_turn"
+  },
+  "twsgraph_brief": {
+    "mode": "tws-graph (--brief)",
+    "input_tokens": 45522,
+    "output_tokens": 15866,
+    "cache_read": 1632000,
+    "cache_creation": 0,
+    "num_turns": 63,
+    "duration_s": 319,
+    "cost_usd": 1.4403,
+    "stop_reason": "end_turn"
+  }
+}

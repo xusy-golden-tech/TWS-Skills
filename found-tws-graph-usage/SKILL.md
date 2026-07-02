@@ -43,6 +43,8 @@ tws-graph 是代码符号关系图引擎。它用 tree-sitter 预建 SQLite 索�
 - **图告诉 agent 客观事实**——谁调了谁、影响半径有多大、两个符号之间经过哪些路径
 - **agent 做主观判断**——风险等级、是否需要通知、是否值得改
 
+**`--brief` 规则**：所有自动任务中调用 `tws-graph calls` 必须加 `--brief`。rich 输出（签名/docstring/行号）是给人类读的，agent 反正要 Read 源码验证。实测 `--brief` 节省 17.5% total tokens（74K → 61K），turns 仅增加 4 次。
+
 agent 不应该猜命令。加载此 skill 就是为了确保命令准确。
 
 ## 索引覆盖范围
@@ -133,8 +135,10 @@ tests/
 | 命令 | 用途 | 示例 |
 |------|------|------|
 | `tws-graph search <query>` | FTS5 全文搜索符号 | `tws-graph search kind:class my` |
-| `tws-graph calls <node>` | 查调用目标（这个符号调了谁） | `tws-graph calls my_func` |
+| `tws-graph calls <node>` | 查调用目标（这个符号调了谁）。默认 rich 输出含签名/docstring/行号/visibility | `tws-graph calls my_func` |
 | `tws-graph calls <node> --inbound` | 查调用者（谁调了这个符号） | `tws-graph calls my_func --inbound` |
+| `tws-graph calls <node> --brief` | 精简输出（仅符号名+类型+文件）。**agent 自动任务必须加此 flag**，实测节省 17.5% total tokens | `tws-graph calls my_func --brief` |
+| `tws-graph calls <node> --json` | JSON 格式输出（含全部字段），需要结构化解析时使用 | `tws-graph calls my_func --json` |
 | `tws-graph impact <node>` | 查变更影响范围（谁依赖这个符号） | `tws-graph impact MyClass.my_method --depth 2` |
 | `tws-graph trace <src> <tgt>` | 查两个符号之间的调用路径 | `tws-graph trace main parse_config` |
 | `tws-graph unresolved` | 列出未解析引用，自动标记 `[external]`/`[internal]` | `tws-graph unresolved` |
@@ -294,7 +298,7 @@ tws-graph search myapp
 
 ```
 tws-graph impact <被改符号> --depth 2
-tws-graph calls <被改符号> --inbound
+tws-graph calls <被改符号> --inbound --brief
 tws-graph snapshot before
 
 # <被改符号> 支持多种记法：
@@ -313,7 +317,7 @@ tws-graph diff before after
 
 ```
 tws-graph trace <入口函数> <报错函数>
-tws-graph calls <报错函数> --inbound --depth 3
+tws-graph calls <报错函数> --inbound --depth 3 --brief
 
 # trace/calls 支持 Class.method 记法（v7.3.1）：
 tws-graph trace "ClassName.method_name" "TargetClass.target_method"
