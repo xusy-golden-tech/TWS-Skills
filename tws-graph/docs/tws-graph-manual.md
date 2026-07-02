@@ -64,8 +64,8 @@ tws-graph 是一个**代码地图**。它不是 grep 的替代品，而是在 gr
 $ tws-graph calls execute_search --inbound
 
 Callers for 'execute_search':
-  1 (search.rs):file @ tws-graph/rust_core/src/query/search.rs
-  1 (search_and_rank):function @ tws-graph/rust_core/src/query/search.rs
+  |-- (search.rs):file | line: 1 @ tws-graph/rust_core/src/query/search.rs
+  |-- (search_and_rank):function | sig: fn search_and_rank(...) | line: N @ tws-graph/rust_core/src/query/search.rs
 ```
 
 这就是**关系查询**——你问的不是"哪行代码出现了 `execute_search`"，而是"谁调用了 `execute_search`"。grep 给你 50 行匹配结果，其中有 45 行是注释、日志和字符串字面量。tws-graph 给你两条精确答案。
@@ -907,10 +907,20 @@ tws-graph search --semantic "authentication handler"
 #### 基本语法
 
 ```bash
-tws-graph calls <符号> [--inbound] [--outbound] [--depth N] [--exclude GLOB] [--json]
+tws-graph calls <符号> [--inbound] [--outbound] [--depth N] [--exclude GLOB] [--brief] [--json]
 ```
 
 > 默认行为是 `--inbound`（谁调了我），不需要显式指定。这意味着直接执行 `tws-graph calls <符号>` 就是查调用者。
+
+#### 三种输出模式
+
+v7.3.4 起 `calls` 支持三种输出模式：
+
+| 模式 | flag | 包含字段 | 适用场景 |
+|------|------|---------|---------|
+| **Rich**（默认） | 无 | 符号名、类型、签名、行号、docstring、visibility、文件路径 | 人类终端交互 |
+| **Brief** | `--brief` | 符号名、类型、文件路径 | agent 自动任务（节省 17.5% tokens） |
+| **JSON** | `--json` | 全部字段，结构化输出 | 脚本/管道处理 |
 
 #### 查谁调了我（默认=inbound）
 
@@ -918,32 +928,28 @@ tws-graph calls <符号> [--inbound] [--outbound] [--depth N] [--exclude GLOB] [
 tws-graph calls lint_skills
 ```
 
-**实际输出**：
+**实际输出**（rich 模式，默认）：
 
 ```
 Callers for 'lint_skills':
+  |-- (lib.rs):file | line: 1 @ tws-graph/rust_core/src/lib.rs
+  |-- (verify_fixes.py):file | line: 1 @ tws-graph/rust_core/verify_fixes.py
+  |-- (lint):function | sig: def lint(target: Optional[str]) -> int | line: 132 | Run skill linting on target directory @ tws-graph/src/tws_graph/cli.py
+  |-- (rust_lint):function | sig: def rust_lint(target: Optional[str]) -> str | line: 47 | Call Rust core lint function @ tws-graph/src/tws_graph/rust_bridge.py
+```
+
+Rich 模式每行包含 `|--` 前缀、签名(`sig:`)、行号(`line:`)、docstring 首行和文件路径。如果不需要签名/docstring/行号（如 agent 自动查询），可以用 `--brief` 回归精简格式：
+
+```
+tws-graph calls lint_skills --brief
+```
+
+输出（与原 v7.3 格式兼容）：
+```
+Callers for 'lint_skills':
   1 (lib.rs):file @ tws-graph/rust_core/src/lib.rs
-  1 (verify_fixes.py):file @ tws-graph/rust_core/verify_fixes.py
   1 (lint):function @ tws-graph/src/tws_graph/cli.py
   1 (rust_lint):function @ tws-graph/src/tws_graph/rust_bridge.py
-```
-
-解读：`lint_skills` 被 4 个位置调用——2 个文件和 2 个函数。
-
-另一个例子：
-
-```bash
-tws-graph calls parse_frontmatter
-```
-
-**实际输出**：
-
-```
-Callers for 'parse_frontmatter':
-  1 (lint.rs):file @ tws-graph/rust_core/src/lint.rs
-  1 (check_frontmatter):function @ tws-graph/rust_core/src/lint.rs
-  1 (test_parse_valid_frontmatter):function @ tws-graph/rust_core/src/lint.rs
-  1 (test_parse_missing_frontmatter):function @ tws-graph/rust_core/src/lint.rs
 ```
 
 #### 查我调了谁（--outbound）
@@ -952,17 +958,17 @@ Callers for 'parse_frontmatter':
 tws-graph calls parse_frontmatter --outbound
 ```
 
-**实际输出**：
+**实际输出**（rich，含签名/docstring 信息的字段可能为空）
 
 ```
 Calls for 'parse_frontmatter':
-  1 (lines):variable @ tws-graph/rust_core/src/lint.rs
-  1 (name):variable @ tws-graph/rust_core/src/lint.rs
-  1 (description):variable @ tws-graph/rust_core/src/lint.rs
-  1 (end_idx):variable @ tws-graph/rust_core/src/lint.rs
+  |-- (lines):variable | line: 120 @ tws-graph/rust_core/src/lint.rs
+  |-- (name):variable | line: 121 @ tws-graph/rust_core/src/lint.rs
+  |-- (description):variable | line: 122 @ tws-graph/rust_core/src/lint.rs
+  |-- (end_idx):variable | line: 125 @ tws-graph/rust_core/src/lint.rs
 ```
 
-解读：`parse_frontmatter` 函数内部访问了 4 个变量（lines、name、description、end_idx）。
+解读：`parse_frontmatter` 函数内部访问了 4 个变量。rich 模式对变量/外部符号仍然显示行号（如有），签名/docstring 仅对函数/方法有效。
 
 #### --depth 参数：多跳追踪
 
@@ -972,20 +978,14 @@ Calls for 'parse_frontmatter':
 tws-graph calls ComplexityAnalyzer.analyze --outbound
 ```
 
-**实际输出**（depth=1，深度 1 跳）：
+**实际输出**（depth=1）：
 
 ```
 Calls for 'ComplexityAnalyzer.analyze':
-  1 (Store):class @ tws-graph/src/tws_graph/store/interface.py
-  1 (get_all_files):method @ tws-graph/src/tws_graph/store/interface.py
-  1 (get):method @ tws-graph/rust_core/src/resolver/language/mod.rs
-  1 (read):method @ tws-graph/src/tws_graph/mcp/registry.py
-  1 (_map_lang_to_ts):function @ tws-graph/src/tws_graph/analysis/complexity.py
-  1 (parse):method @ tws-graph/rust_core/src/gql/parser.rs
-  1 (encode):method @ tws-graph/src/tws_graph/search/embeddings/model.py
-  1 (_find_function_nodes):method @ tws-graph/src/tws_graph/analysis/complexity.py
-  1 (_node_text):function @ tws-graph/src/tws_graph/analysis/complexity.py
-  1 (analyze_node):method @ tws-graph/src/tws_graph/analysis/complexity.py
+  |-- (Store):class | line: 1 @ tws-graph/src/tws_graph/store/interface.py
+  |-- (get_all_files):method | sig: def get_all_files(self) -> list[str] | line: 15 @ tws-graph/src/tws_graph/store/interface.py
+  |-- (analyze_node):method | sig: def analyze_node(self, node_id: str) -> ComplexityResult | line: 89 | Analyze complexity of a single node @ tws-graph/src/tws_graph/analysis/complexity.py
+  ...
 ```
 
 #### Class.method 记法（v7.3.1 新增）
@@ -2407,10 +2407,10 @@ Impact of 'resolve' (depth 2):
 $ tws-graph calls resolve --inbound
 ```
 
-输出：
+输出（rich 模式，默认）：
 ```
 Callers for 'resolve':
-  1 (mod.rs):file @ tws-graph/rust_core/src/resolver/mod.rs
+  |-- (mod.rs):file | line: 1 @ tws-graph/rust_core/src/resolver/mod.rs
 ```
 
 **解读**：`resolve` 的调用者也仅限于 `mod.rs` 本身。这说明 `resolve` 是一个模块内部函数（可能是 `pub(crate)` 或私有函数），没有外部调用者。改动的风险较低——只要同模块内的测试通过就行。
@@ -2498,11 +2498,11 @@ execute -> execute_sql
 $ tws-graph calls execute
 ```
 
-输出：
+输出（rich 模式，默认）：
 ```
 Calls for 'execute':
-  1 (execute_special):function @ tws-graph/rust_core/src/gql/executor.rs
-  1 (execute_sql):function @ tws-graph/rust_core/src/gql/executor.rs
+  |-- (execute_special):function | sig: fn execute_special(...) | line: N @ tws-graph/rust_core/src/gql/executor.rs
+  |-- (execute_sql):function | sig: fn execute_sql(...) | line: N @ tws-graph/rust_core/src/gql/executor.rs
 ```
 
 **解读**：`execute` 调用了两个目标：`execute_special`（处理特殊查询）和 `execute_sql`（处理 SQL 查询）。`execute_sql` 是其中一条分支。如果 bug 只在某些查询类型出现，可能是因为查询被路由到了错误的分支。
