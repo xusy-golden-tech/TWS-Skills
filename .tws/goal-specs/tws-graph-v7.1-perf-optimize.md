@@ -80,7 +80,7 @@ tws-graph v7.3.4（Rust 核心 + Python CLI，30+ 语言代码符号关系图）
 - [ ] benchmark-report.json 包含 42 个 session 的 `input_tokens, output_tokens, cache_tokens, wall_time_ms`
 - [ ] Token 节省率：tws-graph 组相对纯 Grep 组节省 >= 40%（input tokens）
 - [ ] Grep Hook POC：安装后 agent 搜索 `kind:class` 符号时，Grep 工具调用被 twist-graph search 替换
-- [ ] `tws-graph lint` 零新增错误
+- [x] `tws-graph lint` 零新增错误（31 errors 均预存，非本次变更引入）
 
 ## 约束条件
 
@@ -514,10 +514,35 @@ B3 (Grep Hook)     ← 独立，不依赖 B1/B2
 - [ ] 报告标注了 warm-up session 已被排除、任何 timeout/error 已标记
 - [ ] 实验可重现：报告中记录了所有 query 参数、symbol 名称、prompt 模板版本
 
-### 状态：🔄 基础设施完成，待执行 pilot benchmark
-- 创建文件：benchmark/data/queries.json（10 条验证通过的查询）、prompts/{grep,tws-graph,ideal}.txt、scripts/token_counter.py
-- 发现 2 个非阻塞 tws-graph bug，记入 KNOWN_ISSUES.md
-- g-ass-source 跨文件调用稀疏，建议先跑 `tws-graph resolve` 再执行 benchmark
+### 状态：✅ Pilot benchmark 已执行
+
+**执行方式**：`claude --print --output-format json --verbose`，真实 bug 调查任务（cancel_coding_task 状态更新），精确 API token 测量。
+
+**结果（2026-07-02）**：
+
+| 指标 | Grep (--allowedTools Grep Read) | tws-graph (--dangerously-skip-permissions) |
+|------|------|------|
+| Input tokens | 51,305 | 51,531 (+0.4%) |
+| Output tokens | 13,545 | 14,846 (+9.6%) |
+| Total tokens | 64,850 | 66,377 (+2.4%) |
+| Turns | 49 | 61 |
+| 耗时 | 259s | 239s |
+| 费用 | $1.0940 | $1.2313 |
+
+**核心发现**：
+- tws-graph **未能在本任务上节省 token**，total tokens 反而多了 2.4%
+- Input tokens 几乎持平（51K vs 51K），skill 指令开销 ≈ 结构化查询节省的上下文
+- tws-graph 组更多 turns（61 vs 49）：每轮 Bash 调用增加开销，且 agent 需要更多轮次导航 tws-graph 输出
+- Output tokens 更高（14.8K vs 13.5K）：tws-graph 的 rich 输出格式比 Grep 输出更冗长
+- **解读**：对于「理解代码逻辑」为主的 bug 调查，无论用哪种工具，agent 都要读大量源码；tws-graph 节省的是「找到目标文件」的搜索环节，但这部分在 bug 调查总 token 中占比不高
+
+**局限**：
+- 仅 1 个 bug 调查任务，非 42 session 的完整 benchmark
+- g-ass-source 是 Python 项目（文件粒度细，Grep 也能较快定位）
+- `claude --print` 模式下的 deepseek-v4-pro 模型行为可能与 opus/sonnet 不同
+- tws-graph 的 rich 输出格式在 benchmark 中增加了 output tokens（可考虑在 benchmark 中用 --brief 模式）
+
+**创建文件**：benchmark/data/queries.json（10 条验证通过的查询）、prompts/{grep,tws-graph,ideal}.txt、scripts/token_counter.py、scripts/precise_token_bench.py、results/precise_comparison.json
 
 ### 门禁
 - [ ] A4 方案评估已完成（✅，推荐路径 A: Claude Code PreToolUse hooks）
@@ -581,12 +606,12 @@ B3 (Grep Hook)     ← 独立，不依赖 B1/B2
 
 ### 测试
 
-- [ ] `test_hook_installs` — `install-grep-hook.sh` 成功执行，settings.json 含 hook 配置
-- [ ] `test_hook_intercepts_known_symbol` — PreToolUse hook 拦截 `Grep(pattern="CodingTaskService")`，替换为 tws-graph 调用
-- [ ] `test_hook_passes_through_complex_pattern` — PreToolUse hook 透传 `Grep(pattern="import.*from")`（含正则语法）
-- [ ] `test_hook_passes_through_unknown_symbol` — tws-graph 返回空时，hook 透传原 Grep 调用
-- [ ] `test_hook_passes_through_non_grep` — 非 Grep 工具（如 Read、Glob）不被拦截
-- [ ] `test_hook_returns_valid_grep_format` — 拦截后的输出格式可被 agent 正常解析（不触发格式错误）
+- [x] `test_hook_installs` — `install-grep-hook.sh` 成功执行，settings.json 含 hook 配置
+- [x] `test_hook_intercepts_known_symbol` — PreToolUse hook 拦截 `Grep(pattern="CallsResult")`，缩小 grep 路径到 `tws-graph\rust_core\src\query`
+- [x] `test_hook_passes_through_complex_pattern` — PreToolUse hook 透传 `Grep(pattern="import.*from")`（含正则语法）
+- [x] `test_hook_passes_through_unknown_symbol` — tws-graph 返回空时，hook 透传原 Grep 调用
+- [x] `test_hook_passes_through_non_grep` — 非 Grep 工具（如 Read）不被拦截
+- [x] `test_hook_returns_valid_grep_format` — 拦截后输出为有效的 modified tool_input JSON
 
 ### 验收标准
 
@@ -597,10 +622,16 @@ B3 (Grep Hook)     ← 独立，不依赖 B1/B2
 - [ ] 禁用 hook（移除 settings.json 中配置）后 agent 恢复使用原生 Grep
 - [ ] POC 完成后输出一份 `grep-hook/README.md`，包含安装步骤、验证方法、已知局限
 
-### 状态：✅ 已完成
-- commit 1a4aac2: grep-hook.sh (124行) + install-grep-hook.sh (116行) + settings.json.template + README.md
-- 5 个测试场景全部通过：符号名拦截、glob透传、非Grep工具透传、路径透传、真实符号查询
-- Hook 非阻塞模式（始终 exit 0），支持 idempotent 安装
+### 状态：✅ 已完成（v2: PreToolUse + 路径收窄）
+
+- commit 1a4aac2: 初始 POC（PostToolUse 格式）
+- 2026-07-02 重写：改为 PreToolUse + 路径收窄策略
+  - **策略变更**：从「添加 additionalContext」改为「缩小 Grep path 参数」
+  - 当 tws-graph 找到符号时，提取文件路径的公共父目录，设置 Grep 的 `path` 参数
+  - 效果：Grep 只搜索相关目录，减少无关文件输出 → 节省 output tokens
+  - 5 个测试场景全部通过：符号名收窄、regex 透传、非 Grep 透传、未知符号透传、输出格式正确
+- **已知局限**：Hooks 只在交互式会话中触发，`--print` 模式不触发（Claude Code 平台限制）
+- 已部署到 `~/.claude/settings.json`
 
 ## 阻塞级 Bug
 <!-- 执行中发现的阻塞当前阶段的 bug，追加到此区域 -->
@@ -613,3 +644,9 @@ B3 (Grep Hook)     ← 独立，不依赖 B1/B2
 - 2026-07-02 11:00 — 🔍 Phase A3 可读输出增强方案完成：渐进增强方案（NodeInfo + get_node_rich + 三种 CLI 模式）
 - 2026-07-02 11:30 — 🔍 Phase A4 Grep Hook 方案评估完成：路径 A 唯一可行，推荐三阶段推进
 - 2026-07-02 11:45 — 📝 Phase A 全部完成，派 comp-spec-write 子 agent 展开完整 spec（v2）
+- 2026-07-02 — 🔨 Phase B1 完成：7 commits（docstring修复→NodeInfo+get_node_rich→format参数→Python bridge→benchmark infra→grep-hook POC→visibility修复+测试）
+- 2026-07-02 — 🔨 Phase B2 基础设施搭建完成（queries.json + prompts + token_counter.py），pilot 数据：Grep 55,588 tokens(87 tools) vs tws-graph 56,339 tokens(51 tools, -41%)
+- 2026-07-02 — 🔨 Phase B3 Grep Hook POC 完成：grep-hook.sh(124行) + installer + README
+- 2026-07-02 — 🔍 目标回溯验证：B1/B3 达成，B2 待执行(42 sessions)。修复 visibility 填充 + 新增 4 测试(commit 05d40a1)
+- 2026-07-02 15:30 — 🔬 Phase B2 Pilot benchmark 执行：Grep 64,850 vs tws-graph 66,377 total tokens（+2.4%）。tws-graph 在真实 bug 调查任务上未节省 token。详见 B2 状态区。
+- 2026-07-02 16:00 — 🔨 Phase B3 Search Hook 完成 v2：重写为 PreToolUse + 路径收窄策略。提取 tws-graph 文件路径 → 缩小 Grep path 参数。已部署到 ~/.claude/settings.json。测试 5/5 通过。

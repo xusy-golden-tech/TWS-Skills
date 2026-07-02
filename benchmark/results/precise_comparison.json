@@ -1,0 +1,24 @@
+{
+  "grep": {
+    "mode": "Grep",
+    "input_tokens": 51305,
+    "output_tokens": 13545,
+    "cache_read": 997632,
+    "cache_creation": 0,
+    "num_turns": 49,
+    "duration_s": 258.97106432914734,
+    "cost_usd": 1.093966,
+    "stop_reason": "end_turn"
+  },
+  "twsgraph": {
+    "mode": "tws-graph",
+    "input_tokens": 51531,
+    "output_tokens": 14846,
+    "cache_read": 1204992,
+    "cache_creation": 0,
+    "num_turns": 61,
+    "duration_s": 238.7519199848175,
+    "cost_usd": 1.231301,
+    "stop_reason": "end_turn"
+  }
+}

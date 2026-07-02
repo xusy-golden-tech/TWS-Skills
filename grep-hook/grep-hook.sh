@@ -1,15 +1,18 @@
 #!/bin/bash
-# grep-hook.sh - PreToolUse hook for tws-graph
-# Intercepts Grep tool calls and suggests tws-graph search results when the
-# pattern looks like a code symbol name (no regex special chars, not a file path).
+# grep-hook.sh — PreToolUse hook for Claude Code
 #
-# Non-blocking: always exits 0. On symbol-name match, injects tws-graph search
-# results as additionalContext. On any failure or non-match, passes through silently.
+# Intercepts Grep tool calls. When the pattern looks like a code symbol name
+# (no regex metacharacters), queries tws-graph search and narrows the grep
+# scope to only the files tws-graph identified.
+#
+# Net effect: less grep noise → fewer output tokens.
+#
+# Non-blocking: always exits 0. On any failure or non-match, passes through.
+# Exit 2 would block the tool entirely — we don't do that (too risky).
 
 INPUT=$(cat)
 
-# Locate a working Python interpreter (python3 preferred, fallback to python).
-# Some environments (e.g. pyenv-win) have a non-functional python3 shim.
+# ── Find working Python ──────────────────────────────────────────────────────
 _find_python() {
     for py in python3 python; do
         if command -v "$py" >/dev/null 2>&1; then
@@ -23,23 +26,22 @@ _find_python() {
 }
 PYTHON=$(_find_python)
 if [ -z "$PYTHON" ]; then
-    echo "{}"
+    echo "$INPUT"
     exit 0
 fi
 
-# Create temporary Python helper script for JSON processing.
-# We use Python because pure-bash JSON parsing is fragile, and jq may not be
-# available on all systems. Python 3 is a reasonable baseline.
+# ── Create temp Python script ────────────────────────────────────────────────
 PYHELPER=$(mktemp 2>/dev/null || echo "/tmp/tws-grep-hook-$$.py")
 trap 'rm -f "$PYHELPER"' EXIT
 
 cat > "$PYHELPER" << 'PYEOF'
-import sys, json, subprocess, re
+import sys, json, subprocess, re, os
 
 try:
     data = json.load(sys.stdin)
 except Exception:
-    print("{}")
+    # Pass through: can't parse input
+    print(json.dumps(data) if 'data' in dir() else "{}")
     sys.exit(0)
 
 # Only intercept Grep tool calls
@@ -48,29 +50,25 @@ if tool_name != "Grep":
     print(json.dumps(data))
     sys.exit(0)
 
-# Extract the search pattern
-pattern = data.get("tool_input", {}).get("pattern", "")
+tool_input = data.get("tool_input", {})
+pattern = tool_input.get("pattern", "")
 
-# ── Heuristic: is this pattern likely a symbol name? ──────────────────────
-# We look for bare identifiers: no regex metacharacters, no file-path syntax.
-# If the pattern looks like a regex or glob, we pass through without
-# intervention so we never interfere with legitimate grep usage.
-
+# ── Heuristic: is this pattern a symbol name? ────────────────────────────────
 if not pattern or len(pattern) <= 1:
     print(json.dumps(data))
     sys.exit(0)
 
-# Regex special characters that indicate a regex, not a plain symbol name
+# Regex metacharacters → likely a regex, not a symbol name
 if re.search(r'[\[\](){}.*+?^$\\|]', pattern):
     print(json.dumps(data))
     sys.exit(0)
 
-# File-path / glob patterns (** globs, any pattern containing /)
+# File-path / glob patterns
 if re.search(r'\*\*|/', pattern):
     print(json.dumps(data))
     sys.exit(0)
 
-# ── Locate project root via git ───────────────────────────────────────────
+# ── Locate project root via git ─────────────────────────────────────────────
 try:
     root = subprocess.check_output(
         ["git", "rev-parse", "--show-toplevel"],
@@ -80,45 +78,88 @@ except Exception:
     print(json.dumps(data))
     sys.exit(0)
 
-# ── Query tws-graph ───────────────────────────────────────────────────────
+# ── Query tws-graph ──────────────────────────────────────────────────────────
 try:
     result = subprocess.check_output(
         ["tws-graph", "search", pattern, "--limit", "15"],
         cwd=root, stderr=subprocess.STDOUT, text=True, timeout=10
     ).strip()
 except Exception:
+    # tws-graph failed → pass through
     print(json.dumps(data))
     sys.exit(0)
 
-# Empty result means no symbols found — let Grep handle it
 if not result:
     print(json.dumps(data))
     sys.exit(0)
 
-# ── Format output ─────────────────────────────────────────────────────────
-# Truncate excessively long output
-lines = result.split("\n")
-if len(lines) > 20:
-    result = "\n".join(lines[:20]) + "\n... (truncated)"
+# ── Extract file paths from tws-graph output ─────────────────────────────────
+# Supports multiple output formats:
+#   New: "  name [kind] (lang) path/to/file.py:line"
+#   Old: "(kind):name @ path/to/file.py"
+#   Rich: "|-- (kind):name | sig: ... | line: N | @ path"
+file_paths = set()
+for line in result.split("\n"):
+    line = line.strip()
+    if not line:
+        continue
+    # Skip the "Found N results:" header line
+    if line.startswith("找到") or line.startswith("Found"):
+        continue
 
-context = (
-    'tws-graph found symbols for pattern "' + pattern + '":\n' +
-    result + '\n\n' +
-    'Prefer tws-graph search results over Grep for symbol searches.'
-)
+    path = None
+    # Format 1: name [kind] (lang) path:line
+    m = re.search(r'\)\s+(\S+):\d+\s*$', line)
+    if m:
+        path = m.group(1)
+    else:
+        # Format 2/3: "@ path" somewhere in line
+        for sep in (" @ ", " @"):
+            if sep in line:
+                path = line.rsplit(sep, 1)[-1].strip().rstrip(':')
+                break
 
-output = {
-    "hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "additionalContext": context
-    }
-}
-print(json.dumps(output))
+    if path:
+        file_paths.add(path)
+
+if not file_paths:
+    print(json.dumps(data))
+    sys.exit(0)
+
+# ── Find common parent directory ─────────────────────────────────────────────
+def common_parent(paths, root):
+    """Find the most specific common parent directory of all paths."""
+    # Normalize root to native format for reliable startswith comparison
+    root_native = os.path.normpath(root)
+    dirs = []
+    for p in paths:
+        d = os.path.normpath(os.path.join(root_native, p))
+        d = os.path.dirname(d)
+        if os.path.isdir(d):
+            dirs.append(d)
+
+    if not dirs:
+        return None
+
+    common = os.path.commonpath(dirs)
+    if os.path.normpath(common).startswith(root_native):
+        return os.path.relpath(common, root_native)
+    return None
+
+narrow_path = common_parent(file_paths, root)
+
+# ── Modify tool_input to narrow grep scope ───────────────────────────────────
+# Only set path if it's more specific than the current setting (if any)
+existing_path = tool_input.get("path", "")
+if narrow_path and narrow_path != ".":
+    if not existing_path or len(narrow_path) > len(existing_path):
+        tool_input["path"] = narrow_path
+
+data["tool_input"] = tool_input
+print(json.dumps(data))
 PYEOF
 
-# Execute Python helper with the hook input on stdin.
-# On any failure (python not found, parse error, etc.), output empty JSON
-# to allow the tool call without modification.
-echo "$INPUT" | "$PYTHON" "$PYHELPER" 2>/dev/null || echo '{}'
+# Execute Python helper. On any failure, pass through.
+echo "$INPUT" | "$PYTHON" "$PYHELPER" 2>/dev/null || echo "$INPUT"
 
 exit 0
