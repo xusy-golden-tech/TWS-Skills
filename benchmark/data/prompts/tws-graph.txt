@@ -1,0 +1,3 @@
+调查任务：{query_description}。目标符号：{symbol}。
+优先使用 tws-graph（search/calls/impact/trace命令）。Grep 仅作回退。
+请给出完整的调查结果。

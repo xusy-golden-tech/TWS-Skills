@@ -1,0 +1,136 @@
+{
+  "meta": {
+    "target_repo": "D:/g-ass-source/g_assistant_backend",
+    "index_db": "D:/g-ass-source/.tws/codegraph/index.db",
+    "node_count": 70000,
+    "tws_graph_version": "7.3.4",
+    "generated_at": "2026-07-02",
+    "notes": "calls/impact/trace 返回结果较稀疏，因为 g-ass-source 代码库使用依赖注入/动态调用模式，静态分析可捕获的跨文件调用关系有限"
+  },
+  "queries": {
+    "search": [
+      {
+        "id": "search-CodingTaskService",
+        "type": "search",
+        "subtype": "kind:class",
+        "symbol": "CodingTaskService",
+        "command": "tws-graph search --db D:/g-ass-source/.tws/codegraph/index.db kind:class CodingTaskService",
+        "verified": true,
+        "result_count": 1,
+        "location": "g_assistant_backend/engine/coding_task_service.py:298",
+        "kind": "class",
+        "lang": "python"
+      },
+      {
+        "id": "search-PluginManager",
+        "type": "search",
+        "subtype": "kind:class",
+        "symbol": "PluginManager",
+        "command": "tws-graph search --db D:/g-ass-source/.tws/codegraph/index.db kind:class PluginManager",
+        "verified": true,
+        "result_count": 4,
+        "note": "多个匹配(TS+Python)，优先使用 Python: g_assistant_backend/engine/plugin_manager.py:91",
+        "location": "g_assistant_backend/engine/plugin_manager.py:91",
+        "kind": "class",
+        "lang": "python"
+      }
+    ],
+    "calls": [
+      {
+        "id": "calls-CodingTaskService-inbound",
+        "type": "calls",
+        "subtype": "inbound-d2",
+        "symbol": "CodingTaskService",
+        "command": "tws-graph calls --db D:/g-ass-source/.tws/codegraph/index.db CodingTaskService --inbound --depth 2",
+        "verified": true,
+        "caller_count": 1,
+        "note": "仅文件自身引用，无跨文件调用方"
+      },
+      {
+        "id": "calls-PluginManager-inbound",
+        "type": "calls",
+        "subtype": "inbound-d2",
+        "symbol": "PluginManager",
+        "command": "tws-graph calls --db D:/g-ass-source/.tws/codegraph/index.db PluginManager --inbound --depth 2",
+        "verified": true,
+        "caller_count": 1,
+        "note": "仅文件自身引用，无跨文件调用方"
+      }
+    ],
+    "impact": [
+      {
+        "id": "impact-CodingTaskService",
+        "type": "impact",
+        "symbol": "CodingTaskService",
+        "command": "tws-graph impact --db D:/g-ass-source/.tws/codegraph/index.db CodingTaskService --depth 2",
+        "verified": true,
+        "result": "No impact found",
+        "note": "无下游依赖"
+      },
+      {
+        "id": "impact-PluginManager",
+        "type": "impact",
+        "symbol": "PluginManager",
+        "command": "tws-graph impact --db D:/g-ass-source/.tws/codegraph/index.db PluginManager --depth 2",
+        "verified": true,
+        "result": "No impact found",
+        "note": "无下游依赖"
+      }
+    ],
+    "trace": [
+      {
+        "id": "trace-on_startup-to-CodingTaskService",
+        "type": "trace",
+        "from": "on_startup",
+        "to": "CodingTaskService",
+        "command": "tws-graph trace --db D:/g-ass-source/.tws/codegraph/index.db on_startup CodingTaskService",
+        "verified": true,
+        "result": "No path found",
+        "note": "两符号间无可达调用路径"
+      },
+      {
+        "id": "trace-AgentManager-to-PluginManager",
+        "type": "trace",
+        "from": "AgentManager",
+        "to": "PluginManager",
+        "command": "tws-graph trace --db D:/g-ass-source/.tws/codegraph/index.db AgentManager PluginManager",
+        "verified": true,
+        "result": "No path found",
+        "note": "两符号间无可达调用路径"
+      }
+    ],
+    "dead-code": [
+      {
+        "id": "dead-code-full",
+        "type": "dead-code",
+        "scope": "full_project",
+        "command": "tws-graph analyze --db D:/g-ass-source/.tws/codegraph/index.db --run dead-code",
+        "verified": true,
+        "result_count": 19015,
+        "note": "dead-code 分析正常返回"
+      },
+      {
+        "id": "dead-code-single-file",
+        "type": "dead-code",
+        "scope": "engine/coding_task_service.py",
+        "command": "tws-graph analyze --db D:/g-ass-source/.tws/codegraph/index.db --run dead-code",
+        "verified": true,
+        "note": "--include 过滤对 analyze --run dead-code 不生效，返回全量结果。实际 benchmark 中需对输出做后处理过滤或接受全量输出。"
+      }
+    ]
+  },
+  "bugs_found": [
+    {
+      "severity": "medium",
+      "command": "tws-graph search --semantic --db <path> ...",
+      "error": "NameError: name '_get_db' is not defined",
+      "file": "tws-graph/src/tws_graph/cli.py:596",
+      "note": "使用 --db 参数时语义搜索崩溃，_get_db 函数未被导入或定义"
+    },
+    {
+      "severity": "low",
+      "command": "tws-graph analyze --run dead-code --include <file>",
+      "issue": "--include 参数对 analyze --run dead-code 不生效，始终返回全量结果"
+    }
+  ]
+}

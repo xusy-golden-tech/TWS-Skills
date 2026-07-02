@@ -1,0 +1,4 @@
+调查任务：{query_description}。目标符号：{symbol}。
+以下是 tws-graph 的直接输出结果（已包含完整答案）：
+{precomputed_result}
+请基于以上结果给出调查结论。

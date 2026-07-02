@@ -1,0 +1,3 @@
+调查任务：{query_description}。目标符号：{symbol}。
+只允许使用 Grep 和 Read 工具。禁止使用 tws-graph。
+请给出完整的调查结果。
