@@ -196,7 +196,9 @@ Bash: tws-graph hooks install 2>&1
 Grep Hook 是 Claude Code PreToolUse hook，拦截 agent 的 Grep 调用，自动缩小搜索范围到 tws-graph 已索引的文件。减少 grep 噪音输出，节省 token。
 
 ```
-Bash: cd <TWS-Skills 项目根目录> && bash grep-hook/install-grep-hook.sh 2>&1
+Bash: bash ~/.claude/skills/grep-hook/install-grep-hook.sh 2>&1
+
+→ grep-hook 随 skills 一起部署在 ~/.claude/skills/grep-hook/ 下，无需项目源码
 
 → 复制 grep-hook.sh 到 ~/.claude/hooks/
 → 在 ~/.claude/settings.json 注册 PreToolUse hook
@@ -207,7 +209,7 @@ Bash: cd <TWS-Skills 项目根目录> && bash grep-hook/install-grep-hook.sh 2>&
 
 > **原理**：hook 用启发式判断 Grep pattern 是否为符号名（无正则特殊字符）。若是，运行 `tws-graph search` 提取相关文件路径，将 Grep 的 `path` 参数缩小到这些文件所在目录。若不是符号名（正则/glob），透传原 Grep 调用不做修改。
 
-> **维护**：升级 TWS-Skills 后，重新运行安装脚本即可更新 hook 脚本。
+> **维护**：skills 升级后 `.claude/skills/grep-hook/` 自动更新，重新运行安装脚本即可更新 hook。
 
 ## 部署到其他服务器
 
