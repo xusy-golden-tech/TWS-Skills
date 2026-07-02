@@ -33,6 +33,7 @@ pub struct NodeInfo {
     pub signature: Option<String>,
     pub start_line: Option<i64>,
     pub docstring: Option<String>,
+    pub visibility: Option<String>,
 }
 
 /// A formatted result for `run_calls`.
@@ -109,7 +110,7 @@ pub fn run_calls(
                 signature: node_info.signature,
                 start_line: node_info.start_line,
                 docstring: node_info.docstring,
-                visibility: None,
+                visibility: node_info.visibility,
             });
         }
     }
@@ -354,6 +355,33 @@ mod tests {
         let results = run_calls(&db, "nonexistent", false, 2).unwrap();
         assert!(results.is_empty());
         cleanup(&path);
+    }
+
+    #[test]
+    fn test_calls_result_json_serialization() {
+        let cr = CallsResult {
+            depth: 1,
+            node_id: "abc123".to_string(),
+            node_name: "my_func".to_string(),
+            node_kind: "function".to_string(),
+            file_path: "src/main.rs".to_string(),
+            edge_kind: "CALLS".to_string(),
+            signature: Some("fn my_func() -> u32".to_string()),
+            start_line: Some(42),
+            docstring: Some("Does something useful.".to_string()),
+            visibility: Some("public".to_string()),
+        };
+        let json = serde_json::to_string(&cr).unwrap();
+        assert!(json.contains("\"depth\":1"));
+        assert!(json.contains("\"node_id\":\"abc123\""));
+        assert!(json.contains("\"node_name\":\"my_func\""));
+        assert!(json.contains("\"node_kind\":\"function\""));
+        assert!(json.contains("\"file_path\":\"src/main.rs\""));
+        assert!(json.contains("\"edge_kind\":\"CALLS\""));
+        assert!(json.contains("\"signature\":\"fn my_func() -> u32\""));
+        assert!(json.contains("\"start_line\":42"));
+        assert!(json.contains("\"docstring\":\"Does something useful.\""));
+        assert!(json.contains("\"visibility\":\"public\""));
     }
 
     // ------------------------------------------------------------------

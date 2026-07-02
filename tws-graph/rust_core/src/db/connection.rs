@@ -258,7 +258,7 @@ impl Database {
     pub fn get_node_rich(&self, node_id: &str) -> rusqlite::Result<Option<NodeInfo>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, name, qualified_name, language, file_path, \
-             signature, start_line, docstring FROM nodes WHERE id = ?1",
+             signature, start_line, docstring, visibility FROM nodes WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map([node_id], |row| {
             Ok(NodeInfo {
@@ -271,6 +271,7 @@ impl Database {
                 signature: row.get(6)?,
                 start_line: row.get(7)?,
                 docstring: row.get(8)?,
+                visibility: row.get(9)?,
             })
         })?;
         match rows.next() {
@@ -1364,6 +1365,108 @@ mod tests {
             .find_node_id_by_name("modules/llm/gateway.py::LLMGateway::chat_with_tools")
             .unwrap();
         assert_eq!(result, Some(nid));
+
+        cleanup(&path);
+    }
+
+    // ------------------------------------------------------------------
+    // get_node_rich tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_get_node_rich_existing_node() {
+        let path = temp_db_path("get_node_rich_exist");
+        cleanup(&path);
+
+        let db = Database::initialize(&path).unwrap();
+        let conn = db.connection();
+        let ts = now_ms();
+
+        let node_id = hash_id("src/util.py", "src.util::helper");
+        conn.execute(
+            "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, \
+             start_line, end_line, signature, docstring, visibility, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                node_id,
+                "function",
+                "helper",
+                "src.util::helper",
+                "src/util.py",
+                "python",
+                42,
+                55,
+                Some("def helper(x: int) -> str"),
+                Some("Convert int to string."),
+                Some("public"),
+                ts,
+            ],
+        )
+        .unwrap();
+
+        let info = db.get_node_rich(&node_id).unwrap().unwrap();
+        assert_eq!(info.id, node_id);
+        assert_eq!(info.kind, "function");
+        assert_eq!(info.name, "helper");
+        assert_eq!(info.qualified_name, "src.util::helper");
+        assert_eq!(info.language, "python");
+        assert_eq!(info.file_path, "src/util.py");
+        assert_eq!(info.signature, Some("def helper(x: int) -> str".to_string()));
+        assert_eq!(info.start_line, Some(42));
+        assert_eq!(info.docstring, Some("Convert int to string.".to_string()));
+        assert_eq!(info.visibility, Some("public".to_string()));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_get_node_rich_nonexistent() {
+        let path = temp_db_path("get_node_rich_nonex");
+        cleanup(&path);
+
+        let db = Database::initialize(&path).unwrap();
+        let result = db.get_node_rich("nonexistent_id_12345").unwrap();
+        assert!(result.is_none());
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_get_node_unchanged() {
+        let path = temp_db_path("get_node_unchanged");
+        cleanup(&path);
+
+        let db = Database::initialize(&path).unwrap();
+        let conn = db.connection();
+        let ts = now_ms();
+
+        let node_id = hash_id("src/mod.rs", "src.mod::my_func");
+        conn.execute(
+            "INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, \
+             start_line, end_line, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                node_id,
+                "function",
+                "my_func",
+                "src.mod::my_func",
+                "src/mod.rs",
+                "rust",
+                10,
+                20,
+                ts,
+            ],
+        )
+        .unwrap();
+
+        // get_node() must still return a 6-tuple: (id, kind, name, qualified_name, language, file_path)
+        let node = db.get_node(&node_id).unwrap().unwrap();
+        assert_eq!(node.0, node_id);
+        assert_eq!(node.1, "function");
+        assert_eq!(node.2, "my_func");
+        assert_eq!(node.3, "src.mod::my_func");
+        assert_eq!(node.4, "rust");
+        assert_eq!(node.5, "src/mod.rs");
 
         cleanup(&path);
     }
