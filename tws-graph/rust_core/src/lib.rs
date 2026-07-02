@@ -642,9 +642,10 @@ fn search(py: Python<'_>, db_path: &str, query_text: &str, limit: Option<usize>,
 
 /// Show calls from or to a node.
 /// If `inbound` is true, show callers; else show callees.
+/// `format`: "json" for JSON, "brief" for old format, None/"text" for rich format.
 #[pyfunction]
-#[pyo3(signature = (db_path, name, inbound=None, depth=None, include_paths=None, exclude_paths=None))]
-fn calls(db_path: &str, name: &str, inbound: Option<bool>, depth: Option<usize>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
+#[pyo3(signature = (db_path, name, inbound=None, depth=None, format=None, include_paths=None, exclude_paths=None))]
+fn calls(db_path: &str, name: &str, inbound: Option<bool>, depth: Option<usize>, format: Option<String>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
     let is_inbound = inbound.unwrap_or(false);
     let d = depth.unwrap_or(1);
@@ -667,14 +668,59 @@ fn calls(db_path: &str, name: &str, inbound: Option<bool>, depth: Option<usize>,
         return Ok(format!("No calls found for '{}'", name));
     }
 
-    let direction = if is_inbound { "Callers" } else { "Calls" };
-    let mut out = format!("{} for '{}':\n", direction, name);
-    for r in &results {
-        let indent = "  ".repeat(r.depth);
-        out.push_str(&format!("{}{} ({}):{} @ {}\n",
-            indent, r.depth, r.node_name, r.node_kind, r.file_path));
+    match format.as_deref() {
+        Some("json") => {
+            serde_json::to_string_pretty(&results)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        }
+        Some("brief") => {
+            let direction = if is_inbound { "Callers" } else { "Calls" };
+            let mut out = format!("{} for '{}':\n", direction, name);
+            for r in &results {
+                let indent = "  ".repeat(r.depth);
+                out.push_str(&format!("{}{} ({}):{} @ {}\n",
+                    indent, r.depth, r.node_name, r.node_kind, r.file_path));
+            }
+            Ok(out)
+        }
+        _ => {
+            // Rich format (default): tree output with signature/docstring/line info
+            let direction = if is_inbound { "Callers" } else { "Calls" };
+            let mut out = format!("{} for '{}':\n", direction, name);
+            for r in &results {
+                let indent = "  ".repeat(r.depth);
+                let sig_str = match &r.signature {
+                    Some(s) => format!(" | sig: {}", s),
+                    None => String::new(),
+                };
+                let line_str = match r.start_line {
+                    Some(l) => format!(" | line: {}", l),
+                    None => String::new(),
+                };
+                let doc_str = match &r.docstring {
+                    Some(d) => {
+                        let first_line = d.split('\n').next().unwrap_or("");
+                        if first_line.len() > 80 {
+                            format!(" | {}...", &first_line[..77])
+                        } else if !first_line.is_empty() {
+                            format!(" | {}", first_line)
+                        } else {
+                            String::new()
+                        }
+                    }
+                    None => String::new(),
+                };
+                let prefix = if r.depth == 0 {
+                    format!("  [{}]", results.iter().position(|x| x.node_id == r.node_id).map(|i| i + 1).unwrap_or(0))
+                } else {
+                    format!("{}|--", indent)
+                };
+                out.push_str(&format!("{} ({}):{}{}{}{} @ {}\n",
+                    prefix, r.node_kind, r.node_name, sig_str, line_str, doc_str, r.file_path));
+            }
+            Ok(out)
+        }
     }
-    Ok(out)
 }
 
 /// Compute impact radius of a symbol, grouped by module.
