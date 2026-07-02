@@ -14,14 +14,29 @@ pub mod traversal;
 use crate::db::Database;
 use crate::db::models::SearchResult;
 use search::{parse_query, execute_search, SearchQuery};
+use serde::Serialize;
 use traversal::{GraphTraverser, TraversalDirection};
 
 // ---------------------------------------------------------------------------
 // Formatted result types
 // ---------------------------------------------------------------------------
 
+/// Rich node information retrieved from the database.
+#[derive(Debug, Clone, Serialize)]
+pub struct NodeInfo {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub language: String,
+    pub file_path: String,
+    pub signature: Option<String>,
+    pub start_line: Option<i64>,
+    pub docstring: Option<String>,
+}
+
 /// A formatted result for `run_calls`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CallsResult {
     pub depth: usize,
     pub node_id: String,
@@ -29,6 +44,10 @@ pub struct CallsResult {
     pub node_kind: String,
     pub file_path: String,
     pub edge_kind: String,
+    pub signature: Option<String>,
+    pub start_line: Option<i64>,
+    pub docstring: Option<String>,
+    pub visibility: Option<String>,
 }
 
 /// A formatted result for `run_impact`.
@@ -79,14 +98,18 @@ pub fn run_calls(
 
     let mut formatted = Vec::new();
     for (d, nid) in &results {
-        if let Some((_id, kind, name, _qn, _lang, file_path)) = db.get_node(nid)? {
+        if let Some(node_info) = db.get_node_rich(nid)? {
             formatted.push(CallsResult {
                 depth: *d,
                 node_id: nid.clone(),
-                node_name: name,
-                node_kind: kind,
-                file_path,
+                node_name: node_info.name,
+                node_kind: node_info.kind,
+                file_path: node_info.file_path,
                 edge_kind: if inbound { "CALLS".to_string() } else { "CALLS".to_string() },
+                signature: node_info.signature,
+                start_line: node_info.start_line,
+                docstring: node_info.docstring,
+                visibility: None,
             });
         }
     }

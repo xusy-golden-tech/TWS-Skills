@@ -6,6 +6,7 @@
 //! (``tws_graph/store/connection.py``) exactly.
 
 use crate::db::migrations::MigrationRunner;
+use crate::query::NodeInfo;
 use rusqlite::{Connection, Result};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -242,6 +243,35 @@ impl Database {
                 row.get(4)?,
                 row.get(5)?,
             ))
+        })?;
+        match rows.next() {
+            Some(Ok(r)) => Ok(Some(r)),
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
+
+    /// Get a node by its TEXT id (SHA256 hash) with rich metadata.
+    ///
+    /// Returns `Option<NodeInfo>` containing all node fields including
+    /// signature, start_line, and docstring.
+    pub fn get_node_rich(&self, node_id: &str) -> rusqlite::Result<Option<NodeInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, name, qualified_name, language, file_path, \
+             signature, start_line, docstring FROM nodes WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map([node_id], |row| {
+            Ok(NodeInfo {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                name: row.get(2)?,
+                qualified_name: row.get(3)?,
+                language: row.get(4)?,
+                file_path: row.get(5)?,
+                signature: row.get(6)?,
+                start_line: row.get(7)?,
+                docstring: row.get(8)?,
+            })
         })?;
         match rows.next() {
             Some(Ok(r)) => Ok(Some(r)),
