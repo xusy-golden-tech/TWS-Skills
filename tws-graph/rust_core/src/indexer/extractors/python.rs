@@ -1192,22 +1192,68 @@ fn is_all_caps(s: &str) -> bool {
 }
 
 /// Extract the docstring from a function/class body.
+///
+/// Traverses consecutive `expression_statement > string` children,
+/// skipping non-docstring statements like `import` or `from __future__`.
+/// If the body node is a `block`, enters it first.
 fn extract_docstring(source: &[u8], body: Node) -> Option<String> {
-    if let Some(first) = body.named_child(0) {
-        if first.kind() == "expression_statement" {
-            if let Some(inner) = first.named_child(0) {
-                if inner.kind() == "string" {
-                    let text = get_text(source, Some(inner));
-                    if !text.is_empty() {
-                        let trimmed = text.trim_matches(|c| c == '"' || c == '\'');
-                        let truncated: String = trimmed.chars().take(200).collect();
-                        return Some(truncated);
-                    }
-                }
+    // If the body is a block node, enter it to get to the actual statements.
+    let target = if body.kind() == "block" {
+        body
+    } else {
+        return extract_docstring_impl(source, &body);
+    };
+    extract_docstring_impl(source, &target)
+}
+
+/// Inner implementation: iterate named children of the given node.
+fn extract_docstring_impl(source: &[u8], node: &Node) -> Option<String> {
+    let mut doc_lines: Vec<String> = Vec::new();
+    for i in 0..node.named_child_count() {
+        let child = node.named_child(i)?;
+        if child.kind() != "expression_statement" {
+            // Stop at the first non-expression-statement (docstring must come first).
+            if i == 0 {
+                // First child isn't even an expression_statement — no docstring possible.
+                return None;
             }
+            break;
+        }
+        let inner = child.named_child(0)?;
+        if inner.kind() != "string" {
+            if i == 0 {
+                return None;
+            }
+            break;
+        }
+        // Check if this is an import/future statement disguised as a string expression.
+        let text = get_text(source, Some(inner));
+        if text.is_empty() {
+            if i == 0 {
+                return None;
+            }
+            break;
+        }
+        // Skip import and __future__ statements
+        if text.trim().starts_with("import ") || text.trim().starts_with("from __future__") {
+            if i == 0 {
+                return None;
+            }
+            break;
+        }
+        let trimmed = text.trim_matches(|c| c == '"' || c == '\'');
+        if !trimmed.is_empty() {
+            doc_lines.push(trimmed.to_string());
+        } else if i == 0 {
+            return None;
         }
     }
-    None
+    if doc_lines.is_empty() {
+        return None;
+    }
+    let joined = doc_lines.join("\n");
+    let truncated: String = joined.chars().take(200).collect();
+    Some(truncated)
 }
 
 // ---------------------------------------------------------------------------
@@ -1564,9 +1610,59 @@ mod tests {
         );
         let funcs = find_nodes(&ctx, NodeKind::Function);
         assert_eq!(funcs.len(), 1);
-        if let Some(doc) = &funcs[0].docstring {
-            assert!(doc.contains("This is a docstring"));
-        }
+        let doc = funcs[0].docstring.as_deref().unwrap_or("");
+        assert!(doc.contains("This is a docstring"), "expected docstring containing 'This is a docstring', got: {:?}", funcs[0].docstring);
+    }
+
+    #[test]
+    fn test_extract_class_docstring() {
+        let ctx = extract(
+            "class MyClass:\n    \"\"\"Class docstring.\"\"\"\n    def method(self):\n        pass\n",
+            "src/test.py",
+        );
+        let classes = find_nodes(&ctx, NodeKind::Class);
+        assert_eq!(classes.len(), 1);
+        assert!(classes[0].docstring.is_some(), "expected docstring on class");
+        let doc = classes[0].docstring.as_deref().unwrap_or("");
+        assert!(doc.contains("Class docstring"), "expected class docstring, got: {:?}", classes[0].docstring);
+    }
+
+    #[test]
+    fn test_extract_docstring_decorated_function() {
+        let ctx = extract(
+            "@staticmethod\ndef my_func():\n    \"\"\"Decorated doc.\"\"\"\n    pass\n",
+            "src/test.py",
+        );
+        let funcs = find_nodes(&ctx, NodeKind::Function);
+        assert_eq!(funcs.len(), 1);
+        assert!(funcs[0].docstring.is_some(), "expected docstring on decorated function");
+        let doc = funcs[0].docstring.as_deref().unwrap_or("");
+        assert!(doc.contains("Decorated doc"), "expected docstring, got: {:?}", funcs[0].docstring);
+    }
+
+    #[test]
+    fn test_extract_docstring_no_docstring() {
+        let ctx = extract(
+            "def my_func():\n    x = 1\n    return x\n",
+            "src/test.py",
+        );
+        let funcs = find_nodes(&ctx, NodeKind::Function);
+        assert_eq!(funcs.len(), 1);
+        assert!(funcs[0].docstring.is_none(), "expected no docstring, got: {:?}", funcs[0].docstring);
+    }
+
+    #[test]
+    fn test_extract_docstring_multiline() {
+        let ctx = extract(
+            "def my_func():\n    \"\"\"First line.\n    Second line.\n    Third line.\"\"\"\n    pass\n",
+            "src/test.py",
+        );
+        let funcs = find_nodes(&ctx, NodeKind::Function);
+        assert_eq!(funcs.len(), 1);
+        assert!(funcs[0].docstring.is_some(), "expected docstring on function");
+        let doc = funcs[0].docstring.as_deref().unwrap_or("");
+        assert!(doc.contains("First line"), "expected multi-line docstring, got: {:?}", funcs[0].docstring);
+        assert!(doc.contains("Second line"), "expected multi-line docstring, got: {:?}", funcs[0].docstring);
     }
 
     // ------------------------------------------------------------------
