@@ -53,6 +53,7 @@ def rust_search(db_path: str, query: str, limit: int = 50,
 
 
 def rust_calls(db_path: str, node_name: str, inbound: bool = True, depth: int = 5,
+               format: str | None = None,
                include_paths: list[str] | None = None,
                exclude_paths: list[str] | None = None) -> str:
     """Find call targets/callers using Rust BFS.
@@ -60,13 +61,15 @@ def rust_calls(db_path: str, node_name: str, inbound: bool = True, depth: int = 
     Default: inbound=True (show callers), matching CLI default behavior.
 
     Args:
+        format: Output format. "json" for JSON, "brief" for old format,
+            None for rich tree format (default).
         include_paths: Optional list of glob patterns. Only results whose
             file_path matches at least one pattern are returned.
         exclude_paths: Optional list of glob patterns. Results whose
             file_path matches any pattern are excluded.
     """
     from _core._core import calls
-    return calls(db_path, node_name, inbound, depth, include_paths, exclude_paths)
+    return calls(db_path, node_name, inbound, depth, format, include_paths, exclude_paths)
 
 
 def rust_impact(db_path: str, node_name: str, depth: int = 5,

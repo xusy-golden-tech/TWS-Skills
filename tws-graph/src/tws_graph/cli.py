@@ -261,6 +261,7 @@ def calls(
     outbound: bool = typer.Option(False, "--outbound", "-o", help="这个符号调了谁"),
     depth: int = typer.Option(1, "--depth", "-d", help="追溯深度"),
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
+    brief: bool = typer.Option(False, "--brief", help="简洁格式输出（与 --json 互斥）"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
     include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
     exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
@@ -270,9 +271,22 @@ def calls(
     示例：
       tws-graph calls calculateTotal --inbound
       tws-graph calls UserService --outbound --depth 2
+      tws-graph calls MyClass.my_method --json
     """
     if not inbound and not outbound:
         inbound = True
+
+    if json_output and brief:
+        typer.echo("错误: --json 和 --brief 不能同时指定。", err=True)
+        raise typer.Exit(1)
+
+    # Determine format: json → "json", brief → "brief", default → None (rich)
+    if json_output:
+        fmt = "json"
+    elif brief:
+        fmt = "brief"
+    else:
+        fmt = None
 
     resolved_db = os.path.abspath(db_path or DEFAULT_DB)
 
@@ -285,7 +299,7 @@ def calls(
         typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
 
-    typer.echo(rust_calls(resolved_db, symbol, inbound, depth, include_paths, exclude_paths))
+    typer.echo(rust_calls(resolved_db, symbol, inbound, depth, format=fmt, include_paths=include_paths, exclude_paths=exclude_paths))
 
 
 # ============================================================================
