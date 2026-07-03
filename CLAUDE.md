@@ -130,3 +130,10 @@ Session state is tracked in `.tws/sessions/` during active workflows. `.tws/` sh
 3. **Verify** — tests are the minimum; also check edge cases and design doc sync
 4. **Design Sync** — any code change must update the design doc, or it's incomplete
 
+5. **Code Graph First** — when searching for code symbols (class names, function names,
+   method names, SQL tables, HCL resources, YAML keys, etc.), tws-graph is the first
+   choice. Grep is only a fallback. Before EVERY Grep call, verify: (a) tws-graph
+   returned empty, or (b) the target file type is not indexed by tws-graph, or
+   (c) you are searching for a literal string/regex, not a known symbol. Blind Grep
+   for symbol names is a directional error — equivalent to ignoring the code graph.
+
