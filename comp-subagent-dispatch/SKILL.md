@@ -51,7 +51,11 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
 你是一个执行子 agent。请完成以下任务：
 
 1. 通过 Skill 工具加载 found-tws-graph-usage（Skill(skill: "found-tws-graph-usage")）和 {comp-skill-name}（Skill(skill: "{comp-skill-name}")）
-2. 按 skill 中的指引执行任务。涉及代码调查时，优先使用 tws-graph 命令（search/calls/impact/trace），Grep 仅作回退手段
+2. 按 skill 中的指引执行任务。代码调查必须遵循以下优先级（不可协商）：
+   a. 第一步：tws-graph search <关键符号>（查定义和位置）
+   b. 第二步：tws-graph calls / impact / trace（查关系和影响）
+   c. 第三步：仅在 a/b 无结果或返回 [internal] 时，才回退到 Grep
+   跳过 a 直接 Grep = 方向性错误，将被判定为任务不合格
 3. 完成后汇报：做了什么、改了哪些文件、发现了什么
 4. 如果提供了 goal-spec 文件路径，在任务完成后立即用 Edit 更新该文件：
    a. 先 Read goal-spec 文件，找到当前阶段
@@ -66,7 +70,7 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
 {goal-spec 文件路径（如有）：.tws/goal-specs/xxx.md}
 ```
 
-**强制规则：所有子 agent dispatch prompt 必须同时包含 found-tws-graph-usage + comp skill，缺一不可。**
+**强制规则（不可协商）：所有子 agent dispatch prompt 必须同时包含 found-tws-graph-usage + comp skill，缺一不可。遗漏 found-tws-graph-usage 的 dispatch = 主 agent 失职。主 agent 自身也应在每次规划前加载 found-tws-graph-usage。**
 
 原因：comp skill 描述「查什么」，found-tws-graph-usage 提供「怎么查」的正确命令语法，防止 agent 编造不存在的命令。
 
@@ -194,13 +198,19 @@ description: 子 agent 调度规则。主 agent 不写代码，所有编码/测�
    - 测试任务 → 读测试规约
    - 禁止：一次读完所有规约文件。
 
-5. Grep 硬限制 — 以下三条缺一不可：
-   a. 查已知符号（类名、方法名、函数名）→ 必须先跑 tws-graph search，禁止跳过直接 Grep
-   b. Grep 仅在以下情况允许：① tws-graph 返回空 ② 标记 [internal] ③ 目标在非索引文件类型（XML/.gradle/图片等）
-   c. 每次 Grep 前必须在思考中写一句：为什么 tws-graph 不适用
-   — 违反以上任一条 = 方向性错误，等同于编造命令
+5. ⚠️ Grep 硬限制（不可分割的固定前缀 — 任何 dispatch prompt 必须逐字包含以下三段，不允许简化、不允许改写、不允许遗漏）：
+   a. 查已知符号（类名、方法名、函数名、SQL 表、HCL 资源、YAML 键等）→ 必须先跑 tws-graph search，禁止跳过直接 Grep
+   b. Grep 仅在以下情况允许：① tws-graph 返回空结果（连续 2 次） ② 目标在 tws-graph 非索引文件类型中（XML/.gradle/图片/二进制等） ③ 搜索目标为字面字符串/正则模式，非已知符号名
+   c. 每次发起 Grep 调用前，必须在思考（thinking）中写一句明确理由：为什么 tws-graph 不适用于本次搜索。无理由的 Grep = 违规
+   — 违反以上任一条 = 方向性错误，等同于编造不存在的命令。主 agent 收到子 agent 汇报时，必须检查自审计统计中的 Grep 调用次数，如有 Grep 但无对应理由说明 → 判定该子 agent 执行不合格
 
-6. 自审计 — 完成后汇报末尾必须追加以下统计：
+6. 主 agent 派发检查 — 主 agent 在发出 dispatch prompt 前必须自查：
+   - [ ] dispatch prompt 中是否包含「通过 Skill 工具加载 found-tws-graph-usage」字样
+   - [ ] dispatch prompt 中是否包含了「Grep 硬限制」的 a/b/c 三条
+   - [ ] dispatch prompt 是否指定了 goal-spec 文件路径（Goal Mode 下）
+   以上三条缺一不可。缺少任一条 → 不允许派发，先补齐 prompt
+
+7. 自审计 — 完成后汇报末尾必须追加以下统计：
    - Read 调用次数 / 涉及不同文件数
    - Grep 调用次数
    - tws-graph 命令调用次数

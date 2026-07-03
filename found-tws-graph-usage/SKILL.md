@@ -9,26 +9,30 @@ description: tws-graph 代码图使用指南（v7.3.4）。所有需要查图的
 
 tws-graph 是代码符号关系图引擎。它用 tree-sitter 预建 SQLite 索引，agent 通过 CLI 查询而非 grep。
 
-**工具优先级**：代码调查任务中，tws-graph 是第一选择，Grep 是回退手段。
+**工具优先级（绝对强制）**：代码调查任务中，tws-graph 是**唯一首选**，Grep 仅限明确豁免场景。agent 不应该猜命令——加载此 skill 就是为了确保命令准确。
 
-强制规则：
-- 查符号（类名、方法名、函数名）→ 必须先走 `tws-graph search`，不允许跳过直接 Grep
-- 查调用关系 → `tws-graph calls`，不允许直接 Grep
-- 查影响范围 → `tws-graph impact`，不允许直接 Grep
-- 只有以下情况才允许使用 Grep：
-  1. tws-graph 返回空结果或标记 `[internal]` 未解析
-  2. 搜索目标在 tws-graph 不索引的文件类型中（XML、.gradle、图片、二进制文件等）
-  3. 文件模式匹配（如查找 test 文件）
-  4. 搜索字面字符串/正则，而非已知符号名
+## 强制规则
 
-违规示例：
+| 调查目标 | 必须使用的命令 | 严禁的行为 |
+|----------|--------------|-----------|
+| 查符号（类名、方法名、函数名、SQL 表、HCL 资源、YAML 键等） | `tws-graph search` | Grep 符号名 |
+| 查调用关系 | `tws-graph calls` | Grep 调用 |
+| 查影响范围 | `tws-graph impact` | Grep 影响范围 |
+
+**Grep 四条例外**——仅以下情况允许使用 Grep：
+1. tws-graph 返回空结果或标记 `[internal]` 未解析
+2. 搜索目标在 tws-graph 不索引的文件类型中（XML、.gradle、图片、二进制文件等）
+3. 文件模式匹配（如查找 test 文件）
+4. 搜索字面字符串/正则，而非已知符号名
+
+**违规示例**：
 ```
 ❌ Grep "AppContainer"              → 这是类名，应该用 tws-graph search kind:class AppContainer
 ❌ Grep "readerSettingsStore"       → 这是符号名，应该用 tws-graph search
 ❌ Grep "isPremium|setPremium"      → 这是方法名，应该用 tws-graph search kind:method
 ```
 
-合规示例：
+**合规示例**：
 ```
 ✅ tws-graph search kind:class AppContainer
 ✅ tws-graph search readerSettingsStore
@@ -43,20 +47,37 @@ tws-graph 是代码符号关系图引擎。它用 tree-sitter 预建 SQLite 索�
 - **图告诉 agent 客观事实**——谁调了谁、影响半径有多大、两个符号之间经过哪些路径
 - **agent 做主观判断**——风险等级、是否需要通知、是否值得改
 
-**`--brief` 规则**：所有自动任务中调用 `tws-graph calls` 必须加 `--brief`。rich 输出（签名/docstring/行号）是给人类读的，agent 反正要 Read 源码验证。实测 `--brief` 节省 17.5% total tokens（74K → 61K），turns 仅增加 4 次。
+**违反后果**：跳过 tws-graph 直接 Grep 的后果：
+- **Token 浪费**：Grep 返回全文件匹配行（含大量噪音），tws-graph 返回精确定位的符号名+文件+行号
+- **漏掉间接调用关系**：Grep 只看文本出现，看不到 AST 级调用图（A→B→C，Grep 看不到 A→C 的间接依赖）
+- **被 reviewer 判定为方向性错误**：组件审查者检查 agent 是否优先使用 tws-graph，跳过者直接标记违规
 
-agent 不应该猜命令。加载此 skill 就是为了确保命令准确。
+## --brief 规则
 
-## 索引覆盖范围
+所有自动任务中调用 `tws-graph calls` 必须加 `--brief`。rich 输出（签名/docstring/行号）是给人类读的，agent 反正要 Read 源码验证。实测 `--brief` 节省 17.5% total tokens（74K → 61K），turns 仅增加 4 次。
 
-tws-graph 通过 28+ 个提取器覆盖 30+ 种语言和配置格式。所有提取器均产出节点（可搜索的符号）+ 边（关系）。
+## 禁止的行为
 
-| 类别 | 覆盖 |
-|------|------|
-| 编程语言 | Python, TypeScript, JavaScript, Java, Go, Rust, Kotlin, PHP, Ruby, C, C++, C#, Scala, Elixir, Haskell, Clojure, Lua, Bash/Shell |
-| 标记/样式 | HTML, CSS, Markdown |
-| 配置/IaC | YAML, TOML, JSON, HCL/Terraform, Kustomize, Kubernetes, Dockerfile, Proto |
-| 数据 | SQL |
+1. **编造命令名**。以下命令不存在，永远不要使用：
+   - `tws-graph callers` — 正确命令是 `tws-graph calls --inbound`
+   - `tws-graph dependents` — 正确命令是 `tws-graph impact`
+   - `tws-graph path` — 正确命令是 `tws-graph trace`
+   - `tws-graph callees` — 正确命令是 `tws-graph calls`
+   - `tws-graph references` — 不存在，用 `tws-graph search` 或 `tws-graph impact`
+   - `tws-graph cypher` — Cypher 已改为 GQL，正确命令是 `tws-graph query`
+   - `tws-graph dead-code` — 正确命令是 `tws-graph analyze --run dead-code`
+
+2. **未 commit 的修改不跑 index 直接查图**。子 agent 刚改完代码还没 commit → hooks 没触发 → 索引是旧的。此时应先 `tws-graph index`。
+
+3. **改前不拍快照**。design-sync 需要 before/after 对比，没有 before 快照就等于白做。
+
+4. **不检查可用性就假设已安装**。每次加载此 skill 时都必须先跑 `tws-graph --version`。
+
+5. **用 Grep 查已知符号名**。类名、方法名、函数名、SQL 表、HCL 资源、YAML 键等所有被索引的符号必须先用 `tws-graph search` 查。Grep 只允许用于 tws-graph 不索引的文件类型（XML、.gradle、图片、二进制）、文件模式匹配、或图返回空/`[internal]` 后的回退。
+
+
+
+
 
 ## 前置检查（每次查图前必做）
 
@@ -85,6 +106,17 @@ tws-graph 通过 28+ 个提取器覆盖 30+ 种语言和配置格式。所有提
    - 子 agent 刚修改了代码但还没 commit
    - 怀疑索引损坏（查询结果明显不对）
 ```
+
+## 索引覆盖范围
+
+tws-graph 通过 28+ 个提取器覆盖 30+ 种语言和配置格式。所有提取器均产出节点（可搜索的符号）+ 边（关系）。
+
+| 类别 | 覆盖 |
+|------|------|
+| 编程语言 | Python, TypeScript, JavaScript, Java, Go, Rust, Kotlin, PHP, Ruby, C, C++, C#, Scala, Elixir, Haskell, Clojure, Lua, Bash/Shell |
+| 标记/样式 | HTML, CSS, Markdown |
+| 配置/IaC | YAML, TOML, JSON, HCL/Terraform, Kustomize, Kubernetes, Dockerfile, Proto |
+| 数据 | SQL |
 
 ## 命令参考
 
@@ -553,25 +585,6 @@ tws-graph serve mcp-config
 处理：标注降级，后续用 grep/read 手动追踪
 不得静默跳过——必须明确告知「tws-graph 不可用，已降级为手动追踪」
 ```
-
-## 禁止的行为
-
-1. **编造命令名**。以下命令不存在，永远不要使用：
-   - `tws-graph callers` — 正确命令是 `tws-graph calls --inbound`
-   - `tws-graph dependents` — 正确命令是 `tws-graph impact`
-   - `tws-graph path` — 正确命令是 `tws-graph trace`
-   - `tws-graph callees` — 正确命令是 `tws-graph calls`
-   - `tws-graph references` — 不存在，用 `tws-graph search` 或 `tws-graph impact`
-   - `tws-graph cypher` — Cypher 已改为 GQL，正确命令是 `tws-graph query`
-   - `tws-graph dead-code` — 正确命令是 `tws-graph analyze --run dead-code`
-
-2. **未 commit 的修改不跑 index 直接查图**。子 agent 刚改完代码还没 commit → hooks 没触发 → 索引是旧的。此时应先 `tws-graph index`。
-
-3. **改前不拍快照**。design-sync 需要 before/after 对比，没有 before 快照就等于白做。
-
-4. **不检查可用性就假设已安装**。每次加载此 skill 时都必须先跑 `tws-graph --version`。
-
-5. **用 Grep 查已知符号名**。类名、方法名、函数名、SQL 表、HCL 资源、YAML 键等所有被索引的符号必须先用 `tws-graph search` 查。Grep 只允许用于 tws-graph 不索引的文件类型（XML、.gradle、图片、二进制）、文件模式匹配、或图返回空/`[internal]` 后的回退。
 
 ## Rationalization Prevention
 
