@@ -1,14 +1,12 @@
 #!/bin/bash
 # grep-hook.sh — PreToolUse hook for Claude Code
 #
-# Intercepts Grep tool calls. When the pattern looks like a code symbol name
-# (no regex metacharacters), queries tws-graph search and narrows the grep
-# scope to only the files tws-graph identified.
-#
-# Net effect: less grep noise → fewer output tokens.
+# v2: Two intervention modes:
+#   Mode A (bare symbol): narrows grep scope to files tws-graph identified
+#   Mode B (escaped regex): injects tws-graph search suggestions via additionalContext
+#   Mode C (pure regex/glob/non-Grep): pass through
 #
 # Non-blocking: always exits 0. On any failure or non-match, passes through.
-# Exit 2 would block the tool entirely — we don't do that (too risky).
 
 INPUT=$(cat)
 
@@ -58,8 +56,78 @@ if not pattern or len(pattern) <= 1:
     print(json.dumps(data))
     sys.exit(0)
 
-# Regex metacharacters → likely a regex, not a symbol name
+# ── Regex metacharacters detected ──────────────────────────────────────────────
 if re.search(r'[\[\](){}.*+?^$\\|]', pattern):
+
+    # Branch B: escaped regex (\X) → extract symbol names, query tws-graph
+    if re.search(r'\\([[\](){}.*+?^$|])', pattern):
+
+        # Locate project root via git
+        try:
+            root = subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"],
+                stderr=subprocess.DEVNULL, text=True
+            ).strip()
+        except Exception:
+            print(json.dumps(data))
+            sys.exit(0)
+
+        # Unescape: replace \X with X for regex metacharacters only
+        unescaped = re.sub(r'\\([[\](){}.*+?^$|])', r'\1', pattern)
+
+        # Extract identifiers >= 3 chars, dedup, take first 5
+        tokens = []
+        seen_tok = set()
+        for tok in re.findall(r'[A-Za-z_]\w{2,}', unescaped):
+            if tok not in seen_tok:
+                seen_tok.add(tok)
+                tokens.append(tok)
+                if len(tokens) >= 5:
+                    break
+
+        suggestions = []
+        if tokens:
+            for token in tokens:
+                try:
+                    result = subprocess.check_output(
+                        ["tws-graph", "search", token, "--limit", "5"],
+                        cwd=root, stderr=subprocess.DEVNULL, text=True, timeout=8
+                    ).strip()
+                except Exception:
+                    continue
+                if result:
+                    for line in result.split("\n"):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line.startswith("找到") or line.startswith("Found"):
+                            continue
+                        # Skip "no match" messages
+                        if line.startswith("未找到匹配") or line.startswith("No match"):
+                            continue
+                        suggestions.append(line)
+
+        if suggestions:
+            # Deduplicate while preserving order
+            seen_s = set()
+            uniq = []
+            for s in suggestions:
+                if s not in seen_s:
+                    seen_s.add(s)
+                    uniq.append(s)
+            ctx_lines = ["[tws-graph] 在代码图中找到以下匹配符号（建议优先查看）："]
+            for s in uniq[:10]:
+                ctx_lines.append("  " + s)
+            ctx_lines.append("  → 提示：tws-graph search <symbol> 可精确查看定义和调用关系")
+            data["additionalContext"] = "\n".join(ctx_lines)
+            print(json.dumps(data))
+            sys.exit(0)
+
+        # Branch B with no results → pass through
+        print(json.dumps(data))
+        sys.exit(0)
+
+    # Not Branch B (pure regex without \escaping) → pass through
     print(json.dumps(data))
     sys.exit(0)
 
