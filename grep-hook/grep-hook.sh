@@ -60,7 +60,7 @@ if not pattern or len(pattern) <= 1:
 if re.search(r'[\[\](){}.*+?^$\\|]', pattern):
 
     # Branch B: escaped regex (\X) → extract symbol names, query tws-graph
-    if re.search(r'\\([[\](){}.*+?^$|])', pattern):
+    if re.search(r'\\([\[\](){}.*+?^$|])', pattern):
 
         # Locate project root via git
         try:
@@ -73,7 +73,7 @@ if re.search(r'[\[\](){}.*+?^$\\|]', pattern):
             sys.exit(0)
 
         # Unescape: replace \X with X for regex metacharacters only
-        unescaped = re.sub(r'\\([[\](){}.*+?^$|])', r'\1', pattern)
+        unescaped = re.sub(r'\\([\[\](){}.*+?^$|])', r'\1', pattern)
 
         # Extract identifiers >= 3 chars, dedup, take first 5
         tokens = []
