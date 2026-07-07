@@ -1,0 +1,20 @@
+# Build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.so
+*.dll
+*.pyd
+tws-graph/rust_core/target/
+*.egg-info/
+dist/
+.pytest_cache/
+
+# Git
+.git/
+
+# Benchmark results (large text files)
+benchmark/results/
+
+# Compressed archives
+*.zip

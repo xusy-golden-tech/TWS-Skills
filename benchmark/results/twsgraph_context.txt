@@ -1,0 +1,98 @@
+## tws-graph 查询结果
+
+命令: tws-graph calls CodingTaskService --inbound --depth 2 --exclude "tests/"
+
+输出 (92 行):
+Callers for 'CodingTaskService':
+  |-- (file):coding_task_routes.py | line: 1 @ g_assistant_backend/api/coding_task_routes.py
+  |-- (function):_get_service | sig: def _get_service((request: Request)) | line: 1059 @ g_assistant_backend/api/coding_task_routes.py
+  |-- (file):chat_coding_task_loop.py | line: 1 @ g_assistant_backend/engine/chat_coding_task_loop.py
+  |-- (file):coding_task_service.py | line: 1 @ g_assistant_backend/engine/coding_task_service.py
+  |-- (file):coding_task_service_resolver.py | line: 1 @ g_assistant_backend/engine/coding_task_service_resolver.py
+  |-- (function):resolve_coding_task_service | sig: def resolve_coding_task_service((state: Any | None)) | line: 25 | Return the shared CodingTaskService, creating the configured default when abs... @ g_assistant_backend/engine/coding_task_service_resolver.py
+    |-- (function):issue_coding_task_action_token | sig: def issue_coding_task_action_token((
+    body: CodingTaskActionTokenRequest,
+    request: Request,
+    current_user: UserInfo = Depends(get_current_user),
+)) | line: 6265 | ǩ��һ���Կ����������ƾ֤�� @ g_assistant_backend/api/coding_task_routes.py
+    |-- (function):start_coding_task | sig: def start_coding_task((
+    body: CodingTaskStartRequest,
+    request: Request,
+    current_user: UserInfo = Depends(get_current_user),
+)) | line: 6281 | ����ֻ���������񲢷��������ŷ⡣ @ g_assistant_backend/api/coding_task_routes.py
+    |-- (function):analyze_coding_task | sig: def analyze_coding_task((
+    body: CodingTaskAnalyzeRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: UserInfo = Depends(get_current_user),
+)) | line: 6344 | ���� Agent ֻ�����������������ŷ⡣ @ g_assistant_backend/api/coding_task_routes.py
+    |-- (function):coding_task_capabilities | sig: def coding_task_capabilities((
+    conversation_id: str,
+    request: Request,
+    agent_id: str = "main",
+    repo_id: str = "repo_default",
+    project_id: str = "project_default",
+    current_user: UserInfo = Depends(get_current_user),
+)) | line: 6365 | ���ص�ǰ�û������Ŀ��õĿ������������� @ g_assistant_backend/api/coding_task_routes.py
+    |-- (function):approve_coding_task_plan | sig: def approve_coding_task_plan((
+    task_id: str,
+    body: CodingAgentPlanApprovalRequest,
+    request: Request,
+    current_user: UserInfo = Depends(get_current_user),
+)) | line: 6489 | ��׼ֻ���ƻ����գ������� worktree��������ִ�С� @ g_assistant_backend/api/coding_task_routes.py
+    |-- (function):reject_coding_task_plan | sig: def reject_coding_task_plan((
+    task_id: str,
+    body: CodingAgentPlanRejectionRequest,
+    request: Request,
+    current_user: UserInfo = Depends(get_current_user),
+)) | line: 6597 | ��¼�ƻ��ܾ��������� revision ��ִ�С� @ g_assistant_backend/api/coding_task_routes.py
+    |-- (function):create_coding_task_model_context_consent | sig: def create_coding_task_model_context_consent((
+    task_id: str,
+    body: CodingAgentModelContextConsentRequest,
+    request: Request,
+    current_user: UserInfo = Depends(get_current_user),
+)) | line: 6646 | Record consent for the current Chat agent to use approved context. @ g_assistant_backend/api/coding_task_routes.py
+    |-- (function):prepare_coding_task_changes | sig: def prepare_coding_task_changes((
+    task_id: str,
+    body: CodingAgentPrepareChangesRequest,
+    request: Request,
+    current_user: UserInfo = Depends(get_current_user),
+)) | line: 6793 | �� feature flag �´�����׼�������� prepare changes�� @ g_assistant_backend/api/coding_task_routes.py
+    |-- (function):submit_coding_task_execution_review_decision | sig: def submit_coding_task_execution_review_decision((
+    task_id: str,
+    execution_id: str,
+    body: CodingAgentReviewDecisionRequest,
+    request: Request,
+    current_user: UserInfo = Depends(get_current_user),
+)) | line: 7363 | ��¼�˹� review decision�������� commit/PR/push�� @ g_assistant_backend/api/coding_task_routes.py
+    |-- (function):show_coding_task | sig: def show_coding_task((
+    task_id: str,
+    conversation_id: str,
+    request: Request,
+    agent_id: str = "main",
+    repo_id: str = "repo_default",
+    project_id: str = "project_default",
+    current_user: UserInfo = Depends(get_current_user),
+)) | line: 12452 | �������п��������ŷ⣬�����ɼƻ��� @ g_assistant_backend/api/coding_task_routes.py
+    |-- (function):coding_task_history | sig: def coding_task_history((
+    conversation_id: str,
+    request: Request,
+    agent_id: str = "main",
+    repo_id: str = "repo_default",
+    project_id: str = "project_default",
+    current_user: UserInfo = Depends(get_current_user),
+)) | line: 12486 | ���ص�ǰ�Ự�ڿ���������ʷ�� @ g_assistant_backend/api/coding_task_routes.py
+    |-- (function):cancel_coding_task | sig: def cancel_coding_task((
+    body: CodingTaskCancelRequest,
+    request: Request,
+    current_user: UserInfo = Depends(get_current_user),
+)) | line: 12523 | ȡ����δ����ִ�����Ŀ������� @ g_assistant_backend/api/coding_task_routes.py
+    |-- (function):unsupported_coding_task_action | sig: def unsupported_coding_task_action((
+    body: CodingTaskUnsupportedActionRequest,
+    request: Request,
+    current_user: UserInfo = Depends(get_current_user),
+)) | line: 12540 | ���ز��־û��� unsupported action notice�� @ g_assistant_backend/api/coding_task_routes.py
+    |-- (file):message_processor.py | line: 1 @ g_assistant_backend/message_processor.py
+    |-- (function):_process_user_message | sig: def _process_user_message((event: EventMessage)) | line: 3780 | �����û���Ϣ�¼��������ߵ���ѭ������ @ g_assistant_backend/message_processor.py
+
+

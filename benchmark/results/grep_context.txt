@@ -1,0 +1,528 @@
+## Grep 调查过程
+
+### Grep 查找 "CodingTaskService" 文件列表:
+发现 12 个文件包含该符号:
+- g_assistant_backend/api/coding_task_routes.py
+- g_assistant_backend/app_state.py
+- g_assistant_backend/engine/chat_coding_task_loop.py
+- g_assistant_backend/engine/coding_task_service.py
+- g_assistant_backend/engine/coding_task_service_resolver.py
+- g_assistant_backend/tests/unit/test_chat_coding_task_loop.py
+- g_assistant_backend/tests/unit/test_coding_task_routes.py
+- g_assistant_backend/tests/unit/test_coding_task_service.py
+- g_assistant_backend/tests/unit/test_coding_task_store.py
+- g_assistant_backend/tests/unit/test_coding_task_user_app_registration.py
+- g_assistant_backend/tests/unit/test_message_processor_commands.py
+- g_assistant_backend/tests/unit/test_read_only_repo_inspector.py
+
+### Grep 匹配行 (前 80 条):
+g_assistant_backend/api/coding_task_routes.py:276:from engine.coding_task_service import CodingTaskError, CodingTaskIdentity, CodingTaskService
+g_assistant_backend/api/coding_task_routes.py:1059:def _get_service(request: Request) -> CodingTaskService:
+g_assistant_backend/app_state.py:71:        self.coding_task_service = None     # CodingTaskService | None
+g_assistant_backend/engine/chat_coding_task_loop.py:14:    CodingTaskService,
+g_assistant_backend/engine/chat_coding_task_loop.py:43:    service: CodingTaskService | None,
+g_assistant_backend/engine/coding_task_service.py:209:    """CodingTaskService 依赖的最小 store 契约。"""
+g_assistant_backend/engine/coding_task_service.py:232:    """CodingTaskService 依赖的最小 audit store 契约。"""
+g_assistant_backend/engine/coding_task_service.py:298:class CodingTaskService:
+g_assistant_backend/engine/coding_task_service_resolver.py:10:from engine.coding_task_service import CodingTaskError, CodingTaskService, GitBaseRefResolver, REPO_ROOT
+g_assistant_backend/engine/coding_task_service_resolver.py:25:def resolve_coding_task_service(state: Any | None) -> CodingTaskService:
+g_assistant_backend/engine/coding_task_service_resolver.py:26:    """Return the shared CodingTaskService, creating the configured default when absent."""
+g_assistant_backend/engine/coding_task_service_resolver.py:42:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_chat_coding_task_loop.py:8:from engine.coding_task_service import CodingTaskError, CodingTaskIdentity, CodingTaskService, StaticBaseRefResolver
+g_assistant_backend/tests/unit/test_chat_coding_task_loop.py:27:def service() -> CodingTaskService:
+g_assistant_backend/tests/unit/test_chat_coding_task_loop.py:28:    return CodingTaskService(
+g_assistant_backend/tests/unit/test_chat_coding_task_loop.py:46:def _token(service: CodingTaskService, identity: CodingTaskIdentity) -> str:
+g_assistant_backend/tests/unit/test_chat_coding_task_loop.py:50:def _task(service: CodingTaskService, identity: CodingTaskIdentity):
+g_assistant_backend/tests/unit/test_coding_task_routes.py:68:    CodingTaskService,
+g_assistant_backend/tests/unit/test_coding_task_routes.py:132:    app.state.coding_task_service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_routes.py:526:    app.state.coding_task_service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_service.py:18:    CodingTaskService,
+g_assistant_backend/tests/unit/test_coding_task_service.py:44:def service() -> CodingTaskService:
+g_assistant_backend/tests/unit/test_coding_task_service.py:45:    return CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_service.py:65:def _token(service: CodingTaskService, identity: CodingTaskIdentity) -> str:
+g_assistant_backend/tests/unit/test_coding_task_service.py:303:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_service.py:314:        CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_service.py:326:        CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_service.py:441:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_service.py:664:    service = CodingTaskService(base_ref_resolver=StaticBaseRefResolver("develop"), hmac_secret=TEST_SECRET)
+g_assistant_backend/tests/unit/test_coding_task_service.py:708:    service = CodingTaskService(base_ref_resolver=StaticBaseRefResolver(BASE_REF_SHA))
+g_assistant_backend/tests/unit/test_coding_task_service.py:820:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_service.py:844:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_service.py:904:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_service.py:938:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_service.py:1145:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_service.py:1187:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_service.py:1234:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_service.py:1318:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_service.py:1343:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_store.py:13:from engine.coding_task_service import CodingTaskError, CodingTaskIdentity, CodingTaskService, StaticBaseRefResolver
+g_assistant_backend/tests/unit/test_coding_task_store.py:109:def _service(root: Path) -> CodingTaskService:
+g_assistant_backend/tests/unit/test_coding_task_store.py:110:    return CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_store.py:118:def _token(service: CodingTaskService, identity: CodingTaskIdentity) -> str:
+g_assistant_backend/tests/unit/test_coding_task_store.py:173:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_store.py:291:    reloaded = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_store.py:370:    reloaded = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_store.py:397:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_store.py:478:    reloaded = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_store.py:614:    reloaded_service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_store.py:665:    reloaded_service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_store.py:707:    reloaded_service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_store.py:729:    reloaded_service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_store.py:1069:    service = CodingTaskService(
+g_assistant_backend/tests/unit/test_coding_task_user_app_registration.py:10:from engine.coding_task_service import CodingTaskService, StaticBaseRefResolver
+g_assistant_backend/tests/unit/test_coding_t
+
+### 关键文件内容 (Read):
+### g_assistant_backend/engine/coding_task_service.py (前 200 行):
+"""Chat 自主开发任务 envelope/evidence 服务。
+
+本模块维护 ``coding_task_envelope.v1`` 的入口状态、分析状态和交付 evidence
+绑定。默认入口仍只签发 action token、校验 ``coding_task_start.v1`` 并创建任务；
+后续 local commit / remote delivery 只记录受控 evidence，不把本服务提升为通用
+PR、push 或主仓库写入入口。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from functools import cached_property
+import hashlib
+import hmac
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import subprocess
+import time
+from typing import Any, Mapping, Protocol
+import unicodedata
+import uuid
+
+from engine.coding_agent.coding_agent_execution_state import is_active_execution_status
+from engine.coding_plan import (
+    EVIDENCE_HASH_FIELDS,
+    PLAN_HASH_FIELDS,
+    READ_ONLY_PLAN_CHANGE_TYPES,
+    READ_ONLY_PLAN_SCHEMA_VERSION,
+    READ_ONLY_PLAN_RISK_LEVELS,
+    READ_ONLY_PLAN_TASK_TYPES,
+    attach_evidence_identity,
+    canonical_sha256,
+    evidence_ref_from_hash,
+    evidence_summary_hash,
+    read_only_plan_hash,
+)
+from engine.coding_agent.coding_agent_remote_delivery_closure import (
+    CodingAgentRemoteDeliveryClosureError,
+    validate_remote_delivery_closure,
+)
+from engine.coding_agent.coding_agent_remote_delivery_external_result import (
+    CodingAgentRemoteDeliveryExternalResultError,
+    validate_remote_delivery_external_result,
+)
+from engine.coding_agent.coding_agent_remote_evidence_replay import (
+    CodingAgentRemoteEvidenceReplayError,
+    validate_remote_evidence_replay,
+)
+from engine.coding_agent.coding_agent_remote_pr_external_result import (
+    CodingAgentRemotePrExternalResultError,
+    validate_remote_pr_closure,
+    validate_remote_pr_external_result,
+)
+from engine.coding_agent.coding_agent_remote_pr_review_decision import (
+    CodingAgentRemotePrReviewDecisionError,
+    validate_remote_pr_review_decision,
+)
+from engine.coding_agent.coding_agent_remote_push_execution import (
+    CodingAgentRemotePushExecutionError,
+    validate_remote_push_result,
+)
+from engine.coding_agent.coding_agent_remote_push_review_decision import (
+    CodingAgentRemotePushReviewDecisionError,
+    validate_remote_push_review_decision,
+)
+from engine.coding_agent.coding_agent_review_surface import (
+    CODING_AGENT_REVIEW_DECISION_SCHEMA_VERSION,
+    REVIEW_DECISION_STATUS,
+)
+from engine.coding_agent.coding_agent_remote_push_external_result import (
+    CodingAgentRemotePushExternalResultError,
+    validate_remote_push_closure,
+    validate_remote_push_external_result,
+)
+from engine.read_only_repo_inspector import InspectionResult
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BASE32_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
+TASK_TYPES = READ_ONLY_PLAN_TASK_TYPES
+SCOPE_AREAS = {
+    "frontend",
+    "backend",
+    "chat",
+    "docs",
+    "tests",
+    "contracts",
+    "repo_policy",
+    "git_runner",
+    "unknown",
+}
+PLAN_GENERATION_NOT_CONFIGURED_WARNING = "plan_generation_not_configured"
+READ_ONLY_INSPECTION_INVALID_REASON = "read_only_inspection_invalid"
+READ_ONLY_INSPECTION_FAILED_REASON = "read_only_inspection_failed"
+TASK_ENTRY_STAGE = "task_entry"
+READ_ONLY_PLANNING_STAGE = "read_only_planning"
+AGENT_ANALYSIS_STAGE = "agent_analysis"
+AGENT_ANALYSIS_STALE_RUNNING_MS = 15 * 60 * 1000
+CODING_TASK_ANALYSIS_SCHEMA_VERSION = "coding_task_analysis.v1"
+CODING_TASK_ANALYSIS_INVALID_REASON = "coding_task_analysis_invalid"
+CODING_TASK_ANALYSIS_FAILED_REASON = "coding_task_analysis_failed"
+CODING_TASK_ANALYSIS_ARTIFACT_MISSING_REASON = "coding_task_analysis_artifact_missing"
+ANALYSIS_INTENTS = {"read_only", "write"}
+ANALYSIS_TASK_KINDS = {"bugfix", "feature", "ui", "test", "refactor", "docs", "unknown"}
+ANALYSIS_RISK_LEVELS = READ_ONLY_PLAN_RISK_LEVELS | {"none"}
+ANALYSIS_CHANGE_TYPES = {"modify", "create", "delete"}
+TERMINAL_TASK_STATUSES = {"blocked", "cancelled", "remote_branch_pushed"}
+
+READ_ONLY_TASK_NEXT_ACTIONS_BY_STATUS: dict[str, list[str]] = {
+    "created": ["show", "history", "cancel"],
+    "investigating": ["show", "history", "cancel"],
+    "plan_ready": ["show", "history", "cancel"],
+    "blocked": ["show", "history"],
+    "cancelled": ["show", "history"],
+    "analysis_running": ["show", "history", "cancel"],
+    "analysis_complete": ["show", "history"],
+    "analysis_ready_for_approval": ["show", "history", "cancel"],
+    "analysis_blocked": ["analyze", "show", "history"],
+    "remote_branch_pushed": ["show", "history"],
+}
+UNAVAILABLE_WRITE_ACTIONS = (
+    "run",
+    "validate",
+    "continue",
+    "abandon",
+    "cleanup",
+    "commit_preview",
+    "commit",
+    "pr_plan",
+    "create_pr",
+    "push_develop",
+    "mark_manual",
+)
+SERVER_SOURCE_KIND_LAUNCHER = "launcher_endpoint"
+CODING_TASK_ID_PATTERN = re.compile(r"^coding_task_[0123456789abcdefghjkmnpqrstvwxyz]{26}$")
+CODING_TASK_EVENT_ID_PATTERN = re.compile(r"^coding_task_event_[0123456789abcdefghjkmnpqrstvwxyz]{26}$")
+NOTICE_ID_PATTERN = re.compile(r"^notice_[0123456789abcdefghjkmnpqrstvwxyz]{26}$")
+CODING_AGENT_EXECUTION_ID_PATTERN = re.compile(r"^coding_execution_[0123456789abcdefghjkmnpqrstvwxyz]{26}$")
+WORKTREE_ID_PATTERN = re.compile(r"^worktree_[0123456789abcdefghjkmnpqrstvwxyz]{26}$")
+PATH_REF_PATTERN = re.compile(r"^worktree_path_[0123456789abcdefghjkmnpqrstvwxyz]{26}$")
+PUBLIC_STATUS_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_:-]{0,119}$")
+FULL_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+SHA256_REF_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+EVIDENCE_REF_PATTERN = re.compile(r"^evidence_[0-9a-f]{26}$")
+WARNING_CODE_PATTERN = re.compile(r"^[a-z0-9_:-]{1,80}$")
+TWS_SKILL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,119}$")
+PLAN_RISK_LEVELS = READ_ONLY_PLAN_RISK_LEVELS
+READ_ONLY_PLAN_FIELDS = set(PLAN_HASH_FIELDS) | {"plan_hash"}
+EVIDENCE_SUMMARY_FIELDS = set(EVIDENCE_HASH_FIELDS) | {"evidence_ref", "evidence_summary_hash"}
+
+
+class CodingTaskError(Exception):
+    """面向 API 的结构化错误。"""
+
+    def __init__(self, status_code: int, reason_code: str, summary: str) -> None:
+        super().__init__(summary)
+        self.status_code = status_code
+        self.reason_code = reason_code
+        self.summary = summary
+
+
+@dataclass(frozen=True)
+class CodingTaskIdentity:
+    """一次 coding task 请求绑定的身份。"""
+
+    user_id: str
+    conversation_id: str
+    agent_id: str
+    repo_id: str
+    project_id: str
+
+
+@dataclass(frozen=True)
+class BaseRef:
+    """固定开发基准引用。"""
+
+    base_ref: str
+    base_ref_sha: str
+
+
+@dataclass(frozen=True)
+class NormalizedStartPayload:
+    """规范化后的 ``coding_task_start.v1`` 请求。"""
+
+    schema_version: str
+    idempotency_key: str
+    goal: str
+    task_type: str
+    scope_hint: dict[str, list[str]]
+    source_display: str
+    goal_hash: str
+    payload_hash: str
+
+
+@dataclass
+class ActionTokenRecord:
+    """工作台 action token 记录。"""
+### g_assistant_backend/api/coding_task_routes.py (前 200 行):
+"""Chat 自主开发任务 envelope/evidence API 路由。
+
+本路由提供只读入口、分析调度和受控交付 evidence 查询/记录接口。默认 start
+仍只签发 action token 并创建任务信封；写入、local commit、remote delivery 都必须
+通过独立 feature gate、人工 gate 和 hash-bound evidence 链路约束。
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import inspect
+import os
+from pathlib import Path
+import re
+from typing import Any, Callable, Mapping
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+from app_state import get_state
+from engine.coding_agent.coding_agent_approved_snapshot_store import (
+    CodingAgentApprovedSnapshotProvider,
+    CodingAgentApprovedSnapshotStoreError,
+    build_approved_snapshot_summary,
+)
+from engine.coding_agent.coding_agent_execution_service import CodingAgentExecutionServiceError
+from engine.coding_agent.coding_agent_execution_store import CodingAgentExecutionConfig
+from engine.coding_agent.coding_agent_execution_worker import CodingAgentExecutionWorkerError
+from engine.coding_agent.coding_agent_execution_state import EXECUTION_STATUS_CHANGES_READY, is_active_execution_status
+from engine.coding_agent.coding_agent_execution_events import sanitize_event_payload
+from engine.repo_worktree_manager import RepoWorktreeError
+from engine.coding_agent.coding_agent_delivery_handoff import (
+    CODING_AGENT_DELIVERY_HANDOFF_RESPONSE_SCHEMA_VERSION,
+    CodingAgentDeliveryHandoffError,
+    build_delivery_handoff,
+)
+from engine.coding_agent.coding_agent_remote_delivery import (
+    CODING_AGENT_REMOTE_DELIVERY_CANDIDATE_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemoteDeliveryError,
+    build_remote_delivery_candidate,
+)
+from engine.coding_agent.coding_agent_remote_delivery_decision import (
+    CODING_AGENT_REMOTE_DELIVERY_DECISION_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemoteDeliveryDecisionError,
+    build_remote_delivery_decision,
+    validate_remote_delivery_decision,
+)
+from engine.coding_agent.coding_agent_remote_delivery_plan import (
+    CODING_AGENT_REMOTE_DELIVERY_PLAN_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemoteDeliveryPlanError,
+    build_remote_delivery_plan,
+)
+from engine.coding_agent.coding_agent_remote_target_intent import (
+    CODING_AGENT_REMOTE_TARGET_INTENT_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemoteTargetIntentError,
+    build_remote_target_intent,
+    validate_remote_target_intent,
+)
+from engine.coding_agent.coding_agent_remote_delivery_readiness import (
+    CODING_AGENT_REMOTE_DELIVERY_READINESS_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemoteDeliveryReadinessError,
+    build_remote_delivery_readiness,
+)
+from engine.coding_agent.coding_agent_remote_delivery_execution_decision import (
+    CODING_AGENT_REMOTE_DELIVERY_EXECUTION_DECISION_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemoteDeliveryExecutionDecisionError,
+    build_remote_delivery_execution_decision,
+    validate_remote_delivery_execution_decision,
+)
+from engine.coding_agent.coding_agent_remote_delivery_execution_handoff import (
+    CODING_AGENT_REMOTE_DELIVERY_EXECUTION_HANDOFF_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemoteDeliveryExecutionHandoffError,
+    build_remote_delivery_execution_handoff,
+)
+from engine.coding_agent.coding_agent_remote_delivery_execution_preflight import (
+    CODING_AGENT_REMOTE_DELIVERY_EXECUTION_PREFLIGHT_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemoteDeliveryExecutionPreflightError,
+    build_remote_delivery_execution_preflight,
+)
+from engine.coding_agent.coding_agent_remote_delivery_execution_runbook import (
+    CODING_AGENT_REMOTE_DELIVERY_EXECUTION_RUNBOOK_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemoteDeliveryExecutionRunbookError,
+    build_remote_delivery_execution_runbook,
+)
+from engine.coding_agent.coding_agent_remote_delivery_external_result import (
+    CODING_AGENT_REMOTE_DELIVERY_EXTERNAL_RESULT_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemoteDeliveryExternalResultError,
+    build_remote_delivery_external_result,
+    validate_remote_delivery_external_result,
+)
+from engine.coding_agent.coding_agent_remote_delivery_closure import (
+    CODING_AGENT_REMOTE_DELIVERY_CLOSURE_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemoteDeliveryClosureError,
+    build_remote_delivery_closure,
+)
+from engine.coding_agent.coding_agent_remote_pr_candidate import (
+    CODING_AGENT_REMOTE_PR_CANDIDATE_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemotePrCandidateError,
+    build_remote_pr_candidate,
+)
+from engine.coding_agent.coding_agent_remote_pr_preflight import (
+    REMOTE_PR_EXECUTION_INTENT_RESPONSE_SCHEMA_VERSION,
+    REMOTE_PR_PREFLIGHT_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemotePrPreflightError,
+    build_remote_pr_execution_intent,
+    build_remote_pr_preflight,
+)
+from engine.coding_agent.coding_agent_remote_pr_draft_gate import (
+    REMOTE_PR_DRAFT_GATE_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemotePrDraftGateError,
+    build_remote_pr_draft_gate,
+)
+from engine.coding_agent.coding_agent_remote_pr_review_decision import (
+    REMOTE_PR_REVIEW_DECISION_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemotePrReviewDecisionError,
+    build_remote_pr_review_decision,
+    is_remote_pr_review_decision_approved,
+    validate_remote_pr_review_decision,
+)
+from engine.coding_agent.coding_agent_remote_pr_external_result import (
+    REMOTE_PR_CLOSURE_RESPONSE_SCHEMA_VERSION,
+    REMOTE_PR_EXTERNAL_RESULT_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemotePrExternalResultError,
+    build_remote_pr_closure,
+    build_remote_pr_external_result,
+    validate_remote_pr_external_result,
+)
+from engine.coding_agent.coding_agent_remote_pr_draft_creation import (
+    REMOTE_PR_DRAFT_RESULT_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemotePrDraftCreationError,
+    build_remote_pr_draft_result,
+    validate_remote_pr_draft_result,
+)
+from engine.coding_agent.coding_agent_remote_pr_draft_runner import CodingAgentRemotePrDraftRunnerError
+from engine.coding_agent.coding_agent_remote_pr_draft_store import (
+    CodingAgentRemotePrDraftStoreError,
+    InMemoryCodingAgentRemotePrDraftStore,
+)
+from engine.coding_agent.coding_agent_remote_push_decision_gate import (
+    REMOTE_PUSH_DECISION_GATE_RESPONSE_SCHEMA_VERSION,
+    REMOTE_PUSH_DECISION_GATE_SCHEMA_VERSION,
+    REMOTE_PUSH_REQUIRED_PR_CLOSURE_STATUS,
+    CodingAgentRemotePushDecisionGateError,
+    build_remote_push_decision_gate,
+    validate_remote_push_decision_gate,
+)
+from engine.coding_agent.coding_agent_remote_push_review_decision import (
+    REMOTE_PUSH_REVIEW_DECISION_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemotePushReviewDecisionError,
+    build_remote_push_review_decision,
+    is_remote_push_review_decision_approved,
+    validate_remote_push_review_decision,
+)
+from engine.coding_agent.coding_agent_remote_push_execution import (
+    REMOTE_PUSH_RESULT_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemotePushExecutionError,
+    build_remote_push_result,
+    validate_remote_push_result,
+)
+from engine.coding_agent.coding_agent_remote_push_runner import CodingAgentRemotePushRunnerError
+from engine.coding_agent.coding_agent_protected_branch_submit_preflight import (
+    PROTECTED_BRANCH_SUBMIT_PREFLIGHT_RESPONSE_SCHEMA_VERSION,
+    CodingAgentProtectedBranchSubmitPreflightError,
+    build_protected_branch_submit_preflight,
+)
+from engine.coding_agent.coding_agent_remote_push_store import (
+    CodingAgentRemotePushStoreError,
+    InMemoryCodingAgentRemotePushStore,
+)
+from engine.coding_agent.coding_agent_remote_push_external_result import (
+    REMOTE_PUSH_CLOSURE_RESPONSE_SCHEMA_VERSION,
+    REMOTE_PUSH_CLOSURE_SCHEMA_VERSION,
+    REMOTE_PUSH_EXTERNAL_RESULT_RESPONSE_SCHEMA_VERSION,
+    REMOTE_PUSH_EXTERNAL_RESULT_SCHEMA_VERSION,
+    CodingAgentRemotePushExternalResultError,
+    build_remote_push_closure,
+    build_remote_push_external_result,
+    validate_remote_push_external_result,
+)
+from engine.coding_agent.coding_agent_remote_evidence_replay import (
+    REMOTE_EVIDENCE_REPLAY_RESPONSE_SCHEMA_VERSION,
+    CodingAgentRemoteEvidenceReplayError,
+    build_remote_
+### g_assistant_backend/engine/coding_task_service_resolver.py (前 200 行):
+"""Shared resolver for Chat coding task service wiring."""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from engine.coding_audit_store import CodingAuditStore
+from engine.coding_agent.coding_agent_runtime_config import CodingAgentRuntimeConfigError, runtime_repo_root_from_env_or_default
+from engine.coding_task_service import CodingTaskError, CodingTaskService, GitBaseRefResolver, REPO_ROOT
+from engine.coding_task_store import DurableCodingTaskStore
+
+
+class DeferredCodingAgentBaseRefResolver:
+    """Resolve the configured coding-agent repo root only when task start needs it."""
+
+    def resolve(self):
+        try:
+            repo_root = runtime_repo_root_from_env_or_default(REPO_ROOT)
+        except CodingAgentRuntimeConfigError as exc:
+            raise CodingTaskError(503, exc.reason_code, exc.summary) from exc
+        return GitBaseRefResolver(repo_root=repo_root).resolve()
+
+
+def resolve_coding_task_service(state: Any | None) -> CodingTaskService:
+    """Return the shared CodingTaskService, creating the configured default when absent."""
+
+    service = getattr(state, "coding_task_service", None) if state is not None else None
+    if service is not None:
+        return service
+
+    state_root = os.environ.get("GASS_CODING_TASK_STATE_ROOT")
+    store = _build_configured_store(state_root) if state_root else None
+    audit_store = None
+    if state_root:
+        audit_root = os.environ.get("GASS_CODING_TASK_AUDIT_ROOT") or os.path.join(
+            os.path.dirname(state_root),
+            "coding_task_audit",
+        )
+        audit_store = _build_configured_audit_store(audit_root)
+
+    service = CodingTaskService(
+        store=store,
+        audit_store=audit_store,
+        base_ref_resolver=DeferredCodingAgentBaseRefResolver(),
+    )
+    if state is not None:
+        state.coding_task_service = service
+    return service
+
+
+def _build_configured_store(state_root: str) -> DurableCodingTaskStore:
+    try:
+        return DurableCodingTaskStore(state_root)
+    except CodingTaskError:
+        raise
+    except Exception as exc:
+        raise CodingTaskError(503, "coding_task_store_unhealthy", "开发任务状态存储初始化失败。") from exc
+
+
+def _build_configured_audit_store(audit_root: str) -> CodingAuditStore:
+    try:
+        return CodingAuditStore(audit_root)
+    except CodingTaskError:
+        raise
+    except Exception as exc:
+        raise CodingTaskError(503, "coding_task_audit_store_unhealthy", "开发任务审计存储初始化失败。") from exc
