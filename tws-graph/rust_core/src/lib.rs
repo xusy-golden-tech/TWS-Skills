@@ -526,7 +526,7 @@ fn register_all_extractors(registry: &mut indexer::registry::Registry) {
 /// Each tree-sitter Language is lazily initialized via `std::sync::LazyLock`
 /// to avoid stack overflow on Windows (where the default thread stack is
 /// only 1 MB — far too small for 28+ statically-initialized parser objects).
-fn lang_to_tree_sitter(lang: &str) -> Option<tree_sitter::Language> {
+pub(crate) fn lang_to_tree_sitter(lang: &str) -> Option<tree_sitter::Language> {
     static PY_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_python::LANGUAGE.into());
     static TS_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into());
     static JAVA_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_java::LANGUAGE.into());

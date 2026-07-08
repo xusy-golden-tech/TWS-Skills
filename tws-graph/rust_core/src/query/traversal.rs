@@ -4,6 +4,10 @@
 //! Supports edge-type filtering (e.g. exclude CONTAINS for impact, include
 //! all for trace) and bidirectional traversal (outbound for calls, inbound
 //! for impact/callers).
+//!
+//! Cross-language edges from the `cross_lang_edges` table are loaded
+//! alongside regular edges, enabling BFS to traverse HTTP bridges between
+//! frontend (TypeScript/JavaScript) and backend (Python/Java/Go) symbols.
 
 use crate::db::Database;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -19,15 +23,41 @@ pub enum TraversalDirection {
     Bidirectional,
 }
 
+/// A single hop across a language boundary via HTTP.
+///
+/// Represents a cross-tier link: a frontend function calls an HTTP URL,
+/// which is handled by a backend route handler (or vice versa).
+#[derive(Debug, Clone)]
+pub struct CrossLangHop {
+    /// Target node ID (the node on the other side of the HTTP bridge).
+    pub target_node_id: String,
+    /// HTTP URL, e.g. `/api/auth/register`.
+    pub url: String,
+    /// HTTP method: GET, POST, PUT, DELETE, PATCH.
+    pub http_method: String,
+    /// Match type: exact, template, or fuzzy.
+    pub match_type: String,
+    /// Confidence score 0.0 ~ 1.0.
+    pub confidence: f64,
+}
+
 /// A DB-backed BFS graph traverser.
 ///
 /// On construction, loads all edges from the database and builds adjacency
 /// lists for both outbound and inbound directions.
+///
+/// Cross-language edges from the `cross_lang_edges` table are loaded
+/// alongside regular edges, enabling BFS traversal across HTTP bridges
+/// between frontend and backend code.
 pub struct GraphTraverser {
     /// outbound[source] = [(target, kind)]
     outbound: HashMap<String, Vec<(String, String)>>,
     /// inbound[target] = [(source, kind)]
     inbound: HashMap<String, Vec<(String, String)>>,
+    /// Cross-language HTTP bridge edges.
+    /// Forward: frontend func → [CrossLangHop to backend handler]
+    /// Reverse: backend handler → [CrossLangHop to frontend func]
+    cross_lang: HashMap<String, Vec<CrossLangHop>>,
 }
 
 impl GraphTraverser {
@@ -69,7 +99,93 @@ impl GraphTraverser {
                 .push((source.clone(), kind.clone()));
         }
 
-        Ok(Self { outbound, inbound })
+        // Load cross-language edges (silently skip if tables don't exist yet)
+        let cross_lang = Self::load_cross_lang_edges(db).unwrap_or_else(|_| {
+            // Tables may not exist (pre-v009 database or --no-cross-tier).
+            // This is not an error — just means no cross-language traversal.
+            HashMap::new()
+        });
+
+        Ok(Self { outbound, inbound, cross_lang })
+    }
+
+    /// Load cross-language HTTP bridge edges from the database.
+    ///
+    /// Builds a bidirectional adjacency map:
+    /// - Forward: frontend function node → backend handler node
+    /// - Reverse: backend handler node → frontend function node
+    ///
+    /// Returns an error if any of the three tables (`http_calls`,
+    /// `http_routes`, `cross_lang_edges`) do not exist.
+    fn load_cross_lang_edges(
+        db: &Database,
+    ) -> rusqlite::Result<HashMap<String, Vec<CrossLangHop>>> {
+        let cross_lang_rows = db.get_cross_lang_edges(None, None)?;
+        let http_calls = db.get_all_http_calls()?;
+        let http_routes = db.get_all_http_routes()?;
+
+        // Build rowid → node_id map from the nodes table
+        let node_id_map: HashMap<i64, String> = {
+            let conn = db.connection();
+            let mut stmt = conn.prepare("SELECT rowid, id FROM nodes")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect::<HashMap<i64, String>>();
+            rows
+        };
+
+        // Build http_calls.id → node_id map
+        // func_node_id references nodes.rowid, so we resolve it via node_id_map
+        let call_func_map: HashMap<i64, String> = http_calls.iter()
+            .filter_map(|c| {
+                let call_id = c.id?;
+                node_id_map.get(&c.func_node_id)
+                    .map(|node_id| (call_id, node_id.clone()))
+            })
+            .collect();
+
+        // Build http_routes.id → node_id map
+        let route_handler_map: HashMap<i64, String> = http_routes.iter()
+            .filter_map(|r| {
+                let route_id = r.id?;
+                node_id_map.get(&r.handler_node_id)
+                    .map(|node_id| (route_id, node_id.clone()))
+            })
+            .collect();
+
+        let mut cross_lang: HashMap<String, Vec<CrossLangHop>> = HashMap::new();
+
+        for edge in &cross_lang_rows {
+            if let (Some(from_node), Some(to_node)) = (
+                call_func_map.get(&edge.from_call_id),
+                route_handler_map.get(&edge.to_route_id),
+            ) {
+                // Forward: frontend func → backend handler
+                cross_lang.entry(from_node.clone())
+                    .or_default()
+                    .push(CrossLangHop {
+                        target_node_id: to_node.clone(),
+                        url: edge.url.clone(),
+                        http_method: edge.http_method.clone(),
+                        match_type: edge.match_type.clone(),
+                        confidence: edge.confidence,
+                    });
+                // Reverse: backend handler → frontend func
+                cross_lang.entry(to_node.clone())
+                    .or_default()
+                    .push(CrossLangHop {
+                        target_node_id: from_node.clone(),
+                        url: edge.url.clone(),
+                        http_method: edge.http_method.clone(),
+                        match_type: edge.match_type.clone(),
+                        confidence: edge.confidence,
+                    });
+            }
+        }
+
+        Ok(cross_lang)
     }
 
     /// Build a traverser from in-memory edge tuples (for testing).
@@ -89,7 +205,7 @@ impl GraphTraverser {
                 .push((source.clone(), kind.clone()));
         }
 
-        Self { outbound, inbound }
+        Self { outbound, inbound, cross_lang: HashMap::new() }
     }
 
     // ------------------------------------------------------------------
@@ -127,11 +243,23 @@ impl GraphTraverser {
                             push_neighbor(nbr);
                         }
                     }
+                    // Follow cross-language edges in outbound traversal
+                    if let Some(cross_hops) = self.cross_lang.get(&node) {
+                        for hop in cross_hops {
+                            push_neighbor(&hop.target_node_id);
+                        }
+                    }
                 }
                 TraversalDirection::Inbound => {
                     if let Some(neighbors) = self.inbound.get(&node) {
                         for (nbr, _kind) in neighbors {
                             push_neighbor(nbr);
+                        }
+                    }
+                    // Follow cross-language edges in inbound traversal
+                    if let Some(cross_hops) = self.cross_lang.get(&node) {
+                        for hop in cross_hops {
+                            push_neighbor(&hop.target_node_id);
                         }
                     }
                 }
@@ -144,6 +272,12 @@ impl GraphTraverser {
                     if let Some(neighbors) = self.inbound.get(&node) {
                         for (nbr, _kind) in neighbors {
                             push_neighbor(nbr);
+                        }
+                    }
+                    // Follow cross-language edges (bidirectional)
+                    if let Some(cross_hops) = self.cross_lang.get(&node) {
+                        for hop in cross_hops {
+                            push_neighbor(&hop.target_node_id);
                         }
                     }
                 }
@@ -187,6 +321,14 @@ impl GraphTraverser {
                     }
                 }
             }
+            // Follow cross-language edges
+            if let Some(cross_hops) = self.cross_lang.get(&node) {
+                for hop in cross_hops {
+                    if visited.insert(hop.target_node_id.clone()) {
+                        queue.push_back((hop.target_node_id.clone(), d + 1));
+                    }
+                }
+            }
         }
 
         result
@@ -224,6 +366,14 @@ impl GraphTraverser {
                     }
                 }
             }
+            // Follow cross-language edges
+            if let Some(cross_hops) = self.cross_lang.get(&node) {
+                for hop in cross_hops {
+                    if visited.insert(hop.target_node_id.clone()) {
+                        queue.push_back((hop.target_node_id.clone(), d + 1));
+                    }
+                }
+            }
         }
 
         result
@@ -237,6 +387,10 @@ impl GraphTraverser {
     ///
     /// Returns `Some(Vec<node_id>)` if a path exists, `None` otherwise.
     /// The path includes both endpoints.
+    ///
+    /// Cross-language edges (HTTP bridges) are followed during traversal.
+    /// The parent map stores `(previous_node, Option<CrossLangHop>)` so that
+    /// path reconstruction can annotate language crossings.
     pub fn shortest_path(
         &self,
         src: &str,
@@ -248,65 +402,61 @@ impl GraphTraverser {
         }
 
         let mut queue = VecDeque::new();
-        let mut parent: HashMap<String, String> = HashMap::new();
+        // parent[child] = (parent_node, optional_cross_lang_hop)
+        let mut parent: HashMap<String, (String, Option<CrossLangHop>)> = HashMap::new();
         let mut visited = HashSet::new();
 
         queue.push_back(src.to_string());
         visited.insert(src.to_string());
 
         while let Some(node) = queue.pop_front() {
-            let mut check_neighbor = |nbr: &String| -> bool {
-                if !visited.contains(nbr) {
-                    visited.insert(nbr.clone());
-                    parent.insert(nbr.clone(), node.clone());
-                    if nbr == tgt {
-                        return true; // found
-                    }
-                    queue.push_back(nbr.clone());
-                }
-                false
-            };
+            // Collect all neighbors (regular + cross-lang) for this node
+            // as owned data to avoid borrowing conflicts
+            let mut neighbors: Vec<(String, Option<CrossLangHop>)> = Vec::new();
 
-            let found = match direction {
-                TraversalDirection::Outbound | TraversalDirection::Bidirectional => {
-                    if let Some(neighbors) = self.outbound.get(&node) {
-                        for (nbr, _kind) in neighbors {
-                            if check_neighbor(nbr) {
-                                // found — reconstruct path
-                                let mut path = vec![tgt.to_string()];
-                                let mut cur = tgt.to_string();
-                                while cur != *src {
-                                    cur = parent[&cur].clone();
-                                    path.push(cur.clone());
-                                }
-                                path.reverse();
-                                return Some(path);
-                            }
-                        }
-                    }
-                    false
-                }
-                _ => false,
-            };
+            let use_outbound = direction == TraversalDirection::Outbound
+                || direction == TraversalDirection::Bidirectional;
+            let use_inbound = direction == TraversalDirection::Inbound
+                || direction == TraversalDirection::Bidirectional;
 
-            if found {
-                // handled inside loop above
+            if use_outbound {
+                if let Some(edges) = self.outbound.get(&node) {
+                    for (nbr, _kind) in edges {
+                        neighbors.push((nbr.clone(), None));
+                    }
+                }
+            }
+            if use_inbound {
+                if let Some(edges) = self.inbound.get(&node) {
+                    for (nbr, _kind) in edges {
+                        neighbors.push((nbr.clone(), None));
+                    }
+                }
+            }
+            // Cross-language edges (bidirectional bridges)
+            if let Some(cross_hops) = self.cross_lang.get(&node) {
+                for hop in cross_hops {
+                    neighbors.push((hop.target_node_id.clone(), Some(hop.clone())));
+                }
             }
 
-            if direction == TraversalDirection::Inbound || direction == TraversalDirection::Bidirectional {
-                if let Some(neighbors) = self.inbound.get(&node) {
-                    for (nbr, _kind) in neighbors {
-                        if check_neighbor(nbr) {
-                            let mut path = vec![tgt.to_string()];
-                            let mut cur = tgt.to_string();
-                            while cur != *src {
-                                cur = parent[&cur].clone();
-                                path.push(cur.clone());
-                            }
-                            path.reverse();
-                            return Some(path);
+            for (nbr, hop) in &neighbors {
+                if !visited.contains(nbr) {
+                    visited.insert(nbr.clone());
+                    parent.insert(nbr.clone(), (node.clone(), hop.clone()));
+                    if nbr == tgt {
+                        // Found — reconstruct path
+                        let mut path = vec![tgt.to_string()];
+                        let mut cur = tgt.to_string();
+                        while cur != *src {
+                            let (prev, _h) = parent[&cur].clone();
+                            cur = prev;
+                            path.push(cur.clone());
                         }
+                        path.reverse();
+                        return Some(path);
                     }
+                    queue.push_back(nbr.clone());
                 }
             }
         }
@@ -622,5 +772,351 @@ mod tests {
         assert_eq!(p[2], n_c);
 
         cleanup(&path);
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-language traversal tests
+    // ------------------------------------------------------------------
+
+    /// Helper: insert http_calls, http_routes, and cross_lang_edges tables
+    /// for a test database (assumes v009 migration has run).
+    fn setup_cross_lang_tables(db: &Database) {
+        let conn = db.connection();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS http_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL,
+                http_method TEXT NOT NULL,
+                func_node_id INTEGER NOT NULL,
+                url_is_template INTEGER DEFAULT 0,
+                file_path TEXT NOT NULL,
+                line INTEGER NOT NULL,
+                column INTEGER NOT NULL,
+                source_lang TEXT NOT NULL,
+                raw_snippet TEXT
+            );
+            CREATE TABLE IF NOT EXISTS http_routes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url_pattern TEXT NOT NULL,
+                url_pattern_raw TEXT NOT NULL,
+                http_method TEXT NOT NULL,
+                handler_node_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                line INTEGER NOT NULL,
+                column INTEGER NOT NULL,
+                source_lang TEXT NOT NULL,
+                source_framework TEXT,
+                raw_snippet TEXT
+            );
+            CREATE TABLE IF NOT EXISTS cross_lang_edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_call_id INTEGER NOT NULL,
+                to_route_id INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                http_method TEXT NOT NULL,
+                match_type TEXT NOT NULL,
+                confidence REAL NOT NULL
+            );",
+        )
+        .unwrap();
+    }
+
+    /// Helper: insert an http_calls row and return its id.
+    /// func_node_id references nodes.rowid.
+    fn insert_cross_call(
+        db: &Database,
+        url: &str,
+        method: &str,
+        func_node_rowid: i64,
+    ) -> i64 {
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO http_calls (url, http_method, func_node_id, url_is_template, \
+             file_path, line, column, source_lang) \
+             VALUES (?1, ?2, ?3, 0, 'frontend.ts', 1, 1, 'typescript')",
+            rusqlite::params![url, method, func_node_rowid],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// Helper: insert an http_routes row and return its id.
+    /// handler_node_id references nodes.rowid.
+    fn insert_cross_route(
+        db: &Database,
+        url_pattern: &str,
+        method: &str,
+        handler_node_rowid: i64,
+    ) -> i64 {
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO http_routes (url_pattern, url_pattern_raw, http_method, handler_node_id, \
+             file_path, line, column, source_lang, source_framework) \
+             VALUES (?1, ?1, ?2, ?3, 'backend.py', 1, 1, 'python', 'fastapi')",
+            rusqlite::params![url_pattern, method, handler_node_rowid],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// Helper: insert a cross_lang_edges row.
+    fn insert_cross_lang_edge(
+        db: &Database,
+        from_call_id: i64,
+        to_route_id: i64,
+        url: &str,
+        method: &str,
+        match_type: &str,
+        confidence: f64,
+    ) {
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO cross_lang_edges (from_call_id, to_route_id, url, http_method, \
+             match_type, confidence) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![from_call_id, to_route_id, url, method, match_type, confidence],
+        )
+        .unwrap();
+    }
+
+    /// Helper: get the rowid of a node by its XXH3 id.
+    fn get_node_rowid(db: &Database, node_id: &str) -> i64 {
+        let conn = db.connection();
+        conn.query_row(
+            "SELECT rowid FROM nodes WHERE id = ?1",
+            rusqlite::params![node_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_cross_lang_impact_radius() {
+        let (db, path) = temp_db("cross_lang_impact");
+        setup_cross_lang_tables(&db);
+
+        // Create nodes
+        let n_fe = insert_node(&db, "handleLogin", "fe::handleLogin", "login.ts");
+        let n_be = insert_node(&db, "login_handler", "be::login_handler", "app.py");
+        let n_db = insert_node(&db, "query_user", "be::query_user", "db.py");
+
+        // Regular edges: backend handler → database query
+        insert_edge(&db, &n_be, &n_db, "CALLS");
+
+        // Cross-tier: frontend func → backend handler via HTTP
+        let fe_rowid = get_node_rowid(&db, &n_fe);
+        let be_rowid = get_node_rowid(&db, &n_be);
+
+        let call_id = insert_cross_call(&db, "/api/login", "POST", fe_rowid);
+        let route_id = insert_cross_route(&db, "/api/login", "POST", be_rowid);
+        insert_cross_lang_edge(&db, call_id, route_id, "/api/login", "POST", "exact", 1.0);
+
+        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+
+        // Impact radius from frontend function should reach both
+        // backend handler and database function via cross-lang edge
+        let radius = t.impact_radius(&n_fe, 3, TraversalDirection::Outbound);
+        assert!(radius.contains(&n_be), "should reach backend handler via cross-lang edge");
+        assert!(radius.contains(&n_db), "should reach db function via cross-lang + regular edge");
+        assert!(!radius.contains(&n_fe));
+
+        // Impact radius without cross-tier data
+        // (cross_lang should still work if DB has no data)
+        let radius_be = t.impact_radius(&n_be, 1, TraversalDirection::Outbound);
+        assert!(radius_be.contains(&n_db), "backend should reach db via regular edge");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_cross_lang_shortest_path() {
+        let (db, db_path) = temp_db("cross_lang_path");
+        setup_cross_lang_tables(&db);
+
+        // Create nodes
+        let n_fe = insert_node(&db, "handleRegister", "fe::handleRegister", "register.ts");
+        let n_be = insert_node(&db, "register_handler", "be::register_handler", "app.py");
+
+        // Cross-tier bridge
+        let fe_rowid = get_node_rowid(&db, &n_fe);
+        let be_rowid = get_node_rowid(&db, &n_be);
+
+        let call_id = insert_cross_call(&db, "/api/auth/register", "POST", fe_rowid);
+        let route_id = insert_cross_route(&db, "/api/auth/register", "POST", be_rowid);
+        insert_cross_lang_edge(&db, call_id, route_id, "/api/auth/register", "POST", "exact", 1.0);
+
+        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+
+        // Should find path from frontend to backend via cross-lang edge
+        let sp = t.shortest_path(&n_fe, &n_be, TraversalDirection::Outbound);
+        assert!(sp.is_some(), "should find cross-language path");
+        let p = sp.unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0], n_fe);
+        assert_eq!(p[1], n_be);
+
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn test_cross_lang_reverse_path() {
+        let (db, db_path) = temp_db("cross_lang_rev");
+        setup_cross_lang_tables(&db);
+
+        // Create nodes
+        let n_fe = insert_node(&db, "fetchUsers", "fe::fetchUsers", "list.ts");
+        let n_be = insert_node(&db, "list_users", "be::list_users", "app.py");
+
+        // Cross-tier bridge
+        let fe_rowid = get_node_rowid(&db, &n_fe);
+        let be_rowid = get_node_rowid(&db, &n_be);
+
+        let call_id = insert_cross_call(&db, "/api/users", "GET", fe_rowid);
+        let route_id = insert_cross_route(&db, "/api/users", "GET", be_rowid);
+        insert_cross_lang_edge(&db, call_id, route_id, "/api/users", "GET", "exact", 1.0);
+
+        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+
+        // Reverse: backend handler → frontend function via cross-lang edge
+        let sp = t.shortest_path(&n_be, &n_fe, TraversalDirection::Outbound);
+        assert!(sp.is_some(), "should find reverse cross-language path");
+        let p = sp.unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0], n_be);
+        assert_eq!(p[1], n_fe);
+
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn test_cross_lang_outbound_calls() {
+        let (db, path) = temp_db("cross_lang_calls");
+        setup_cross_lang_tables(&db);
+
+        let n_fe = insert_node(&db, "doAction", "fe::doAction", "action.ts");
+        let n_be = insert_node(&db, "action_handler", "be::action_handler", "app.py");
+
+        let fe_rowid = get_node_rowid(&db, &n_fe);
+        let be_rowid = get_node_rowid(&db, &n_be);
+
+        let call_id = insert_cross_call(&db, "/api/action", "PUT", fe_rowid);
+        let route_id = insert_cross_route(&db, "/api/action", "PUT", be_rowid);
+        insert_cross_lang_edge(&db, call_id, route_id, "/api/action", "PUT", "template", 0.95);
+
+        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+
+        let calls = t.outbound_calls(&n_fe, 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, n_be);
+        assert_eq!(calls[0].0, 1);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_cross_lang_inbound_callers() {
+        let (db, path) = temp_db("cross_lang_callers");
+        setup_cross_lang_tables(&db);
+
+        let n_fe = insert_node(&db, "callApi", "fe::callApi", "fe.ts");
+        let n_be = insert_node(&db, "handleApi", "be::handleApi", "be.py");
+
+        let fe_rowid = get_node_rowid(&db, &n_fe);
+        let be_rowid = get_node_rowid(&db, &n_be);
+
+        let call_id = insert_cross_call(&db, "/api/endpoint", "DELETE", fe_rowid);
+        let route_id = insert_cross_route(&db, "/api/endpoint", "DELETE", be_rowid);
+        insert_cross_lang_edge(&db, call_id, route_id, "/api/endpoint", "DELETE", "exact", 1.0);
+
+        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+
+        // From backend handler, find frontend caller via cross-lang reverse edge
+        let callers = t.inbound_callers(&n_be, 1);
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].1, n_fe);
+        assert_eq!(callers[0].0, 1);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_cross_lang_no_cross_data_preserves_behavior() {
+        // Verifies that empty cross_lang tables don't affect existing behavior
+        let edges = vec![
+            ("a".to_string(), "b".to_string(), "CALLS".to_string()),
+            ("b".to_string(), "c".to_string(), "CALLS".to_string()),
+        ];
+        let t = GraphTraverser::from_edges(&edges);
+
+        // Standard outbound traversal
+        let calls = t.outbound_calls("a", 2);
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().any(|(d, id)| *d == 1 && id == "b"));
+        assert!(calls.iter().any(|(d, id)| *d == 2 && id == "c"));
+
+        // Standard shortest path
+        let path = t.shortest_path("a", "c", TraversalDirection::Outbound);
+        assert!(path.is_some());
+        let p = path.unwrap();
+        assert_eq!(p, vec!["a", "b", "c"]);
+
+        // Standard impact radius
+        let radius = t.impact_radius("a", 2, TraversalDirection::Outbound);
+        assert_eq!(radius.len(), 2);
+        assert!(radius.contains("b"));
+        assert!(radius.contains("c"));
+    }
+
+    #[test]
+    fn test_cross_lang_bidirectional_with_bridge() {
+        let (db, db_path) = temp_db("cross_lang_bidi");
+        setup_cross_lang_tables(&db);
+
+        let n_fe = insert_node(&db, "appStart", "fe::appStart", "app.ts");
+        let n_be = insert_node(&db, "apiStart", "be::apiStart", "server.py");
+
+        let fe_rowid = get_node_rowid(&db, &n_fe);
+        let be_rowid = get_node_rowid(&db, &n_be);
+
+        let call_id = insert_cross_call(&db, "/api/init", "GET", fe_rowid);
+        let route_id = insert_cross_route(&db, "/api/init", "GET", be_rowid);
+        insert_cross_lang_edge(&db, call_id, route_id, "/api/init", "GET", "exact", 1.0);
+
+        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+
+        // Bidirectional should find path
+        let sp = t.shortest_path(&n_fe, &n_be, TraversalDirection::Bidirectional);
+        assert!(sp.is_some());
+        let p = sp.unwrap();
+        assert_eq!(p.len(), 2);
+
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn test_cross_lang_hops_are_stored_in_parent_map() {
+        // Verify that CrossLangHop information is stored in the parent map
+        // (indirectly via shortest_path behavior)
+        let (db, db_path) = temp_db("cross_lang_parent");
+        setup_cross_lang_tables(&db);
+
+        let n_fe = insert_node(&db, "submitForm", "fe::submitForm", "form.ts");
+        let n_be = insert_node(&db, "process_form", "be::process_form", "api.py");
+
+        let fe_rowid = get_node_rowid(&db, &n_fe);
+        let be_rowid = get_node_rowid(&db, &n_be);
+
+        let call_id = insert_cross_call(&db, "/api/form", "POST", fe_rowid);
+        let route_id = insert_cross_route(&db, "/api/form", "POST", be_rowid);
+        insert_cross_lang_edge(&db, call_id, route_id, "/api/form", "POST", "exact", 1.0);
+
+        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+
+        // Path must exist and include both endpoints
+        let sp = t.shortest_path(&n_fe, &n_be, TraversalDirection::Outbound);
+        assert!(sp.is_some());
+        let p = sp.unwrap();
+        assert_eq!(p, vec![n_fe, n_be]);
+
+        cleanup(&db_path);
     }
 }
