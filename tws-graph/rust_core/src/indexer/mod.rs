@@ -18,9 +18,11 @@
 //! | [`language`] | Extension → language name mapping (30+ languages) |
 //! | [`registry`] | Extractor registration & lookup |
 //! | [`context`] | Per-file node/edge accumulation with scope management |
+//! | [`cross_tier`] | Cross-tier HTTP call/route scanning and URL matching |
 //! | [`extractors`] | Language-specific tree-sitter extractors (28+) |
 
 pub mod context;
+pub mod cross_tier;
 pub mod ignore;
 pub mod language;
 pub mod registry;
