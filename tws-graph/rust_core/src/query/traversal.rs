@@ -69,6 +69,7 @@ impl GraphTraverser {
         db: &Database,
         kind_filter: Option<&[&str]>,
         exclude_kinds: Option<&[&str]>,
+        cross_tier: bool,
     ) -> rusqlite::Result<Self> {
         let edges = db.get_all_edges(None)?;
         let mut outbound: HashMap<String, Vec<(String, String)>> = HashMap::new();
@@ -99,12 +100,17 @@ impl GraphTraverser {
                 .push((source.clone(), kind.clone()));
         }
 
-        // Load cross-language edges (silently skip if tables don't exist yet)
-        let cross_lang = Self::load_cross_lang_edges(db).unwrap_or_else(|_| {
-            // Tables may not exist (pre-v009 database or --no-cross-tier).
-            // This is not an error — just means no cross-language traversal.
+        // Load cross-language edges only when cross_tier is enabled.
+        // Silently skip if tables don't exist yet (pre-v009 database).
+        let cross_lang = if cross_tier {
+            Self::load_cross_lang_edges(db).unwrap_or_else(|_| {
+                // Tables may not exist (pre-v009 database or --no-cross-tier).
+                // This is not an error — just means no cross-language traversal.
+                HashMap::new()
+            })
+        } else {
             HashMap::new()
-        });
+        };
 
         Ok(Self { outbound, inbound, cross_lang })
     }
@@ -683,7 +689,7 @@ mod tests {
         insert_edge(&db, &n_a, &n_b, "CALLS");
         insert_edge(&db, &n_b, &n_c, "CALLS");
 
-        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
 
         let calls = t.outbound_calls(&n_a, 2);
         assert_eq!(calls.len(), 2);
@@ -704,7 +710,7 @@ mod tests {
         insert_edge(&db, &n_a, &n_b, "CALLS");
         insert_edge(&db, &n_a, &n_c, "CONTAINS"); // should be excluded
 
-        let t = GraphTraverser::from_db(&db, None, Some(&["CONTAINS"])).unwrap();
+        let t = GraphTraverser::from_db(&db, None, Some(&["CONTAINS"]), true).unwrap();
 
         let calls = t.outbound_calls(&n_a, 1);
         assert_eq!(calls.len(), 1);
@@ -723,7 +729,7 @@ mod tests {
         insert_edge(&db, &n_a, &n_b, "CALLS");
         insert_edge(&db, &n_a, &n_c, "IMPORTS");
 
-        let t = GraphTraverser::from_db(&db, Some(&["CALLS"]), None).unwrap();
+        let t = GraphTraverser::from_db(&db, Some(&["CALLS"]), None, true).unwrap();
 
         let calls = t.outbound_calls(&n_a, 1);
         assert_eq!(calls.len(), 1);
@@ -744,7 +750,7 @@ mod tests {
         insert_edge(&db, &n_b, &n_c, "CALLS");
         insert_edge(&db, &n_b, &n_d, "CALLS");
 
-        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
         let radius = t.impact_radius(&n_a, 2, TraversalDirection::Outbound);
         assert_eq!(radius.len(), 3); // b, c, d
         assert!(!radius.contains(&n_a));
@@ -762,7 +768,7 @@ mod tests {
         insert_edge(&db, &n_a, &n_b, "CALLS");
         insert_edge(&db, &n_b, &n_c, "CALLS");
 
-        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
 
         let s_path = t.shortest_path(&n_a, &n_c, TraversalDirection::Outbound);
         assert!(s_path.is_some());
@@ -910,7 +916,7 @@ mod tests {
         let route_id = insert_cross_route(&db, "/api/login", "POST", be_rowid);
         insert_cross_lang_edge(&db, call_id, route_id, "/api/login", "POST", "exact", 1.0);
 
-        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
 
         // Impact radius from frontend function should reach both
         // backend handler and database function via cross-lang edge
@@ -944,7 +950,7 @@ mod tests {
         let route_id = insert_cross_route(&db, "/api/auth/register", "POST", be_rowid);
         insert_cross_lang_edge(&db, call_id, route_id, "/api/auth/register", "POST", "exact", 1.0);
 
-        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
 
         // Should find path from frontend to backend via cross-lang edge
         let sp = t.shortest_path(&n_fe, &n_be, TraversalDirection::Outbound);
@@ -974,7 +980,7 @@ mod tests {
         let route_id = insert_cross_route(&db, "/api/users", "GET", be_rowid);
         insert_cross_lang_edge(&db, call_id, route_id, "/api/users", "GET", "exact", 1.0);
 
-        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
 
         // Reverse: backend handler → frontend function via cross-lang edge
         let sp = t.shortest_path(&n_be, &n_fe, TraversalDirection::Outbound);
@@ -1002,7 +1008,7 @@ mod tests {
         let route_id = insert_cross_route(&db, "/api/action", "PUT", be_rowid);
         insert_cross_lang_edge(&db, call_id, route_id, "/api/action", "PUT", "template", 0.95);
 
-        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
 
         let calls = t.outbound_calls(&n_fe, 1);
         assert_eq!(calls.len(), 1);
@@ -1027,7 +1033,7 @@ mod tests {
         let route_id = insert_cross_route(&db, "/api/endpoint", "DELETE", be_rowid);
         insert_cross_lang_edge(&db, call_id, route_id, "/api/endpoint", "DELETE", "exact", 1.0);
 
-        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
 
         // From backend handler, find frontend caller via cross-lang reverse edge
         let callers = t.inbound_callers(&n_be, 1);
@@ -1081,7 +1087,7 @@ mod tests {
         let route_id = insert_cross_route(&db, "/api/init", "GET", be_rowid);
         insert_cross_lang_edge(&db, call_id, route_id, "/api/init", "GET", "exact", 1.0);
 
-        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
 
         // Bidirectional should find path
         let sp = t.shortest_path(&n_fe, &n_be, TraversalDirection::Bidirectional);
@@ -1109,7 +1115,7 @@ mod tests {
         let route_id = insert_cross_route(&db, "/api/form", "POST", be_rowid);
         insert_cross_lang_edge(&db, call_id, route_id, "/api/form", "POST", "exact", 1.0);
 
-        let t = GraphTraverser::from_db(&db, None, None).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
 
         // Path must exist and include both endpoints
         let sp = t.shortest_path(&n_fe, &n_be, TraversalDirection::Outbound);

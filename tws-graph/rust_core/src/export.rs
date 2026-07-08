@@ -42,7 +42,7 @@ pub fn export_dot(
     let kind_filter: Option<Vec<&str>> = kind.map(|k| vec![k]);
     let kind_slice: Option<&[&str]> = kind_filter.as_ref().map(|v| v.as_slice());
 
-    let traverser = match GraphTraverser::from_db(db, kind_slice, None) {
+    let traverser = match GraphTraverser::from_db(db, kind_slice, None, true) {
         Ok(t) => t,
         Err(_) => return String::from("digraph G {\n  // traversal error\n}\n"),
     };
@@ -141,7 +141,7 @@ pub fn export_mermaid(
     let kind_filter: Option<Vec<&str>> = kind.map(|k| vec![k]);
     let kind_slice: Option<&[&str]> = kind_filter.as_ref().map(|v| v.as_slice());
 
-    let traverser = match GraphTraverser::from_db(db, kind_slice, None) {
+    let traverser = match GraphTraverser::from_db(db, kind_slice, None, true) {
         Ok(t) => t,
         Err(_) => return String::from("graph TD\n  %% traversal error\n"),
     };
