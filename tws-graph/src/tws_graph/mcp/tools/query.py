@@ -150,7 +150,6 @@ def _query_cypher(store: Store, args: dict) -> dict:
 def _detect_cross_service(store: Store, args: dict) -> dict:
     """Detect cross-service communication."""
     try:
-        from tws_graph.services.route_detector import RouteDetector
         from tws_graph.services.channel_detector import ChannelDetector
         from tws_graph.services.grpc_detector import GrpcDetector
 
@@ -158,21 +157,24 @@ def _detect_cross_service(store: Store, args: dict) -> dict:
         channels = []
         grpc_services = []
 
-        # Route detection
+        # Route detection (delegated to Rust core)
         try:
-            route_detector = RouteDetector(store)
-            route_results = route_detector.detect()
-            routes = [
-                {
-                    "node_id": r.get("node_id", ""),
-                    "name": r.get("name", ""),
-                    "method": r.get("method", ""),
-                    "path": r.get("path", ""),
-                    "file_path": r.get("file_path", ""),
-                    "framework": r.get("framework", ""),
-                }
-                for r in route_results
-            ]
+            from tws_graph.rust_bridge import rust_routes
+            db_path = store._conn_mgr.db_path
+            route_json = rust_routes(db_path, json_output=True)
+            route_data = json.loads(route_json)
+            if isinstance(route_data, list):
+                routes = [
+                    {
+                        "node_id": r.get("node_id", ""),
+                        "name": r.get("name", ""),
+                        "method": r.get("method", ""),
+                        "path": r.get("path", ""),
+                        "file_path": r.get("file_path", ""),
+                        "framework": r.get("framework", ""),
+                    }
+                    for r in route_data
+                ]
         except Exception:
             pass
 
