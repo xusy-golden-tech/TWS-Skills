@@ -177,13 +177,15 @@ pub enum EdgeKind {
     ListensOn,
 
     // --- cross-service (4) ---
-    /// HTTP call.
+    /// HTTP call (activated in v7.4 cross-tier tracing).
+    /// Created by CrossTierScanner during indexing from http_calls/http_routes tables
+    /// and consumed by GraphTraverser during cross-language trace/impact queries.
     HttpCalls,
-    /// gRPC service definition.
+    /// gRPC service definition (reserved — not yet activated).
     GrpcService,
-    /// gRPC client usage.
+    /// gRPC client usage (reserved — not yet activated).
     GrpcClient,
-    /// gRPC server registration.
+    /// gRPC server registration (reserved — not yet activated).
     GrpcServer,
 
     // --- analysis (3) ---

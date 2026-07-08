@@ -6,6 +6,7 @@
 //! (``tws_graph/store/connection.py``) exactly.
 
 use crate::db::migrations::MigrationRunner;
+use crate::db::models::{CrossLangEdgeRecord, HttpCallRecord, HttpRouteRecord};
 use crate::query::NodeInfo;
 use rusqlite::{Connection, Result};
 use sha2::{Digest, Sha256};
@@ -574,6 +575,230 @@ impl Database {
     }
 
     // -----------------------------------------------------------------------
+    // Cross-tier: http_calls
+    // -----------------------------------------------------------------------
+
+    /// Insert a single HTTP call record.
+    ///
+    /// Returns the new row ID on success.
+    pub fn insert_http_call(&self, record: &HttpCallRecord) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO http_calls (url, http_method, func_node_id, url_is_template, \
+             file_path, line, column, source_lang, raw_snippet) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                record.url,
+                record.http_method,
+                record.func_node_id,
+                record.url_is_template as i32,
+                record.file_path,
+                record.line,
+                record.column,
+                record.source_lang,
+                record.raw_snippet,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Batch-insert HTTP call records in a single transaction.
+    ///
+    /// Returns the number of rows inserted.
+    pub fn batch_insert_http_calls(&self, records: &[HttpCallRecord]) -> Result<usize> {
+        self.conn.execute_batch("BEGIN TRANSACTION")?;
+        let mut count = 0;
+        for record in records {
+            self.insert_http_call(record)?;
+            count += 1;
+        }
+        self.conn.execute_batch("COMMIT")?;
+        Ok(count)
+    }
+
+    /// Get all HTTP call records.
+    pub fn get_all_http_calls(&self) -> Result<Vec<HttpCallRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, url, http_method, func_node_id, url_is_template, \
+             file_path, line, column, source_lang, raw_snippet FROM http_calls",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(HttpCallRecord {
+                id: Some(row.get(0)?),
+                url: row.get(1)?,
+                http_method: row.get(2)?,
+                func_node_id: row.get(3)?,
+                url_is_template: row.get::<_, i32>(4)? != 0,
+                file_path: row.get(5)?,
+                line: row.get(6)?,
+                column: row.get(7)?,
+                source_lang: row.get(8)?,
+                raw_snippet: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-tier: http_routes
+    // -----------------------------------------------------------------------
+
+    /// Insert a single HTTP route record.
+    ///
+    /// Returns the new row ID on success.
+    pub fn insert_http_route(&self, record: &HttpRouteRecord) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO http_routes (url_pattern, url_pattern_raw, http_method, handler_node_id, \
+             file_path, line, column, source_lang, source_framework, raw_snippet) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                record.url_pattern,
+                record.url_pattern_raw,
+                record.http_method,
+                record.handler_node_id,
+                record.file_path,
+                record.line,
+                record.column,
+                record.source_lang,
+                record.source_framework,
+                record.raw_snippet,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Batch-insert HTTP route records in a single transaction.
+    ///
+    /// Returns the number of rows inserted.
+    pub fn batch_insert_http_routes(&self, records: &[HttpRouteRecord]) -> Result<usize> {
+        self.conn.execute_batch("BEGIN TRANSACTION")?;
+        let mut count = 0;
+        for record in records {
+            self.insert_http_route(record)?;
+            count += 1;
+        }
+        self.conn.execute_batch("COMMIT")?;
+        Ok(count)
+    }
+
+    /// Get all HTTP route records.
+    pub fn get_all_http_routes(&self) -> Result<Vec<HttpRouteRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, url_pattern, url_pattern_raw, http_method, handler_node_id, \
+             file_path, line, column, source_lang, source_framework, raw_snippet FROM http_routes",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(HttpRouteRecord {
+                id: Some(row.get(0)?),
+                url_pattern: row.get(1)?,
+                url_pattern_raw: row.get(2)?,
+                http_method: row.get(3)?,
+                handler_node_id: row.get(4)?,
+                file_path: row.get(5)?,
+                line: row.get(6)?,
+                column: row.get(7)?,
+                source_lang: row.get(8)?,
+                source_framework: row.get(9)?,
+                raw_snippet: row.get(10)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-tier: cross_lang_edges
+    // -----------------------------------------------------------------------
+
+    /// Insert a single cross-language edge record.
+    ///
+    /// Returns the new row ID on success.
+    pub fn insert_cross_lang_edge(&self, record: &CrossLangEdgeRecord) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO cross_lang_edges (from_call_id, to_route_id, url, http_method, \
+             match_type, confidence) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                record.from_call_id,
+                record.to_route_id,
+                record.url,
+                record.http_method,
+                record.match_type,
+                record.confidence,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Batch-insert cross-language edge records in a single transaction.
+    ///
+    /// Returns the number of rows inserted.
+    pub fn batch_insert_cross_lang_edges(&self, records: &[CrossLangEdgeRecord]) -> Result<usize> {
+        self.conn.execute_batch("BEGIN TRANSACTION")?;
+        let mut count = 0;
+        for record in records {
+            self.insert_cross_lang_edge(record)?;
+            count += 1;
+        }
+        self.conn.execute_batch("COMMIT")?;
+        Ok(count)
+    }
+
+    /// Get cross-language edges, optionally filtered by call_id or route_id.
+    pub fn get_cross_lang_edges(
+        &self,
+        call_id: Option<i64>,
+        route_id: Option<i64>,
+    ) -> Result<Vec<CrossLangEdgeRecord>> {
+        let mut sql = String::from(
+            "SELECT id, from_call_id, to_route_id, url, http_method, match_type, confidence \
+             FROM cross_lang_edges WHERE 1=1",
+        );
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(cid) = call_id {
+            sql.push_str(" AND from_call_id = ?1");
+            params.push(Box::new(cid));
+        }
+        if let Some(rid) = route_id {
+            let idx = params.len() + 1;
+            sql.push_str(&format!(" AND to_route_id = ?{}", idx));
+            params.push(Box::new(rid));
+        }
+        sql.push_str(" ORDER BY confidence DESC");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            |row| {
+                Ok(CrossLangEdgeRecord {
+                    id: Some(row.get(0)?),
+                    from_call_id: row.get(1)?,
+                    to_route_id: row.get(2)?,
+                    url: row.get(3)?,
+                    http_method: row.get(4)?,
+                    match_type: row.get(5)?,
+                    confidence: row.get(6)?,
+                })
+            },
+        )?;
+        rows.collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-tier: nodes.http_role
+    // -----------------------------------------------------------------------
+
+    /// Update the `http_role` column on a node.
+    ///
+    /// `role` should be `"http-call"`, `"http-route"`, or `NULL`.
+    pub fn update_node_http_role(&self, node_rowid: i64, role: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE nodes SET http_role = ?1 WHERE rowid = ?2",
+            rusqlite::params![role, node_rowid],
+        )?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Lifecycle
     // -----------------------------------------------------------------------
 
@@ -1049,7 +1274,7 @@ mod tests {
             let conn = db.connection();
 
             let version = MigrationRunner::current_version(conn).unwrap();
-            assert_eq!(version, 8);
+            assert_eq!(version, 9);
 
             let count: i64 = conn
                 .query_row(
@@ -1058,7 +1283,7 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(count, 8);
+            assert_eq!(count, 9);
         }
 
         cleanup(&path);

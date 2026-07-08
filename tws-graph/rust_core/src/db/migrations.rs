@@ -434,6 +434,93 @@ impl Migration for V008FunctionBody {
 }
 
 // ---------------------------------------------------------------------------
+// v009 — cross-tier tracing tables
+// ---------------------------------------------------------------------------
+
+struct V009CrossTier;
+
+impl Migration for V009CrossTier {
+    fn version(&self) -> i64 {
+        9
+    }
+    fn description(&self) -> &'static str {
+        "Create http_calls, http_routes, cross_lang_edges tables and add nodes.http_role"
+    }
+    fn up(&self, conn: &Connection) -> Result<()> {
+        exec_batch(
+            conn,
+            "\
+            -- HTTP calls from frontend code (TypeScript / JavaScript)
+            CREATE TABLE IF NOT EXISTS http_calls (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                url             TEXT    NOT NULL,
+                http_method     TEXT    NOT NULL,
+                func_node_id    INTEGER NOT NULL,
+                url_is_template INTEGER DEFAULT 0,
+                file_path       TEXT    NOT NULL,
+                line            INTEGER NOT NULL,
+                column          INTEGER NOT NULL,
+                source_lang     TEXT    NOT NULL,
+                raw_snippet     TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_http_calls_url ON http_calls(url);
+            CREATE INDEX IF NOT EXISTS idx_http_calls_method ON http_calls(http_method);
+
+            -- HTTP route definitions from backend code (Python / Java / Go / etc.)
+            CREATE TABLE IF NOT EXISTS http_routes (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                url_pattern      TEXT    NOT NULL,
+                url_pattern_raw  TEXT    NOT NULL,
+                http_method      TEXT    NOT NULL,
+                handler_node_id  INTEGER NOT NULL,
+                file_path        TEXT    NOT NULL,
+                line             INTEGER NOT NULL,
+                column           INTEGER NOT NULL,
+                source_lang      TEXT    NOT NULL,
+                source_framework TEXT,
+                raw_snippet      TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_http_routes_pattern ON http_routes(url_pattern);
+            CREATE INDEX IF NOT EXISTS idx_http_routes_method ON http_routes(http_method);
+
+            -- Cross-language edges: matched HTTP call ↔ HTTP route pairs
+            CREATE TABLE IF NOT EXISTS cross_lang_edges (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_call_id    INTEGER NOT NULL,
+                to_route_id     INTEGER NOT NULL,
+                url             TEXT    NOT NULL,
+                http_method     TEXT    NOT NULL,
+                match_type      TEXT    NOT NULL,
+                confidence      REAL    NOT NULL,
+                FOREIGN KEY (from_call_id) REFERENCES http_calls(id),
+                FOREIGN KEY (to_route_id) REFERENCES http_routes(id)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_cross_lang_unique ON cross_lang_edges(from_call_id, to_route_id);
+
+            -- Extend nodes table with optional HTTP role
+            ",
+        )?;
+
+        add_column_if_not_exists(conn, "nodes", "http_role", "TEXT")
+    }
+
+    fn down(&self, conn: &Connection) -> Result<()> {
+        // Drop cross-tier tables in reverse dependency order.
+        // nodes.http_role is an optional column — no-op to keep compatibility.
+        conn.execute_batch(
+            "\
+            DROP TABLE IF EXISTS cross_lang_edges;
+            DROP TABLE IF EXISTS http_routes;
+            DROP TABLE IF EXISTS http_calls;
+            ",
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MigrationRunner
 // ---------------------------------------------------------------------------
 
@@ -443,7 +530,7 @@ pub struct MigrationRunner {
 }
 
 impl MigrationRunner {
-    /// Create a new runner with all 8 registered migrations (v001–v008).
+    /// Create a new runner with all 9 registered migrations (v001–v009).
     pub fn new() -> Self {
         let migrations: Vec<Box<dyn Migration>> = vec![
             Box::new(V001Initial),
@@ -454,6 +541,7 @@ impl MigrationRunner {
             Box::new(V006SchemaEnhance),
             Box::new(V007SourceColumn),
             Box::new(V008FunctionBody),
+            Box::new(V009CrossTier),
         ];
         Self { migrations }
     }
@@ -564,7 +652,7 @@ mod tests {
         runner.apply(&conn).unwrap();
 
         let version = MigrationRunner::current_version(&conn).unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
 
         // Verify nodes table has all columns (including those added by
         // v003 properties, v008 body, and the initial schema's body_hash).
@@ -655,7 +743,15 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_versions", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(count, 8);
+        assert_eq!(count, 9);
+
+        // Verify cross-tier tables exist (v009)
+        assert!(tables.contains(&"http_calls".to_string()));
+        assert!(tables.contains(&"http_routes".to_string()));
+        assert!(tables.contains(&"cross_lang_edges".to_string()));
+
+        // Verify nodes has http_role column (v009)
+        assert!(columns.contains(&"http_role".to_string()));
     }
 
     #[test]
@@ -668,7 +764,7 @@ mod tests {
         runner.apply(&conn).unwrap();
 
         let version = MigrationRunner::current_version(&conn).unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
 
         // Only one row per version
         let counts: Vec<(i64, i64)> = {

@@ -52,6 +52,9 @@ pub struct NodeRecord {
     pub body: Option<String>,
     /// SHA256 of function body (for incremental re-index).
     pub body_hash: Option<String>,
+    /// Optional HTTP role: 'http-call' | 'http-route' | NULL.
+    /// Set by CrossTierScanner during cross-tier indexing.
+    pub http_role: Option<String>,
     /// Update timestamp (epoch milliseconds).
     pub updated_at: i64,
 }
@@ -175,6 +178,95 @@ pub struct SearchResult {
 }
 
 // ---------------------------------------------------------------------------
+// HttpCallRecord — a detected HTTP call from frontend code
+// ---------------------------------------------------------------------------
+
+/// A detected HTTP call from frontend code (TypeScript/JavaScript).
+///
+/// Maps to the `http_calls` table (created by v009 migration).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpCallRecord {
+    /// Auto-increment primary key (`None` during construction).
+    pub id: Option<i64>,
+    /// Extracted URL or URL template.
+    pub url: String,
+    /// HTTP method: GET/POST/PUT/DELETE/PATCH.
+    pub http_method: String,
+    /// Rowid of the function node in `nodes` that makes this call.
+    pub func_node_id: i64,
+    /// 0 = literal URL, 1 = extracted from template string.
+    pub url_is_template: bool,
+    /// Project-relative file path.
+    pub file_path: String,
+    /// Start line number (1-based).
+    pub line: i64,
+    /// Start column number (1-based).
+    pub column: i64,
+    /// Source language: typescript / javascript.
+    pub source_lang: String,
+    /// Raw source snippet for debugging.
+    pub raw_snippet: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// HttpRouteRecord — a detected HTTP route from backend code
+// ---------------------------------------------------------------------------
+
+/// A detected HTTP route definition from backend code (Python/Java/Go/etc.).
+///
+/// Maps to the `http_routes` table (created by v009 migration).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpRouteRecord {
+    /// Auto-increment primary key (`None` during construction).
+    pub id: Option<i64>,
+    /// Normalized URL pattern, e.g. `/api/users/{user_id}`.
+    pub url_pattern: String,
+    /// Original URL pattern, e.g. `/api/users/<int:user_id>`.
+    pub url_pattern_raw: String,
+    /// HTTP method: GET/POST/PUT/DELETE/PATCH.
+    pub http_method: String,
+    /// Rowid of the handler function node in `nodes`.
+    pub handler_node_id: i64,
+    /// Project-relative file path.
+    pub file_path: String,
+    /// Start line number (1-based).
+    pub line: i64,
+    /// Start column number (1-based).
+    pub column: i64,
+    /// Source language: python / java / go / etc.
+    pub source_lang: String,
+    /// Detected framework: fastapi / flask / spring / express.
+    pub source_framework: Option<String>,
+    /// Raw source snippet for debugging.
+    pub raw_snippet: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// CrossLangEdgeRecord — a matched HTTP call ↔ HTTP route pair
+// ---------------------------------------------------------------------------
+
+/// A cross-language edge linking a frontend HTTP call to a backend HTTP route.
+///
+/// Maps to the `cross_lang_edges` table (created by v009 migration).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrossLangEdgeRecord {
+    /// Auto-increment primary key (`None` during construction).
+    pub id: Option<i64>,
+    /// FK → http_calls.id.
+    pub from_call_id: i64,
+    /// FK → http_routes.id.
+    pub to_route_id: i64,
+    /// The matched URL.
+    pub url: String,
+    /// HTTP method: GET/POST/PUT/DELETE/PATCH.
+    pub http_method: String,
+    /// Match type: "exact" | "template" | "fuzzy".
+    pub match_type: String,
+    /// Confidence score 0.0 ~ 1.0.
+    pub confidence: f64,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -203,6 +295,7 @@ mod tests {
             properties: Some("{}".to_string()),
             body: Some("    return sum(items)".to_string()),
             body_hash: Some("deadbeef".to_string()),
+            http_role: None,
             updated_at: 1719000000000,
         };
 

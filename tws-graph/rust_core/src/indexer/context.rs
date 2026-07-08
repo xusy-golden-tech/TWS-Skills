@@ -174,6 +174,7 @@ impl ExtractionContext {
             properties: properties_json,
             body: None,
             body_hash: None,
+            http_role: None,
             updated_at: now_ms(),
         };
 
