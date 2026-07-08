@@ -4,7 +4,9 @@ Provides drop-in replacements for performance-critical operations.
 Set TWS_USE_RUST=0 to disable and fall back to Python implementations.
 """
 
+import json
 import os
+from typing import Optional
 
 
 def _rust_available() -> bool:
