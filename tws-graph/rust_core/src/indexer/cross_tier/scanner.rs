@@ -381,7 +381,7 @@ impl CrossTierScanner {
             };
 
             // Find enclosing function rowid
-            let func_node_id = self.find_and_resolve_func_rowid(file_path, m.captures);
+            let func_node_id = self.find_and_resolve_func_rowid(file_path, m.captures, source_bytes);
 
             let start_pos = m.captures[0].node.start_position();
             let is_template = matches!(pattern.post_process, PatternProcessor::TemplateString);
@@ -474,7 +474,7 @@ impl CrossTierScanner {
                 .unwrap_or_else(|| "GET".to_string())
                 .to_uppercase();
 
-            let func_node_id = self.find_and_resolve_func_rowid(file_path, m.captures);
+            let func_node_id = self.find_and_resolve_func_rowid(file_path, m.captures, source_bytes);
             let start_pos = m.captures[0].node.start_position();
 
             calls.push(HttpCallRecord {
@@ -577,6 +577,7 @@ impl CrossTierScanner {
             let func_node_id = self.find_enclosing_func_from_decorator(
                 file_path,
                 m.captures,
+                source_bytes,
             );
 
             let start_pos = m.captures[0].node.start_position();
@@ -675,7 +676,7 @@ impl CrossTierScanner {
                     // Walk up from the string/path node to find the decorator,
                     // then to the decorated_definition containing the function
                     let decorator = find_ancestor(node, "decorator");
-                    self.resolve_func_from_decorator(file_path, decorator)
+                    self.resolve_func_from_decorator(file_path, decorator, source_bytes)
                 }
                 None => 0,
             };
@@ -821,11 +822,12 @@ impl CrossTierScanner {
         &self,
         file_path: &str,
         captures: &[tree_sitter::QueryCapture],
+        source: &[u8],
     ) -> i64 {
         if captures.is_empty() {
             return 0;
         }
-        self.resolve_func_rowid_from_node(file_path, captures[0].node)
+        self.resolve_func_rowid_from_node(file_path, captures[0].node, source)
     }
 
     /// Find the enclosing function for a FastAPI-decorated handler.
@@ -836,6 +838,7 @@ impl CrossTierScanner {
         &self,
         file_path: &str,
         captures: &[tree_sitter::QueryCapture],
+        source: &[u8],
     ) -> i64 {
         if captures.is_empty() {
             return 0;
@@ -848,7 +851,7 @@ impl CrossTierScanner {
             for i in 0..dec_node.named_child_count() {
                 if let Some(child) = dec_node.named_child(i) {
                     if child.kind() == "function_definition" {
-                        return self.resolve_func_rowid_from_node(file_path, child);
+                        return self.resolve_func_rowid_from_node(file_path, child, source);
                     }
                 }
             }
@@ -862,6 +865,7 @@ impl CrossTierScanner {
         &self,
         file_path: &str,
         decorator: Option<Node<'_>>,
+        source: &[u8],
     ) -> i64 {
         if let Some(dec_node) = decorator {
             if let Some(parent) = dec_node.parent() {
@@ -869,7 +873,7 @@ impl CrossTierScanner {
                     for i in 0..parent.named_child_count() {
                         if let Some(child) = parent.named_child(i) {
                             if child.kind() == "function_definition" {
-                                return self.resolve_func_rowid_from_node(file_path, child);
+                                return self.resolve_func_rowid_from_node(file_path, child, source);
                             }
                         }
                     }
@@ -881,8 +885,8 @@ impl CrossTierScanner {
 
     /// Given a tree-sitter node (the function definition), extract the function
     /// name, build the qualified_name, hash it, and look up the database rowid.
-    fn resolve_func_rowid_from_node(&self, file_path: &str, func_node: Node) -> i64 {
-        let func_name = extract_function_name(func_node);
+    fn resolve_func_rowid_from_node(&self, file_path: &str, func_node: Node, source: &[u8]) -> i64 {
+        let func_name = extract_function_name(func_node, source);
 
         if func_name.is_empty() {
             return 0;
@@ -973,19 +977,23 @@ fn find_ancestor<'a>(start: Node<'a>, kind: &str) -> Option<Node<'a>> {
 
 /// Extract the function name from a tree-sitter function definition node.
 ///
+/// `source` must be the original source bytes that `func_node` was parsed from.
+///
 /// Handles:
 /// - Python `function_definition` (name is second child)
 /// - TypeScript `function_declaration` (name field)
 /// - TypeScript `method_definition` (name field)
 /// - TypeScript `arrow_function` (variable_declarator name)
-fn extract_function_name(func_node: Node) -> String {
+fn extract_function_name(func_node: Node, source: &[u8]) -> String {
     let kind = func_node.kind();
 
-    // Try the "name" field first (works for TS function_declaration, method_definition)
+    // Try the "name" field first (works for TS function_declaration, method_definition,
+    // and also Python function_definition since tree-sitter-python v0.21+)
     if let Some(name_node) = func_node.child_by_field_name("name") {
-        return snippet(b"", name_node); // Using empty source since we just need node's own text
-        // Actually, child_by_field_name gives us the child node, but utf8_text on
-        // the child needs the parent's source. Let's use the node's own bytes.
+        return name_node
+            .utf8_text(source)
+            .map(|c| c.to_string())
+            .unwrap_or_default();
     }
 
     match kind {
@@ -995,9 +1003,8 @@ fn extract_function_name(func_node: Node) -> String {
             for i in 0..func_node.named_child_count() {
                 if let Some(child) = func_node.named_child(i) {
                     if child.kind() == "identifier" {
-                        // This is the function name; get its text
                         return child
-                            .utf8_text(func_node.utf8_text(b"").unwrap_or("").as_bytes())
+                            .utf8_text(source)
                             .map(|c| c.to_string())
                             .unwrap_or_default();
                     }
@@ -1010,10 +1017,8 @@ fn extract_function_name(func_node: Node) -> String {
             for i in 0..func_node.named_child_count() {
                 if let Some(child) = func_node.named_child(i) {
                     if child.kind() == "identifier" {
-                        // Check if it's really the name (not a parameter)
-                        // For function_declaration, the first identifier is the name
                         return child
-                            .utf8_text(b"")
+                            .utf8_text(source)
                             .map(|c| c.to_string())
                             .unwrap_or_default();
                     }
@@ -1022,11 +1027,9 @@ fn extract_function_name(func_node: Node) -> String {
             String::new()
         }
         "arrow_function" | "variable_declarator" => {
-            // For arrow functions assigned to variables, the name is the
-            // variable_declarator's "name" field
             if let Some(name_node) = func_node.child_by_field_name("name") {
                 return name_node
-                    .utf8_text(b"")
+                    .utf8_text(source)
                     .map(|c| c.to_string())
                     .unwrap_or_default();
             }
@@ -1270,7 +1273,8 @@ mod tests {
 
         let decorated = root.child(0).unwrap(); // decorated_definition
         let decorator = decorated.child(0).unwrap(); // decorator
-        let call = decorator.child(0).unwrap(); // call
+        // decorator.node(0) is '@' (anonymous), named_child(0) is the 'call' node
+        let call = decorator.named_child(0).unwrap(); // call
 
         let methods = extract_flask_methods(source.as_bytes(), Some(call));
         assert_eq!(methods, vec!["GET", "POST"]);
@@ -1344,7 +1348,7 @@ mod tests {
 
         let func_def = root.child(0).unwrap();
         assert_eq!(func_def.kind(), "function_definition");
-        let name = extract_function_name(func_def);
+        let name = extract_function_name(func_def, source.as_bytes());
         assert_eq!(name, "get_users");
     }
 
@@ -1360,7 +1364,7 @@ mod tests {
 
         let func_decl = root.child(0).unwrap();
         assert_eq!(func_decl.kind(), "function_declaration");
-        let name = extract_function_name(func_decl);
+        let name = extract_function_name(func_decl, source.as_bytes());
         assert_eq!(name, "fetchUsers");
     }
 }
