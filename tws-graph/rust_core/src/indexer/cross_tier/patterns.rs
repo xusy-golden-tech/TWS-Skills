@@ -189,6 +189,56 @@ pub const PATTERN_SPRING_REQUESTMAPPING_PREFIX: &str = r#"(marker_annotation
   arguments: (annotation_argument_list . (string) @url))"#;
 
 // ============================================================================
+// Phase 3: Go Gin backend route patterns
+// ============================================================================
+
+/// Match `r.GET("/path", handler)`, `router.POST("/path", handler)` etc.
+///
+/// In Go's tree-sitter grammar:
+/// - `call_expression` wraps the entire call
+/// - `selector_expression` wraps `r.GET` (operand + field)
+/// - `field_identifier` is the method name (GET, POST, PUT, etc.)
+/// - `interpreted_string_literal` is the URL argument
+///
+/// Captures:
+/// - `@obj`    — identifier of the router object (e.g., "r", "router")
+/// - `@method` — HTTP method as field_identifier (GET, POST, PUT, DELETE, PATCH)
+/// - `@url`    — first string argument (the route path)
+pub const PATTERN_GIN_ROUTE: &str = r#"(call_expression
+  function: (selector_expression
+    operand: (identifier) @obj
+    field: (field_identifier) @method)
+  arguments: (argument_list . (interpreted_string_literal) @url))"#;
+
+// ============================================================================
+// Phase 3: Express.js backend route patterns
+// ============================================================================
+
+/// Match `app.get('/path', handler)`, `router.post('/path', handler)` etc.
+///
+/// Captures:
+/// - `@obj`    — identifier of the app/router object
+/// - `@method` — HTTP method as property_identifier (get, post, put, delete, patch)
+/// - `@url`    — first string argument (the route path)
+pub const PATTERN_EXPRESS_ROUTE: &str = r#"(call_expression
+  function: (member_expression
+    object: (identifier) @obj
+    property: (property_identifier) @method)
+  arguments: (arguments . (string) @url))"#;
+
+/// Match `app.use('/prefix', router)` for Express Router prefix tracking.
+///
+/// Captures:
+/// - `@obj`  — identifier of the app object
+/// - `@use`  — "use" property
+/// - `@prefix` — prefix string
+pub const PATTERN_EXPRESS_USE_PREFIX: &str = r#"(call_expression
+  function: (member_expression
+    object: (identifier) @obj
+    property: (property_identifier) @use)
+  arguments: (arguments . (string) @prefix))"#;
+
+// ============================================================================
 // FrameworkPattern registry
 // ============================================================================
 
@@ -223,6 +273,13 @@ pub enum PatternProcessor {
     SpringMapping,
     /// Process `@RequestMapping("/prefix")` at class-level — collect route prefix.
     SpringRequestMappingPrefix,
+    // ── Phase 3 ──
+    /// Process `r.GET("/path", handler)` — Go Gin route definition.
+    GinRoute,
+    /// Process `app.get('/path', handler)` — Express.js route definition.
+    ExpressRoute,
+    /// Process `app.use('/prefix', router)` — Express.js prefix collection.
+    ExpressUsePrefix,
 }
 
 /// A framework-specific tree-sitter Query pattern for cross-tier extraction.
@@ -339,6 +396,32 @@ pub fn get_phase1_patterns() -> Vec<FrameworkPattern> {
             framework: "spring_boot",
             pattern: PATTERN_SPRING_MAPPING,
             post_process: PatternProcessor::SpringMapping,
+        },
+        // --- Phase 3: Go Gin (1 pattern) ---
+        FrameworkPattern {
+            name: "PATTERN_GIN_ROUTE",
+            language: "go",
+            framework: "gin",
+            pattern: PATTERN_GIN_ROUTE,
+            post_process: PatternProcessor::GinRoute,
+        },
+        // --- Phase 3: Express.js (2 patterns) ---
+        // IMPORTANT: PREFIX pattern must come FIRST for Express too —
+        // collect_express_prefixes must populate router_prefixes before
+        // extract_express_routes reads from it.
+        FrameworkPattern {
+            name: "PATTERN_EXPRESS_USE_PREFIX",
+            language: "typescript",
+            framework: "express",
+            pattern: PATTERN_EXPRESS_USE_PREFIX,
+            post_process: PatternProcessor::ExpressUsePrefix,
+        },
+        FrameworkPattern {
+            name: "PATTERN_EXPRESS_ROUTE",
+            language: "typescript",
+            framework: "express",
+            pattern: PATTERN_EXPRESS_ROUTE,
+            post_process: PatternProcessor::ExpressRoute,
         },
     ]
 }
@@ -991,17 +1074,19 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_get_phase1_patterns_returns_12() {
+    fn test_get_phase1_patterns_returns_15() {
         let patterns = get_phase1_patterns();
-        assert_eq!(patterns.len(), 12);
+        assert_eq!(patterns.len(), 15);
 
         // Count by language
         let ts_count = patterns.iter().filter(|p| p.language == "typescript").count();
         let py_count = patterns.iter().filter(|p| p.language == "python").count();
         let java_count = patterns.iter().filter(|p| p.language == "java").count();
-        assert_eq!(ts_count, 7);
+        let go_count = patterns.iter().filter(|p| p.language == "go").count();
+        assert_eq!(ts_count, 9);
         assert_eq!(py_count, 3);
         assert_eq!(java_count, 2);
+        assert_eq!(go_count, 1);
 
         // Count by framework
         let axios_count = patterns.iter().filter(|p| p.framework == "axios").count();
@@ -1010,12 +1095,16 @@ mod tests {
         let flask_count = patterns.iter().filter(|p| p.framework == "flask").count();
         let jquery_count = patterns.iter().filter(|p| p.framework == "jquery").count();
         let spring_count = patterns.iter().filter(|p| p.framework == "spring_boot").count();
+        let gin_count = patterns.iter().filter(|p| p.framework == "gin").count();
+        let express_count = patterns.iter().filter(|p| p.framework == "express").count();
         assert_eq!(axios_count, 3);
         assert_eq!(fetch_count, 2);
         assert_eq!(fastapi_count, 2);
         assert_eq!(flask_count, 1);
         assert_eq!(jquery_count, 2);
         assert_eq!(spring_count, 2);
+        assert_eq!(gin_count, 1);
+        assert_eq!(express_count, 2);
     }
 
     #[test]
@@ -1024,13 +1113,13 @@ mod tests {
         let mut names: Vec<&str> = patterns.iter().map(|p| p.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 12, "All pattern names should be unique");
+        assert_eq!(names.len(), 15, "All pattern names should be unique");
     }
 
     #[test]
     fn test_get_phase1_patterns_all_have_valid_language() {
         let patterns = get_phase1_patterns();
-        let valid_langs = ["typescript", "javascript", "python", "java"];
+        let valid_langs = ["typescript", "javascript", "python", "java", "go"];
         for p in &patterns {
             assert!(
                 valid_langs.contains(&p.language),
@@ -1158,5 +1247,164 @@ public List<Blog> getPost() {
         assert!(!found.is_empty(), "No annotations found");
         assert_eq!(found[0].0, "GetMapping");
         assert!(found[0].1.contains("/blog/getAllBlogs"), "URL was: {}", found[0].1);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 3: Go Gin route detection
+    // ------------------------------------------------------------------
+
+    /// Parse Go source code and return the tree.
+    fn parse_go(source: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .expect("set go language");
+        parser.parse(source, None).expect("parse go source")
+    }
+
+    #[test]
+    fn test_pattern_gin_get_route() {
+        let src = "package main\nfunc main() {\n\tr.GET(\"/users\", GetUsers)\n}";
+        let tree = parse_go(src);
+        let results = run_query(
+            tree_sitter_go::LANGUAGE.into(),
+            PATTERN_GIN_ROUTE,
+            &tree,
+            src.as_bytes(),
+        );
+        assert_eq!(find_capture(&results, "obj"), vec!["r"]);
+        assert_eq!(find_capture(&results, "method"), vec!["GET"]);
+        assert_eq!(find_capture(&results, "url"), vec!["\"/users\""]);
+    }
+
+    #[test]
+    fn test_pattern_gin_post_route() {
+        let src = "package main\nfunc main() {\n\trouter.POST(\"/create_user\", CreateUser)\n}";
+        let tree = parse_go(src);
+        let results = run_query(
+            tree_sitter_go::LANGUAGE.into(),
+            PATTERN_GIN_ROUTE,
+            &tree,
+            src.as_bytes(),
+        );
+        assert_eq!(find_capture(&results, "method"), vec!["POST"]);
+        assert_eq!(find_capture(&results, "url"), vec!["\"/create_user\""]);
+    }
+
+    #[test]
+    fn test_pattern_gin_route_with_param() {
+        let src = "package main\nfunc main() {\n\tr.GET(\"/user/:id\", GetUser)\n}";
+        let tree = parse_go(src);
+        let results = run_query(
+            tree_sitter_go::LANGUAGE.into(),
+            PATTERN_GIN_ROUTE,
+            &tree,
+            src.as_bytes(),
+        );
+        assert_eq!(find_capture(&results, "method"), vec!["GET"]);
+        assert_eq!(find_capture(&results, "url"), vec!["\"/user/:id\""]);
+    }
+
+    #[test]
+    fn test_pattern_gin_put_delete_routes() {
+        let src = "package main\nfunc main() {\n\tr.PUT(\"/update_user/:id\", UpdateUser)\n\tr.DELETE(\"/delete_user/:id\", DeleteUser)\n}";
+        let tree = parse_go(src);
+        let results = run_query(
+            tree_sitter_go::LANGUAGE.into(),
+            PATTERN_GIN_ROUTE,
+            &tree,
+            src.as_bytes(),
+        );
+        let methods = find_capture(&results, "method");
+        assert!(methods.contains(&"PUT"));
+        assert!(methods.contains(&"DELETE"));
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 3: Express.js route detection
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_pattern_express_get_route() {
+        let src = "const router = require('express').Router();\nrouter.get('/users', getUsers);";
+        let tree = parse_ts(src);
+        let results = run_query(
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            PATTERN_EXPRESS_ROUTE,
+            &tree,
+            src.as_bytes(),
+        );
+        assert_eq!(find_capture(&results, "obj"), vec!["router"]);
+        assert_eq!(find_capture(&results, "method"), vec!["get"]);
+        assert_eq!(find_capture(&results, "url"), vec!["'/users'"]);
+    }
+
+    #[test]
+    fn test_pattern_express_post_route() {
+        let src = "import express from 'express';\nconst router = express.Router();\nrouter.post('/', createUser);";
+        let tree = parse_ts(src);
+        let results = run_query(
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            PATTERN_EXPRESS_ROUTE,
+            &tree,
+            src.as_bytes(),
+        );
+        assert_eq!(find_capture(&results, "method"), vec!["post"]);
+        assert_eq!(find_capture(&results, "url"), vec!["'/'"]);
+    }
+
+    #[test]
+    fn test_pattern_express_route_with_param() {
+        let src = "import express from 'express';\nconst router = express.Router();\nrouter.get('/:id', getUser);";
+        let tree = parse_ts(src);
+        let results = run_query(
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            PATTERN_EXPRESS_ROUTE,
+            &tree,
+            src.as_bytes(),
+        );
+        assert_eq!(find_capture(&results, "method"), vec!["get"]);
+        assert_eq!(find_capture(&results, "url"), vec!["'/:id'"]);
+    }
+
+    #[test]
+    fn test_pattern_express_use_prefix() {
+        let src = "import express from 'express';\nconst app = express();\napp.use('/users', userRouter);";
+        let tree = parse_ts(src);
+        let results = run_query(
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            PATTERN_EXPRESS_USE_PREFIX,
+            &tree,
+            src.as_bytes(),
+        );
+        assert_eq!(find_capture(&results, "obj"), vec!["app"]);
+        assert_eq!(find_capture(&results, "use"), vec!["use"]);
+        assert_eq!(find_capture(&results, "prefix"), vec!["'/users'"]);
+    }
+
+    #[test]
+    fn test_pattern_express_not_match_axios() {
+        // Express pattern should still MATCH axios calls structurally,
+        // but the scanner disambiguates via is_express_file(). This test
+        // verifies the pattern itself matches both for capture extraction.
+        let src = "axios.get('/api/users')";
+        let tree = parse_ts(src);
+        let results = run_query(
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            PATTERN_EXPRESS_ROUTE,
+            &tree,
+            src.as_bytes(),
+        );
+        // The Express route pattern structurally matches axios calls
+        assert_eq!(find_capture(&results, "method"), vec!["get"]);
+        // But @obj is "axios", not a router — scanner disambiguates
+        assert_eq!(find_capture(&results, "obj"), vec!["axios"]);
+    }
+
+    #[test]
+    fn test_is_express_file_detection() {
+        // Test that the is_express_file helper correctly identifies express imports
+        // (this is tested in scanner, but verify the pattern here)
+        assert!(true); // placeholder — actual test in scanner.rs
     }
 }

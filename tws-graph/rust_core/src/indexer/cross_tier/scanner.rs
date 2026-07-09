@@ -245,6 +245,22 @@ impl CrossTierScanner {
                         self.collect_spring_prefixes(&source, &tree, file_path);
                         Ok(ExtractResult::None)
                     }
+                    // Phase 3: Go Gin patterns
+                    PatternProcessor::GinRoute => {
+                        self.extract_gin_routes(
+                            &source, &tree, pattern, file_path, &ts_lang,
+                        )
+                    }
+                    // Phase 3: Express.js patterns
+                    PatternProcessor::ExpressRoute => {
+                        self.extract_express_routes(
+                            &source, &tree, pattern, file_path, query_lang, &ts_lang,
+                        )
+                    }
+                    PatternProcessor::ExpressUsePrefix => {
+                        self.collect_express_prefixes(&source, &tree, file_path);
+                        Ok(ExtractResult::None)
+                    }
                 };
 
                 match result {
@@ -1112,6 +1128,289 @@ impl CrossTierScanner {
     }
 
     // -----------------------------------------------------------------------
+    // Phase 3: Go Gin route extraction
+    // -----------------------------------------------------------------------
+
+    /// Extract HTTP routes from Go Gin `r.GET("/path", handler)` patterns.
+    ///
+    /// Uses tree-sitter Query to find `selector_expression` calls
+    /// (e.g. `r.GET`, `router.POST`) and extracts the HTTP method and URL.
+    fn extract_gin_routes(
+        &self,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        pattern: &FrameworkPattern,
+        file_path: &str,
+        ts_lang: &tree_sitter::Language,
+    ) -> Result<ExtractResult, String> {
+        let query = Query::new(ts_lang, pattern.pattern)
+            .map_err(|e| format!("query compile failed for {}: {}", pattern.name, e))?;
+        let mut cursor = QueryCursor::new();
+        let source_bytes = source.as_bytes();
+
+        let mut matches = cursor.matches(&query, tree.root_node(), source_bytes);
+        let mut routes: Vec<HttpRouteRecord> = Vec::new();
+
+        // Gin HTTP methods
+        let method_map: std::collections::HashMap<&str, &str> = [
+            ("GET", "GET"),
+            ("POST", "POST"),
+            ("PUT", "PUT"),
+            ("DELETE", "DELETE"),
+            ("PATCH", "PATCH"),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        while let Some(m) = matches.next() {
+            let mut obj_text: Option<String> = None;
+            let mut method_text: Option<String> = None;
+            let mut url_text: Option<String> = None;
+
+            for capture in m.captures {
+                let capture_name = &query.capture_names()[capture.index as usize];
+                let text = node_text(source_bytes, capture.node);
+
+                match *capture_name {
+                    "obj" => obj_text = Some(text.clone()),
+                    "method" => method_text = Some(text.clone()),
+                    "url" => url_text = Some(strip_quotes(&text)),
+                    _ => {}
+                }
+            }
+
+            let method = match method_text.as_deref() {
+                Some(m) => {
+                    if !method_map.contains_key(m) {
+                        continue;
+                    }
+                    m.to_string()
+                }
+                None => continue,
+            };
+
+            let raw_path = match url_text {
+                Some(ref u) => u.clone(),
+                None => continue,
+            };
+
+            let normalized_url = normalizer::normalize_url(&raw_path, "gin");
+
+            let func_node_id = self.find_and_resolve_func_rowid(
+                file_path, m.captures, source_bytes,
+            );
+
+            let start_pos = m.captures[0].node.start_position();
+
+            routes.push(HttpRouteRecord {
+                id: None,
+                url_pattern: normalized_url,
+                url_pattern_raw: raw_path,
+                http_method: method,
+                handler_node_id: func_node_id,
+                file_path: file_path.to_string(),
+                line: (start_pos.row + 1) as i64,
+                column: (start_pos.column + 1) as i64,
+                source_lang: "go".to_string(),
+                source_framework: Some("gin".to_string()),
+                raw_snippet: Some(snippet(source_bytes, m.captures[0].node)),
+            });
+        }
+
+        if routes.is_empty() {
+            Ok(ExtractResult::None)
+        } else {
+            Ok(ExtractResult::Routes(routes))
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Express.js route extraction
+    // -----------------------------------------------------------------------
+
+    /// Extract HTTP routes from Express.js `app.get('/path', handler)` patterns.
+    ///
+    /// Uses the same tree-sitter `member_expression` pattern as axios/fetch but
+    /// disambiguates by checking that the file imports 'express'.
+    fn extract_express_routes(
+        &self,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        pattern: &FrameworkPattern,
+        file_path: &str,
+        lang: &str,
+        ts_lang: &tree_sitter::Language,
+    ) -> Result<ExtractResult, String> {
+        // Disambiguation: only process files that import express
+        if !is_express_file(source) {
+            return Ok(ExtractResult::None);
+        }
+
+        let query = Query::new(ts_lang, pattern.pattern)
+            .map_err(|e| format!("query compile failed for {}: {}", pattern.name, e))?;
+        let mut cursor = QueryCursor::new();
+        let source_bytes = source.as_bytes();
+
+        let mut matches = cursor.matches(&query, tree.root_node(), source_bytes);
+        let mut routes: Vec<HttpRouteRecord> = Vec::new();
+
+        // Express HTTP methods (lowercase in JS)
+        let method_map: std::collections::HashMap<&str, &str> = [
+            ("get", "GET"),
+            ("post", "POST"),
+            ("put", "PUT"),
+            ("delete", "DELETE"),
+            ("patch", "PATCH"),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        while let Some(m) = matches.next() {
+            let mut obj_text: Option<String> = None;
+            let mut method_text: Option<String> = None;
+            let mut url_text: Option<String> = None;
+
+            for capture in m.captures {
+                let capture_name = &query.capture_names()[capture.index as usize];
+                let text = node_text(source_bytes, capture.node);
+
+                match *capture_name {
+                    "obj" => obj_text = Some(text.clone()),
+                    "method" => method_text = Some(text.clone()),
+                    "url" => url_text = Some(strip_quotes(&text)),
+                    _ => {}
+                }
+            }
+
+            // Skip known frontend HTTP call patterns: axios, $, fetch
+            if let Some(ref obj) = obj_text {
+                if obj == "axios" || obj == "$" {
+                    continue;
+                }
+            }
+
+            let method = match method_text.as_deref() {
+                Some(m) => {
+                    if let Some(http_m) = method_map.get(m) {
+                        http_m.to_string()
+                    } else {
+                        continue;
+                    }
+                }
+                None => continue,
+            };
+
+            let raw_path = match url_text {
+                Some(ref u) => u.clone(),
+                None => continue,
+            };
+
+            let normalized_url = normalizer::normalize_url(&raw_path, "express");
+
+            // Apply Express Router prefix only for cross-file routes.
+            // The prefix is stored keyed by the file where app.use() is called.
+            // Routes in a different file don't match the prefix key, so they won't
+            // get the prefix. Routes in the same file as app.use() should also NOT
+            // get the prefix because they're defined on the main app, not the router.
+            // Cross-file prefix resolution (matching the router variable to its file)
+            // is a future enhancement.
+            let final_url = normalized_url;
+
+            let func_node_id = self.find_and_resolve_func_rowid(
+                file_path, m.captures, source_bytes,
+            );
+
+            let start_pos = m.captures[0].node.start_position();
+
+            routes.push(HttpRouteRecord {
+                id: None,
+                url_pattern: final_url,
+                url_pattern_raw: raw_path,
+                http_method: method,
+                handler_node_id: func_node_id,
+                file_path: file_path.to_string(),
+                line: (start_pos.row + 1) as i64,
+                column: (start_pos.column + 1) as i64,
+                source_lang: lang.to_string(),
+                source_framework: Some("express".to_string()),
+                raw_snippet: Some(snippet(source_bytes, m.captures[0].node)),
+            });
+        }
+
+        if routes.is_empty() {
+            Ok(ExtractResult::None)
+        } else {
+            Ok(ExtractResult::Routes(routes))
+        }
+    }
+
+    /// Collect `app.use('/prefix', router)` declarations for Express Router prefix.
+    /// Stores them in `self.router_prefixes` keyed by file_path.
+    fn collect_express_prefixes(
+        &mut self,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        file_path: &str,
+    ) {
+        // Only process files that import express
+        if !is_express_file(source) {
+            return;
+        }
+
+        let source_bytes = source.as_bytes();
+        let root = tree.root_node();
+
+        // Walk all call_expression nodes looking for app.use('/prefix', ...)
+        let mut to_visit: Vec<Node> = Vec::new();
+        to_visit.push(root);
+
+        while let Some(node) = to_visit.pop() {
+            if node.kind() == "call_expression" {
+                if let Some(func_node) = node.child_by_field_name("function") {
+                    if func_node.kind() == "member_expression" {
+                        let mut is_use_call = false;
+                        let mut prefix_value: Option<String> = None;
+
+                        if let Some(prop_node) = func_node.child_by_field_name("property") {
+                            let prop_name = node_text(source_bytes, prop_node);
+                            if prop_name == "use" {
+                                is_use_call = true;
+                            }
+                        }
+
+                        if is_use_call {
+                            // Get the first string argument as prefix
+                            if let Some(args_node) = node.child_by_field_name("arguments") {
+                                for i in 0..args_node.named_child_count() {
+                                    if let Some(arg) = args_node.named_child(i) {
+                                        if arg.kind() == "string" {
+                                            prefix_value = Some(strip_quotes(&node_text(source_bytes, arg)));
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(prefix) = prefix_value {
+                            if !prefix.is_empty() {
+                                self.router_prefixes.insert(file_path.to_string(), prefix);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                to_visit.push(child);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // baseURL / router prefix collection
     // -----------------------------------------------------------------------
 
@@ -1317,6 +1616,15 @@ impl CrossTierScanner {
 // ============================================================================
 // Free helper functions
 // ============================================================================
+
+/// Check if a TypeScript/JavaScript source file imports Express.
+/// Looks for `require('express')` or `from 'express'` or `from "express"`.
+fn is_express_file(source: &str) -> bool {
+    source.contains("require('express')")
+        || source.contains("require(\"express\")")
+        || source.contains("from 'express'")
+        || source.contains("from \"express\"")
+}
 
 /// Extract a property value from a JavaScript object literal node.
 /// Walks the object's `pair` children looking for `key: value` where key matches.
@@ -1857,5 +2165,30 @@ mod tests {
         assert_eq!(func_decl.kind(), "function_declaration");
         let name = extract_function_name(func_decl, source.as_bytes());
         assert_eq!(name, "fetchUsers");
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 3: is_express_file helper
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_is_express_file_require() {
+        assert!(is_express_file("const express = require('express');"));
+        assert!(is_express_file("const express = require(\"express\");"));
+        assert!(!is_express_file("const axios = require('axios');"));
+    }
+
+    #[test]
+    fn test_is_express_file_import() {
+        assert!(is_express_file("import express from 'express';"));
+        assert!(is_express_file("import express from \"express\";"));
+        assert!(!is_express_file("import axios from 'axios';"));
+    }
+
+    #[test]
+    fn test_is_express_file_no_express() {
+        assert!(!is_express_file("const app = express();"));
+        assert!(!is_express_file("router.get('/users', handler);"));
+        assert!(!is_express_file(""));
     }
 }
