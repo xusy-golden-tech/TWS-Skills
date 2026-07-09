@@ -279,6 +279,18 @@ impl CrossTierScanner {
                             &source, &tree, pattern, file_path, &ts_lang,
                         )
                     }
+                    // Phase 5: ASP.NET Core attribute routing
+                    PatternProcessor::AspNetAttributeRoute => {
+                        self.extract_aspnet_routes(
+                            &source, &tree, pattern, file_path, &ts_lang,
+                        )
+                    }
+                    // Phase 5: Go net/http HandleFunc
+                    PatternProcessor::GoNetHttp => {
+                        self.extract_go_net_http_routes(
+                            &source, &tree, pattern, file_path, &ts_lang,
+                        )
+                    }
                 };
 
                 match result {
@@ -1721,6 +1733,250 @@ impl CrossTierScanner {
     }
 
     // -----------------------------------------------------------------------
+    // Phase 5: ASP.NET Core attribute route extraction
+    // -----------------------------------------------------------------------
+
+    /// Extract HTTP routes from ASP.NET Core `[HttpGet("/path")]` attribute routing.
+    ///
+    /// Uses AST walking (not tree-sitter Query) to find `attribute` nodes in C#
+    /// source files because C# attribute AST structure (attribute_list → attribute
+    /// → name + attribute_argument_list → attribute_argument → string_literal)
+    /// is too deeply nested for a single Query to reliably match across all C#
+    /// code styles.
+    fn extract_aspnet_routes(
+        &self,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        _pattern: &FrameworkPattern,
+        file_path: &str,
+        _ts_lang: &tree_sitter::Language,
+    ) -> Result<ExtractResult, String> {
+        let source_bytes = source.as_bytes();
+        let root = tree.root_node();
+        let mut routes: Vec<HttpRouteRecord> = Vec::new();
+
+        // Walk all attribute_list nodes in the AST
+        let mut to_visit: Vec<Node> = Vec::new();
+        to_visit.push(root);
+
+        while let Some(node) = to_visit.pop() {
+            if node.kind() == "attribute_list" {
+                self.walk_aspnet_attributes(
+                    node, source_bytes, file_path, &mut routes,
+                );
+            }
+
+            // Push children for further traversal
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                to_visit.push(child);
+            }
+        }
+
+        if routes.is_empty() {
+            Ok(ExtractResult::None)
+        } else {
+            Ok(ExtractResult::Routes(routes))
+        }
+    }
+
+    /// Walk an `attribute_list` node and extract HTTP route information from
+    /// ASP.NET Core HTTP method attributes (HttpGet, HttpPost, etc.) and [Route].
+    fn walk_aspnet_attributes(
+        &self,
+        attr_list: Node,
+        source: &[u8],
+        file_path: &str,
+        routes: &mut Vec<HttpRouteRecord>,
+    ) {
+        // Map C# attribute names to HTTP methods
+        let method_map: std::collections::HashMap<&str, &str> = [
+            ("HttpGet", "GET"),
+            ("HttpPost", "POST"),
+            ("HttpPut", "PUT"),
+            ("HttpDelete", "DELETE"),
+            ("HttpPatch", "PATCH"),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        for i in 0..attr_list.named_child_count() {
+            if let Some(attr) = attr_list.named_child(i) {
+                if attr.kind() != "attribute" {
+                    continue;
+                }
+
+                // Get attribute name
+                let name = match attr.child_by_field_name("name") {
+                    Some(n) => node_text(source, n),
+                    None => continue,
+                };
+
+                let method: Option<String> = if let Some(m) = method_map.get(name.as_str()) {
+                    Some(m.to_string())
+                } else if name == "Route" {
+                    // [Route("/path")] defaults to GET — the method may be narrowed
+                    // by a method-specific attribute on the same method, but
+                    // single-attribute resolution is a known limitation.
+                    Some("GET".to_string())
+                } else {
+                    None
+                };
+
+                let method = match method {
+                    Some(m) => m,
+                    None => continue,
+                };
+
+                // Extract URL from attribute arguments
+                // In tree-sitter-c-sharp, attribute_argument_list is a named child
+                // of attribute (NOT accessible via field name "arguments").
+                let args_node = {
+                    let mut found: Option<Node> = None;
+                    for j in 0..attr.named_child_count() {
+                        if let Some(child) = attr.named_child(j) {
+                            if child.kind() == "attribute_argument_list" {
+                                found = Some(child);
+                                break;
+                            }
+                        }
+                    }
+                    match found {
+                        Some(a) => a,
+                        None => continue, // [HttpGet] without arguments — skip
+                    }
+                };
+
+                // Walk attribute_argument_list → attribute_argument → string_literal
+                let url = extract_aspnet_url(source, args_node);
+                if url.is_empty() {
+                    continue;
+                }
+
+                let normalized_url = normalizer::normalize_url(&url, "aspnet");
+                let start_pos = attr.start_position();
+
+                // Find enclosing method for handler tracking
+                let func_node_id = find_enclosing_method_node_id(
+                    source, attr, file_path,
+                );
+
+                routes.push(HttpRouteRecord {
+                    id: None,
+                    url_pattern: normalized_url,
+                    url_pattern_raw: url,
+                    http_method: method,
+                    handler_node_id: func_node_id,
+                    file_path: file_path.to_string(),
+                    line: (start_pos.row + 1) as i64,
+                    column: (start_pos.column + 1) as i64,
+                    source_lang: "csharp".to_string(),
+                    source_framework: Some("aspnet".to_string()),
+                    raw_snippet: Some(snippet(source, attr)),
+                });
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 5: Go net/http route extraction
+    // -----------------------------------------------------------------------
+
+    /// Extract HTTP routes from Go `http.HandleFunc("/path", handler)` patterns.
+    ///
+    /// Uses the same tree-sitter `selector_expression` pattern as Gin/Echo.
+    /// The field identifier is "HandleFunc" and there is no HTTP method
+    /// specified — defaults to GET for matching purposes.
+    fn extract_go_net_http_routes(
+        &self,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        pattern: &FrameworkPattern,
+        file_path: &str,
+        ts_lang: &tree_sitter::Language,
+    ) -> Result<ExtractResult, String> {
+        let query = Query::new(ts_lang, pattern.pattern)
+            .map_err(|e| format!("query compile failed for {}: {}", pattern.name, e))?;
+        let mut cursor = QueryCursor::new();
+        let source_bytes = source.as_bytes();
+
+        let mut matches = cursor.matches(&query, tree.root_node(), source_bytes);
+        let mut routes: Vec<HttpRouteRecord> = Vec::new();
+
+        while let Some(m) = matches.next() {
+            let mut obj_text: Option<String> = None;
+            let mut field_text: Option<String> = None;
+            let mut url_text: Option<String> = None;
+
+            for capture in m.captures {
+                let capture_name = &query.capture_names()[capture.index as usize];
+                let text = node_text(source_bytes, capture.node);
+
+                match *capture_name {
+                    "obj" => obj_text = Some(text.clone()),
+                    "method" => field_text = Some(text.clone()),
+                    "url" => url_text = Some(strip_quotes(&text)),
+                    _ => {}
+                }
+            }
+
+            // Must be http.HandleFunc — check @obj is "http"
+            let obj_name = match obj_text.as_deref() {
+                Some(o) => o,
+                None => continue,
+            };
+
+            if obj_name != "http" {
+                continue;
+            }
+
+            // Must be HandleFunc — not a Gin/Echo style method
+            let func_name = match field_text.as_deref() {
+                Some(f) => f,
+                None => continue,
+            };
+
+            if func_name != "HandleFunc" {
+                continue;
+            }
+
+            let raw_path = match url_text {
+                Some(ref u) => u.clone(),
+                None => continue,
+            };
+
+            let normalized_url = normalizer::normalize_url(&raw_path, "gin");
+
+            let func_node_id = self.find_and_resolve_func_rowid(
+                file_path, m.captures, source_bytes,
+            );
+
+            let start_pos = m.captures[0].node.start_position();
+
+            routes.push(HttpRouteRecord {
+                id: None,
+                url_pattern: normalized_url,
+                url_pattern_raw: raw_path,
+                http_method: "GET".to_string(),
+                handler_node_id: func_node_id,
+                file_path: file_path.to_string(),
+                line: (start_pos.row + 1) as i64,
+                column: (start_pos.column + 1) as i64,
+                source_lang: "go".to_string(),
+                source_framework: Some("go_net_http".to_string()),
+                raw_snippet: Some(snippet(source_bytes, m.captures[0].node)),
+            });
+        }
+
+        if routes.is_empty() {
+            Ok(ExtractResult::None)
+        } else {
+            Ok(ExtractResult::Routes(routes))
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // baseURL / router prefix collection
     // -----------------------------------------------------------------------
 
@@ -2038,6 +2294,88 @@ fn node_text(source: &[u8], node: Node) -> String {
 }
 
 /// Get a brief snippet of source text for a node (for debugging).
+/// Extract URL string from an ASP.NET attribute_argument_list node.
+/// Walks: attribute_argument_list → attribute_argument → string_literal.
+fn extract_aspnet_url(source: &[u8], args_node: Node) -> String {
+    for i in 0..args_node.named_child_count() {
+        if let Some(arg) = args_node.named_child(i) {
+            if arg.kind() == "attribute_argument" {
+                // The string_literal may be the direct child or nested
+                for j in 0..arg.named_child_count() {
+                    if let Some(inner) = arg.named_child(j) {
+                        if inner.kind() == "string_literal" {
+                            return strip_quotes(&node_text(source, inner));
+                        }
+                    }
+                }
+                // If no named child, check all children
+                let mut cursor = arg.walk();
+                for child in arg.children(&mut cursor) {
+                    if child.kind() == "string_literal" {
+                        return strip_quotes(&node_text(source, child));
+                    }
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Find the enclosing method_declaration for an attribute node and return
+/// a handler node ID (0 if not found — the handler link is best-effort for cross-tier tracing).
+fn find_enclosing_method_node_id(
+    source: &[u8],
+    attr: Node,
+    file_path: &str,
+) -> i64 {
+    let mut current = attr.parent();
+    while let Some(parent) = current {
+        match parent.kind() {
+            "method_declaration" | "constructor_declaration" => {
+                let func_name = extract_function_name_csharp(source, parent);
+                if func_name.is_empty() {
+                    return 0;
+                }
+                let qname = format!("{}::{}", file_path, func_name);
+                let hash_id = crate::db::hash_id(file_path, &qname);
+                // Parse the hex hash as i64 (first 16 chars for fit into i64)
+                return i64::from_str_radix(&hash_id[..std::cmp::min(16, hash_id.len())], 16)
+                    .unwrap_or(0);
+            }
+            "class_declaration" | "struct_declaration" | "interface_declaration" => {
+                let name = extract_csharp_type_name(source, parent);
+                if name.is_empty() {
+                    return 0;
+                }
+                let qname = format!("{}::{}", file_path, name);
+                let hash_id = crate::db::hash_id(file_path, &qname);
+                return i64::from_str_radix(&hash_id[..std::cmp::min(16, hash_id.len())], 16)
+                    .unwrap_or(0);
+            }
+            _ => {
+                current = parent.parent();
+            }
+        }
+    }
+    0
+}
+
+/// Extract the name from a C# method_declaration or constructor_declaration node.
+fn extract_function_name_csharp(source: &[u8], node: Node) -> String {
+    if let Some(name_node) = node.child_by_field_name("name") {
+        return node_text(source, name_node);
+    }
+    String::new()
+}
+
+/// Extract the name from a C# class_declaration or struct_declaration node.
+fn extract_csharp_type_name(source: &[u8], node: Node) -> String {
+    if let Some(name_node) = node.child_by_field_name("name") {
+        return node_text(source, name_node);
+    }
+    String::new()
+}
+
 fn snippet(source: &[u8], node: Node) -> String {
     let text = node_text(source, node);
     if text.len() > 200 {
@@ -2510,5 +2848,101 @@ mod tests {
         assert!(!is_express_file("const app = express();"));
         assert!(!is_express_file("router.get('/users', handler);"));
         assert!(!is_express_file(""));
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 5: ASP.NET Core attribute extraction tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_aspnet_attribute_ast_structure() {
+        // Verify that tree-sitter-c-sharp parses [HttpGet("/path")] attributes
+        // and that the AST walker can find attribute_list → attribute → name + args.
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_c_sharp::LANGUAGE.into())
+            .unwrap();
+        let source = "[HttpGet(\"/api/users\")]\npublic IActionResult GetUsers() { return Ok(); }\n";
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+
+        let mut attr_lists = 0;
+        let mut to_visit: Vec<tree_sitter::Node> = Vec::new();
+        to_visit.push(root);
+
+        while let Some(node) = to_visit.pop() {
+            if node.kind() == "attribute_list" {
+                attr_lists += 1;
+                for i in 0..node.named_child_count() {
+                    if let Some(attr) = node.named_child(i) {
+                        if attr.kind() == "attribute" {
+                            // Name should be accessible via field "name"
+                            let name = attr.child_by_field_name("name")
+                                .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                                .unwrap_or("");
+                            assert_eq!(name, "HttpGet");
+
+                            // attribute_argument_list is a positional named child, NOT a field
+                            let args_field = attr.child_by_field_name("arguments");
+                            assert!(args_field.is_none(),
+                                "C# attribute_argument_list has no field name");
+
+                            // Find it by iterating named children
+                            let has_args = (0..attr.named_child_count()).any(|j| {
+                                attr.named_child(j)
+                                    .map_or(false, |c| c.kind() == "attribute_argument_list")
+                            });
+                            assert!(has_args, "Should find attribute_argument_list as named child");
+                        }
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                to_visit.push(child);
+            }
+        }
+        assert_eq!(attr_lists, 1);
+    }
+
+    #[test]
+    fn test_extract_aspnet_url_from_attribute() {
+        // Verify extract_aspnet_url correctly extracts the URL string.
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_c_sharp::LANGUAGE.into())
+            .unwrap();
+        let source = "[HttpPost(\"/api/users/create\")]\npublic IActionResult Create() { return Ok(); }\n";
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+
+        // Walk to find attribute_argument_list
+        let mut to_visit: Vec<tree_sitter::Node> = Vec::new();
+        to_visit.push(root);
+
+        let mut url = String::new();
+        while let Some(node) = to_visit.pop() {
+            if node.kind() == "attribute_list" {
+                for i in 0..node.named_child_count() {
+                    if let Some(attr) = node.named_child(i) {
+                        if attr.kind() == "attribute" {
+                            // Find attribute_argument_list as named child
+                            for j in 0..attr.named_child_count() {
+                                if let Some(args) = attr.named_child(j) {
+                                    if args.kind() == "attribute_argument_list" {
+                                        url = extract_aspnet_url(source.as_bytes(), args);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                to_visit.push(child);
+            }
+        }
+        assert_eq!(url, "/api/users/create");
     }
 }

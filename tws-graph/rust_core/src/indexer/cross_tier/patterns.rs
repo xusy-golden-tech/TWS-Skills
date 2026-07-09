@@ -257,6 +257,25 @@ pub const PATTERN_DJANGO_PATH: &str = r#"(call
 // import checks in the scanner (is_koa_file / is_echo_file).
 
 // ============================================================================
+// Phase 5: ASP.NET Core (C#) + Go net/http patterns
+// ============================================================================
+
+/// Match ASP.NET Core attribute routing: `[HttpGet("/path")]`, `[HttpPost("/path")]`.
+///
+/// Captures:
+/// - `@method_name` — identifier (HttpGet, HttpPost, HttpPut, HttpDelete, HttpPatch)
+/// - `@url`         — first string_literal argument (the route template)
+pub const PATTERN_ASPNET_ATTRIBUTE: &str = r#"(attribute
+  name: (identifier) @method_name
+  arguments: (attribute_argument_list
+    (attribute_argument
+      (string_literal) @url)))"#;
+
+// Go net/http reuses PATTERN_GIN_ROUTE — the tree-sitter structure
+// is identical (selector_expression with identifier + field_identifier).
+// Disambiguation is done via the PatternProcessor (GoNetHttp vs GinRoute).
+
+// ============================================================================
 // FrameworkPattern registry
 // ============================================================================
 
@@ -307,6 +326,11 @@ pub enum PatternProcessor {
     KoaRoute,
     /// Process `e.GET("/path", handler)` — Go Echo route definition.
     EchoRoute,
+    // ── Phase 5 ──
+    /// Process `[HttpGet("/path")]` — ASP.NET Core attribute routing.
+    AspNetAttributeRoute,
+    /// Process `http.HandleFunc("/path", handler)` — Go net/http standard library.
+    GoNetHttp,
 }
 
 /// A framework-specific tree-sitter Query pattern for cross-tier extraction.
@@ -473,6 +497,22 @@ pub fn get_phase1_patterns() -> Vec<FrameworkPattern> {
             framework: "echo",
             pattern: PATTERN_GIN_ROUTE,
             post_process: PatternProcessor::EchoRoute,
+        },
+        // --- Phase 5: ASP.NET Core (1 pattern) ---
+        FrameworkPattern {
+            name: "PATTERN_ASPNET_ATTRIBUTE",
+            language: "csharp",
+            framework: "aspnet",
+            pattern: PATTERN_ASPNET_ATTRIBUTE,
+            post_process: PatternProcessor::AspNetAttributeRoute,
+        },
+        // --- Phase 5: Go net/http (1 pattern, reuses Gin pattern structure) ---
+        FrameworkPattern {
+            name: "PATTERN_GO_NET_HTTP",
+            language: "go",
+            framework: "go_net_http",
+            pattern: PATTERN_GIN_ROUTE,
+            post_process: PatternProcessor::GoNetHttp,
         },
     ]
 }
@@ -1125,19 +1165,21 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_get_phase1_patterns_returns_18() {
+    fn test_get_phase1_patterns_returns_20() {
         let patterns = get_phase1_patterns();
-        assert_eq!(patterns.len(), 18);
+        assert_eq!(patterns.len(), 20);
 
         // Count by language
         let ts_count = patterns.iter().filter(|p| p.language == "typescript").count();
         let py_count = patterns.iter().filter(|p| p.language == "python").count();
         let java_count = patterns.iter().filter(|p| p.language == "java").count();
         let go_count = patterns.iter().filter(|p| p.language == "go").count();
+        let csharp_count = patterns.iter().filter(|p| p.language == "csharp").count();
         assert_eq!(ts_count, 10);
         assert_eq!(py_count, 4);
         assert_eq!(java_count, 2);
-        assert_eq!(go_count, 2);
+        assert_eq!(go_count, 3);
+        assert_eq!(csharp_count, 1);
 
         // Count by framework
         let axios_count = patterns.iter().filter(|p| p.framework == "axios").count();
@@ -1151,6 +1193,8 @@ mod tests {
         let django_count = patterns.iter().filter(|p| p.framework == "django").count();
         let koa_count = patterns.iter().filter(|p| p.framework == "koa").count();
         let echo_count = patterns.iter().filter(|p| p.framework == "echo").count();
+        let aspnet_count = patterns.iter().filter(|p| p.framework == "aspnet").count();
+        let gonethttp_count = patterns.iter().filter(|p| p.framework == "go_net_http").count();
         assert_eq!(axios_count, 3);
         assert_eq!(fetch_count, 2);
         assert_eq!(fastapi_count, 2);
@@ -1162,6 +1206,8 @@ mod tests {
         assert_eq!(django_count, 1);
         assert_eq!(koa_count, 1);
         assert_eq!(echo_count, 1);
+        assert_eq!(aspnet_count, 1);
+        assert_eq!(gonethttp_count, 1);
     }
 
     #[test]
@@ -1170,13 +1216,13 @@ mod tests {
         let mut names: Vec<&str> = patterns.iter().map(|p| p.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 18, "All pattern names should be unique");
+        assert_eq!(names.len(), 20, "All pattern names should be unique");
     }
 
     #[test]
     fn test_get_phase1_patterns_all_have_valid_language() {
         let patterns = get_phase1_patterns();
-        let valid_langs = ["typescript", "javascript", "python", "java", "go"];
+        let valid_langs = ["typescript", "javascript", "python", "java", "go", "csharp"];
         for p in &patterns {
             assert!(
                 valid_langs.contains(&p.language),
