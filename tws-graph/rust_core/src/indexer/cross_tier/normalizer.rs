@@ -87,8 +87,12 @@ pub fn normalize_url(url: &str, framework: &str) -> String {
             SPRING_RE.replace_all(url, "{$1}").to_string()
         }
         "django" => {
+            // Strip re_path regex anchors: ^url/$ → url/
+            let cleaned = url
+                .trim_start_matches('^')
+                .trim_end_matches('$');
             // <int:pk> → {pk}
-            let s = DJANGO_RE.replace_all(url, "{$2}").to_string();
+            let s = DJANGO_RE.replace_all(cleaned, "{$2}").to_string();
             // Also handle re_path (?P<id>\d+) → {id}
             DJANGO_RE_PATH.replace_all(&s, "{$1}").to_string()
         }

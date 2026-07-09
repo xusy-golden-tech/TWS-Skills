@@ -261,6 +261,24 @@ impl CrossTierScanner {
                         self.collect_express_prefixes(&source, &tree, file_path);
                         Ok(ExtractResult::None)
                     }
+                    // Phase 4: Django patterns
+                    PatternProcessor::DjangoPath | PatternProcessor::DjangoRePath => {
+                        self.extract_django_routes(
+                            &source, &tree, pattern, file_path, &ts_lang,
+                        )
+                    }
+                    // Phase 4: Koa.js patterns
+                    PatternProcessor::KoaRoute => {
+                        self.extract_koa_routes(
+                            &source, &tree, pattern, file_path, query_lang, &ts_lang,
+                        )
+                    }
+                    // Phase 4: Go Echo patterns
+                    PatternProcessor::EchoRoute => {
+                        self.extract_echo_routes(
+                            &source, &tree, pattern, file_path, &ts_lang,
+                        )
+                    }
                 };
 
                 match result {
@@ -1411,6 +1429,298 @@ impl CrossTierScanner {
     }
 
     // -----------------------------------------------------------------------
+    // Phase 4: Django route extraction
+    // -----------------------------------------------------------------------
+
+    /// Extract HTTP routes from Django `path('url/', view)` / `re_path(r'^url/$', view)`.
+    ///
+    /// Uses tree-sitter Query to find `call` nodes where function is `path` or `re_path`
+    /// and extracts the first string argument as URL.
+    fn extract_django_routes(
+        &self,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        pattern: &FrameworkPattern,
+        file_path: &str,
+        ts_lang: &tree_sitter::Language,
+    ) -> Result<ExtractResult, String> {
+        let query = Query::new(ts_lang, pattern.pattern)
+            .map_err(|e| format!("query compile failed for {}: {}", pattern.name, e))?;
+        let mut cursor = QueryCursor::new();
+        let source_bytes = source.as_bytes();
+
+        let mut matches = cursor.matches(&query, tree.root_node(), source_bytes);
+        let mut routes: Vec<HttpRouteRecord> = Vec::new();
+
+        while let Some(m) = matches.next() {
+            let mut func_name: Option<String> = None;
+            let mut url_text: Option<String> = None;
+
+            for capture in m.captures {
+                let capture_name = &query.capture_names()[capture.index as usize];
+                let text = node_text(source_bytes, capture.node);
+
+                match *capture_name {
+                    "func" => func_name = Some(text.clone()),
+                    "url" => url_text = Some(strip_quotes(&text)),
+                    _ => {}
+                }
+            }
+
+            let is_django_call = match func_name.as_deref() {
+                Some("path") | Some("re_path") => true,
+                _ => false,
+            };
+
+            if !is_django_call {
+                continue;
+            }
+
+            let raw_path = match url_text {
+                Some(ref u) => u.clone(),
+                None => continue,
+            };
+
+            // Django path() and re_path() may contain <int:pk> or (?P<name>...) patterns
+            let normalized_url = normalizer::normalize_url(&raw_path, "django");
+
+            // Django routes don't specify HTTP method — the view handles multiple
+            // methods. Record as GET by default (most common case for URL matching).
+            let func_node_id = self.find_and_resolve_func_rowid(
+                file_path, m.captures, source_bytes,
+            );
+
+            let start_pos = m.captures[0].node.start_position();
+
+            routes.push(HttpRouteRecord {
+                id: None,
+                url_pattern: normalized_url,
+                url_pattern_raw: raw_path,
+                http_method: "GET".to_string(),
+                handler_node_id: func_node_id,
+                file_path: file_path.to_string(),
+                line: (start_pos.row + 1) as i64,
+                column: (start_pos.column + 1) as i64,
+                source_lang: "python".to_string(),
+                source_framework: Some("django".to_string()),
+                raw_snippet: Some(snippet(source_bytes, m.captures[0].node)),
+            });
+        }
+
+        if routes.is_empty() {
+            Ok(ExtractResult::None)
+        } else {
+            Ok(ExtractResult::Routes(routes))
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4: Koa.js route extraction
+    // -----------------------------------------------------------------------
+
+    /// Extract HTTP routes from Koa.js `router.get('/path', handler)` patterns.
+    ///
+    /// Uses the same tree-sitter `member_expression` pattern as Express.
+    /// Disambiguates via `is_koa_file()` import check.
+    fn extract_koa_routes(
+        &self,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        pattern: &FrameworkPattern,
+        file_path: &str,
+        lang: &str,
+        ts_lang: &tree_sitter::Language,
+    ) -> Result<ExtractResult, String> {
+        // Disambiguation: only process files that import koa-router
+        if !is_koa_file(source) {
+            return Ok(ExtractResult::None);
+        }
+
+        let query = Query::new(ts_lang, pattern.pattern)
+            .map_err(|e| format!("query compile failed for {}: {}", pattern.name, e))?;
+        let mut cursor = QueryCursor::new();
+        let source_bytes = source.as_bytes();
+
+        let mut matches = cursor.matches(&query, tree.root_node(), source_bytes);
+        let mut routes: Vec<HttpRouteRecord> = Vec::new();
+
+        let method_map: std::collections::HashMap<&str, &str> = [
+            ("get", "GET"),
+            ("post", "POST"),
+            ("put", "PUT"),
+            ("delete", "DELETE"),
+            ("patch", "PATCH"),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        while let Some(m) = matches.next() {
+            let mut obj_text: Option<String> = None;
+            let mut method_text: Option<String> = None;
+            let mut url_text: Option<String> = None;
+
+            for capture in m.captures {
+                let capture_name = &query.capture_names()[capture.index as usize];
+                let text = node_text(source_bytes, capture.node);
+
+                match *capture_name {
+                    "obj" => obj_text = Some(text.clone()),
+                    "method" => method_text = Some(text.clone()),
+                    "url" => url_text = Some(strip_quotes(&text)),
+                    _ => {}
+                }
+            }
+
+            // Skip known non-Koa patterns
+            if let Some(ref obj) = obj_text {
+                if obj == "axios" || obj == "$" || obj == "app" {
+                    continue;
+                }
+            }
+
+            let method = match method_text.as_deref() {
+                Some(m) => {
+                    if let Some(http_m) = method_map.get(m) {
+                        http_m.to_string()
+                    } else {
+                        continue;
+                    }
+                }
+                None => continue,
+            };
+
+            let raw_path = match url_text {
+                Some(ref u) => u.clone(),
+                None => continue,
+            };
+
+            let normalized_url = normalizer::normalize_url(&raw_path, "express");
+
+            let func_node_id = self.find_and_resolve_func_rowid(
+                file_path, m.captures, source_bytes,
+            );
+
+            let start_pos = m.captures[0].node.start_position();
+
+            routes.push(HttpRouteRecord {
+                id: None,
+                url_pattern: normalized_url,
+                url_pattern_raw: raw_path,
+                http_method: method,
+                handler_node_id: func_node_id,
+                file_path: file_path.to_string(),
+                line: (start_pos.row + 1) as i64,
+                column: (start_pos.column + 1) as i64,
+                source_lang: lang.to_string(),
+                source_framework: Some("koa".to_string()),
+                raw_snippet: Some(snippet(source_bytes, m.captures[0].node)),
+            });
+        }
+
+        if routes.is_empty() {
+            Ok(ExtractResult::None)
+        } else {
+            Ok(ExtractResult::Routes(routes))
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4: Go Echo route extraction
+    // -----------------------------------------------------------------------
+
+    /// Extract HTTP routes from Go Echo `e.GET("/path", handler)` patterns.
+    ///
+    /// Uses the same tree-sitter `selector_expression` pattern as Gin.
+    /// Framework label is "echo".
+    fn extract_echo_routes(
+        &self,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        pattern: &FrameworkPattern,
+        file_path: &str,
+        ts_lang: &tree_sitter::Language,
+    ) -> Result<ExtractResult, String> {
+        let query = Query::new(ts_lang, pattern.pattern)
+            .map_err(|e| format!("query compile failed for {}: {}", pattern.name, e))?;
+        let mut cursor = QueryCursor::new();
+        let source_bytes = source.as_bytes();
+
+        let mut matches = cursor.matches(&query, tree.root_node(), source_bytes);
+        let mut routes: Vec<HttpRouteRecord> = Vec::new();
+
+        let method_map: std::collections::HashMap<&str, &str> = [
+            ("GET", "GET"),
+            ("POST", "POST"),
+            ("PUT", "PUT"),
+            ("DELETE", "DELETE"),
+            ("PATCH", "PATCH"),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        while let Some(m) = matches.next() {
+            let mut method_text: Option<String> = None;
+            let mut url_text: Option<String> = None;
+
+            for capture in m.captures {
+                let capture_name = &query.capture_names()[capture.index as usize];
+                let text = node_text(source_bytes, capture.node);
+
+                match *capture_name {
+                    "method" => method_text = Some(text.clone()),
+                    "url" => url_text = Some(strip_quotes(&text)),
+                    _ => {}
+                }
+            }
+
+            let method = match method_text.as_deref() {
+                Some(m) => {
+                    if !method_map.contains_key(m) {
+                        continue;
+                    }
+                    m.to_string()
+                }
+                None => continue,
+            };
+
+            let raw_path = match url_text {
+                Some(ref u) => u.clone(),
+                None => continue,
+            };
+
+            let normalized_url = normalizer::normalize_url(&raw_path, "gin");
+
+            let func_node_id = self.find_and_resolve_func_rowid(
+                file_path, m.captures, source_bytes,
+            );
+
+            let start_pos = m.captures[0].node.start_position();
+
+            routes.push(HttpRouteRecord {
+                id: None,
+                url_pattern: normalized_url,
+                url_pattern_raw: raw_path,
+                http_method: method,
+                handler_node_id: func_node_id,
+                file_path: file_path.to_string(),
+                line: (start_pos.row + 1) as i64,
+                column: (start_pos.column + 1) as i64,
+                source_lang: "go".to_string(),
+                source_framework: Some("echo".to_string()),
+                raw_snippet: Some(snippet(source_bytes, m.captures[0].node)),
+            });
+        }
+
+        if routes.is_empty() {
+            Ok(ExtractResult::None)
+        } else {
+            Ok(ExtractResult::Routes(routes))
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // baseURL / router prefix collection
     // -----------------------------------------------------------------------
 
@@ -1618,12 +1928,16 @@ impl CrossTierScanner {
 // ============================================================================
 
 /// Check if a TypeScript/JavaScript source file imports Express.
-/// Looks for `require('express')` or `from 'express'` or `from "express"`.
 fn is_express_file(source: &str) -> bool {
     source.contains("require('express')")
         || source.contains("require(\"express\")")
         || source.contains("from 'express'")
         || source.contains("from \"express\"")
+}
+
+/// Check if a TypeScript/JavaScript source file imports koa-router.
+fn is_koa_file(source: &str) -> bool {
+    source.contains("koa-router")
 }
 
 /// Extract a property value from a JavaScript object literal node.
@@ -1734,8 +2048,14 @@ fn snippet(source: &[u8], node: Node) -> String {
 }
 
 /// Strip surrounding quotes from a string literal.
+/// Handles Python raw strings (`r'...'`, `r"..."`) and regular quoted strings.
 fn strip_quotes(s: &str) -> String {
     let s = s.trim();
+    // Handle Python raw strings: r'...' or r"..."
+    if s.len() >= 4 && (s.starts_with("r'") || s.starts_with("r\"")) {
+        let inner = &s[2..s.len() - 1];
+        return inner.to_string();
+    }
     if (s.starts_with('"') && s.ends_with('"'))
         || (s.starts_with('\'') && s.ends_with('\''))
         || (s.starts_with('`') && s.ends_with('`'))

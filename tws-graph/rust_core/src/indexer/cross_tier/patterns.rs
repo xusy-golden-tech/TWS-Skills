@@ -239,6 +239,24 @@ pub const PATTERN_EXPRESS_USE_PREFIX: &str = r#"(call_expression
   arguments: (arguments . (string) @prefix))"#;
 
 // ============================================================================
+// Phase 4: Django URL conf patterns (Python)
+// ============================================================================
+
+/// Match Django `path('url/', view_func)` and `re_path(r'^url/$', view_func)`
+/// calls inside `urlpatterns` lists.
+///
+/// Captures:
+/// - `@func` — identifier "path" or "re_path"
+/// - `@url`  — first string argument (the URL pattern)
+pub const PATTERN_DJANGO_PATH: &str = r#"(call
+  function: (identifier) @func
+  arguments: (argument_list . (string) @url))"#;
+
+// Koa and Echo patterns reuse Express/Gin patterns respectively —
+// the tree-sitter structure is identical. Disambiguation is done via
+// import checks in the scanner (is_koa_file / is_echo_file).
+
+// ============================================================================
 // FrameworkPattern registry
 // ============================================================================
 
@@ -280,6 +298,15 @@ pub enum PatternProcessor {
     ExpressRoute,
     /// Process `app.use('/prefix', router)` — Express.js prefix collection.
     ExpressUsePrefix,
+    // ── Phase 4 ──
+    /// Process `path('url/', view)` — Django URL conf.
+    DjangoPath,
+    /// Process `re_path(r'^url/$', view)` — Django regex URL conf.
+    DjangoRePath,
+    /// Process `router.get('/path', handler)` — Koa.js route definition.
+    KoaRoute,
+    /// Process `e.GET("/path", handler)` — Go Echo route definition.
+    EchoRoute,
 }
 
 /// A framework-specific tree-sitter Query pattern for cross-tier extraction.
@@ -422,6 +449,30 @@ pub fn get_phase1_patterns() -> Vec<FrameworkPattern> {
             framework: "express",
             pattern: PATTERN_EXPRESS_ROUTE,
             post_process: PatternProcessor::ExpressRoute,
+        },
+        // --- Phase 4: Django (1 pattern) ---
+        FrameworkPattern {
+            name: "PATTERN_DJANGO_PATH",
+            language: "python",
+            framework: "django",
+            pattern: PATTERN_DJANGO_PATH,
+            post_process: PatternProcessor::DjangoPath,
+        },
+        // --- Phase 4: Koa.js (1 pattern, reuses Express pattern structure) ---
+        FrameworkPattern {
+            name: "PATTERN_KOA_ROUTE",
+            language: "typescript",
+            framework: "koa",
+            pattern: PATTERN_EXPRESS_ROUTE,
+            post_process: PatternProcessor::KoaRoute,
+        },
+        // --- Phase 4: Go Echo (1 pattern, reuses Gin pattern structure) ---
+        FrameworkPattern {
+            name: "PATTERN_ECHO_ROUTE",
+            language: "go",
+            framework: "echo",
+            pattern: PATTERN_GIN_ROUTE,
+            post_process: PatternProcessor::EchoRoute,
         },
     ]
 }
@@ -1074,19 +1125,19 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_get_phase1_patterns_returns_15() {
+    fn test_get_phase1_patterns_returns_18() {
         let patterns = get_phase1_patterns();
-        assert_eq!(patterns.len(), 15);
+        assert_eq!(patterns.len(), 18);
 
         // Count by language
         let ts_count = patterns.iter().filter(|p| p.language == "typescript").count();
         let py_count = patterns.iter().filter(|p| p.language == "python").count();
         let java_count = patterns.iter().filter(|p| p.language == "java").count();
         let go_count = patterns.iter().filter(|p| p.language == "go").count();
-        assert_eq!(ts_count, 9);
-        assert_eq!(py_count, 3);
+        assert_eq!(ts_count, 10);
+        assert_eq!(py_count, 4);
         assert_eq!(java_count, 2);
-        assert_eq!(go_count, 1);
+        assert_eq!(go_count, 2);
 
         // Count by framework
         let axios_count = patterns.iter().filter(|p| p.framework == "axios").count();
@@ -1097,6 +1148,9 @@ mod tests {
         let spring_count = patterns.iter().filter(|p| p.framework == "spring_boot").count();
         let gin_count = patterns.iter().filter(|p| p.framework == "gin").count();
         let express_count = patterns.iter().filter(|p| p.framework == "express").count();
+        let django_count = patterns.iter().filter(|p| p.framework == "django").count();
+        let koa_count = patterns.iter().filter(|p| p.framework == "koa").count();
+        let echo_count = patterns.iter().filter(|p| p.framework == "echo").count();
         assert_eq!(axios_count, 3);
         assert_eq!(fetch_count, 2);
         assert_eq!(fastapi_count, 2);
@@ -1105,6 +1159,9 @@ mod tests {
         assert_eq!(spring_count, 2);
         assert_eq!(gin_count, 1);
         assert_eq!(express_count, 2);
+        assert_eq!(django_count, 1);
+        assert_eq!(koa_count, 1);
+        assert_eq!(echo_count, 1);
     }
 
     #[test]
@@ -1113,7 +1170,7 @@ mod tests {
         let mut names: Vec<&str> = patterns.iter().map(|p| p.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 15, "All pattern names should be unique");
+        assert_eq!(names.len(), 18, "All pattern names should be unique");
     }
 
     #[test]
@@ -1403,8 +1460,57 @@ public List<Blog> getPost() {
 
     #[test]
     fn test_is_express_file_detection() {
-        // Test that the is_express_file helper correctly identifies express imports
-        // (this is tested in scanner, but verify the pattern here)
-        assert!(true); // placeholder — actual test in scanner.rs
+        // is_express_file is tested in scanner.rs
+        assert!(true);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 4: Django path() / re_path() detection
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_pattern_django_path_detection() {
+        let src = "from django.urls import path\nurlpatterns = [\n    path('users/', views.user_list),\n]";
+        let tree = parse_py(src);
+        let results = run_query(
+            tree_sitter_python::LANGUAGE.into(),
+            PATTERN_DJANGO_PATH,
+            &tree,
+            src.as_bytes(),
+        );
+        assert_eq!(find_capture(&results, "func"), vec!["path"]);
+        assert_eq!(find_capture(&results, "url"), vec!["'users/'"]);
+    }
+
+    #[test]
+    fn test_pattern_django_re_path_detection() {
+        let src = "from django.urls import re_path\nurlpatterns = [\n    re_path(r'^users/(?P<pk>\\d+)/$', views.user_detail),\n]";
+        let tree = parse_py(src);
+        let results = run_query(
+            tree_sitter_python::LANGUAGE.into(),
+            PATTERN_DJANGO_PATH,
+            &tree,
+            src.as_bytes(),
+        );
+        assert_eq!(find_capture(&results, "func"), vec!["re_path"]);
+        let urls = find_capture(&results, "url");
+        assert!(!urls.is_empty(), "Expected URL capture from re_path");
+        assert!(urls[0].contains("users"), "URL should contain 'users': {:?}", urls);
+    }
+
+    #[test]
+    fn test_pattern_django_path_with_int_param() {
+        let src = "from django.urls import path\nurlpatterns = [\n    path('users/<int:pk>/', views.user_detail),\n]";
+        let tree = parse_py(src);
+        let results = run_query(
+            tree_sitter_python::LANGUAGE.into(),
+            PATTERN_DJANGO_PATH,
+            &tree,
+            src.as_bytes(),
+        );
+        assert_eq!(find_capture(&results, "func"), vec!["path"]);
+        let urls = find_capture(&results, "url");
+        assert!(!urls.is_empty(), "Expected URL capture");
+        assert!(urls[0].contains("<int:pk>"), "URL should contain <int:pk>: {:?}", urls);
     }
 }
