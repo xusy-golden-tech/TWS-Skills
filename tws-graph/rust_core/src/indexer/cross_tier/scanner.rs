@@ -470,6 +470,30 @@ impl CrossTierScanner {
                         }
                     }
                 }
+                "c" => {
+                    match ffi::cgo::extract_cgo_exports(parser, &source, file_path) {
+                        Ok(exports) => all_exports.extend(exports),
+                        Err(e) => {
+                            log::warn!(
+                                "FFI scan: cgo export extraction failed for {}: {}",
+                                file_path,
+                                e
+                            );
+                        }
+                    }
+                }
+                "go" => {
+                    match ffi::cgo::extract_cgo_imports(parser, &source, file_path) {
+                        Ok(imports) => all_imports.extend(imports),
+                        Err(e) => {
+                            log::warn!(
+                                "FFI scan: cgo import extraction failed for {}: {}",
+                                file_path,
+                                e
+                            );
+                        }
+                    }
+                }
                 _ => {}
             }
         }

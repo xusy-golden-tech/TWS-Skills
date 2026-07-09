@@ -143,14 +143,43 @@ pub fn match_pyo3(
 
 /// Match CGo imports to exports using exact symbol-name matching.
 ///
-/// Placeholder for Phase B4 — always returns 0.
+/// For each import, searches exports for a matching `symbol_name`.
+/// Successful matches create `FfiCrossEdgeRecord` entries in the database.
+/// Mismatches are silently skipped (the export may be in a different project).
+///
+/// When multiple exports share the same symbol name, all matches are recorded.
+///
+/// # Returns
+/// Number of cross-edges created.
 pub fn match_cgo(
-    _imports: &[&FfiImportRecord],
-    _exports: &[&FfiExportRecord],
-    _db: &Database,
+    imports: &[&FfiImportRecord],
+    exports: &[&FfiExportRecord],
+    db: &Database,
 ) -> Result<usize, String> {
-    // Phase B4 will implement CGo matching logic.
-    Ok(0)
+    let mut count = 0usize;
+
+    for import in imports {
+        for export in exports {
+            if export.symbol_name == import.symbol_name {
+                let record = FfiCrossEdgeRecord {
+                    id: None,
+                    from_node_id: import.call_node_id,
+                    to_node_id: export.func_node_id,
+                    ffi_import_id: import.id.unwrap_or(0),
+                    ffi_export_id: export.id.unwrap_or(0),
+                    edge_kind: "CROSS_FFI".to_string(),
+                    symbol_name: import.symbol_name.clone(),
+                    ffi_framework: "cgo".to_string(),
+                    created_at: String::new(),
+                };
+                db.insert_ffi_cross_edge(&record)
+                    .map_err(|e| format!("insert_ffi_cross_edge failed: {}", e))?;
+                count += 1;
+            }
+        }
+    }
+
+    Ok(count)
 }
 
 // ============================================================================
@@ -304,6 +333,84 @@ mod tests {
         assert_eq!(result.pyo3_count, 0);
         assert_eq!(result.cgo_count, 0);
         assert_eq!(result.total, 0);
+        cleanup(&_path);
+    }
+
+    // -----------------------------------------------------------------------
+    // CGo match tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_match_cgo_exact() {
+        let (db, _path) = setup_test_db("cgo_exact");
+        let imports = vec![make_import(1, "do_work", "cgo")];
+        let exports = vec![make_export(1, "do_work", None, "cgo")];
+        let import_refs: Vec<&FfiImportRecord> = imports.iter().collect();
+        let export_refs: Vec<&FfiExportRecord> = exports.iter().collect();
+        let count = match_cgo(&import_refs, &export_refs, &db).unwrap();
+        assert_eq!(count, 1);
+
+        let edges = db.get_ffi_cross_edges(None, None).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].symbol_name, "do_work");
+        assert_eq!(edges[0].ffi_framework, "cgo");
+        assert_eq!(edges[0].edge_kind, "CROSS_FFI");
+        cleanup(&_path);
+    }
+
+    #[test]
+    fn test_match_cgo_no_match() {
+        let (db, _path) = setup_test_db("cgo_no_match");
+        let imports = vec![make_import(1, "unknown_func", "cgo")];
+        let exports = vec![make_export(1, "do_work", None, "cgo")];
+        let import_refs: Vec<&FfiImportRecord> = imports.iter().collect();
+        let export_refs: Vec<&FfiExportRecord> = exports.iter().collect();
+        let count = match_cgo(&import_refs, &export_refs, &db).unwrap();
+        assert_eq!(count, 0);
+
+        let edges = db.get_ffi_cross_edges(None, None).unwrap();
+        assert_eq!(edges.len(), 0);
+        cleanup(&_path);
+    }
+
+    #[test]
+    fn test_match_cgo_multiple_exports() {
+        let (db, _path) = setup_test_db("cgo_multi_export");
+        let imports = vec![make_import(1, "shared_name", "cgo")];
+        let exports = vec![
+            make_export(1, "shared_name", None, "cgo"),
+            make_export(2, "shared_name", None, "cgo"),
+            make_export(3, "other_func", None, "cgo"),
+        ];
+        let import_refs: Vec<&FfiImportRecord> = imports.iter().collect();
+        let export_refs: Vec<&FfiExportRecord> = exports.iter().collect();
+        let count = match_cgo(&import_refs, &export_refs, &db).unwrap();
+        assert_eq!(count, 2);
+        cleanup(&_path);
+    }
+
+    #[test]
+    fn test_match_all_mixed() {
+        let (db, _path) = setup_test_db("match_all_mixed");
+        let imports = vec![
+            make_import(1, "func_a", "pyo3"),
+            make_import(2, "do_work", "cgo"),
+        ];
+        let exports = vec![
+            make_export(1, "func_a", None, "pyo3"),
+            make_export(2, "other", None, "pyo3"),
+            make_export(3, "do_work", None, "cgo"),
+        ];
+        let result = match_all(&imports, &exports, &db).unwrap();
+        assert_eq!(result.pyo3_count, 1);
+        assert_eq!(result.cgo_count, 1);
+        assert_eq!(result.total, 2);
+
+        let edges = db.get_ffi_cross_edges(None, None).unwrap();
+        assert_eq!(edges.len(), 2);
+        let frameworks: Vec<String> = edges.iter().map(|e| e.ffi_framework.clone()).collect();
+        assert!(frameworks.contains(&"pyo3".to_string()));
+        assert!(frameworks.contains(&"cgo".to_string()));
         cleanup(&_path);
     }
 }
