@@ -19,7 +19,10 @@
 //! ```
 
 use crate::db::connection::{hash_id, Database};
-use crate::db::models::{CrossLangEdgeRecord, HttpCallRecord, HttpRouteRecord};
+use crate::db::models::{
+    CrossLangEdgeRecord, FfiExportRecord, FfiImportRecord, HttpCallRecord, HttpRouteRecord,
+};
+use crate::indexer::cross_tier::ffi;
 use crate::indexer::cross_tier::matcher;
 use crate::indexer::cross_tier::normalizer;
 use crate::indexer::cross_tier::patterns::{
@@ -400,28 +403,116 @@ impl CrossTierScanner {
 
     /// Scan source files for FFI (Foreign Function Interface) imports and exports.
     ///
-    /// This method runs after the HTTP cross-tier scan. In the current phase (skeleton),
-    /// it performs no actual extraction — it returns an empty result that serves as
-    /// a hook point for future PyO3/CGo/JNA extractors.
+    /// Runs after the HTTP cross-tier scan. Iterates over all indexed files,
+    /// extracts PyO3 exports from Rust files and PyO3 imports from Python files,
+    /// then runs the matching engine to create CROSS_FFI edges.
+    ///
+    /// # Phase support
+    /// - Phase B3: PyO3 extractors and matcher are fully implemented.
+    /// - Phase B4: CGo extractors and matcher will be added.
     ///
     /// # Arguments
-    /// * `_root` — Project root directory.
-    /// * `_files` — List of indexed file paths (relative to project root).
+    /// * `root` — Project root directory (files are relative to this).
+    /// * `files` — List of indexed file paths (relative to project root).
     ///
     /// # Returns
-    /// `FfiScanResult` with all counts set to 0 (empty skeleton).
+    /// `FfiScanResult` with import, export, and edge counts.
     pub fn scan_ffi(
         &mut self,
-        _root: &Path,
-        _files: &[String],
+        root: &Path,
+        files: &[String],
     ) -> Result<FfiScanResult, String> {
-        // Phase B2 skeleton: no actual extraction yet.
-        // Future phases will iterate over files, detect languages,
-        // extract FFI import/export records, and create cross-edges.
+        let mut all_exports: Vec<FfiExportRecord> = Vec::new();
+        let mut all_imports: Vec<FfiImportRecord> = Vec::new();
+        let mut parser_pool = ParserPool::new();
+
+        // Phase 1: extract FFI exports and imports from source files
+        for file_path in files {
+            let full_path = root.join(file_path);
+
+            let source = match std::fs::read_to_string(&full_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let lang = match language::detect(file_path) {
+                Some(l) => l,
+                None => continue,
+            };
+
+            let parser = match parser_pool.get_or_create(lang) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            match lang {
+                "rust" => {
+                    match ffi::pyo3::extract_pyo3_exports(parser, &source, file_path) {
+                        Ok(exports) => all_exports.extend(exports),
+                        Err(e) => {
+                            log::warn!(
+                                "FFI scan: PyO3 export extraction failed for {}: {}",
+                                file_path,
+                                e
+                            );
+                        }
+                    }
+                }
+                "python" => {
+                    match ffi::pyo3::extract_pyo3_imports(parser, &source, file_path) {
+                        Ok(imports) => all_imports.extend(imports),
+                        Err(e) => {
+                            log::warn!(
+                                "FFI scan: PyO3 import extraction failed for {}: {}",
+                                file_path,
+                                e
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let exports_count = all_exports.len();
+        let imports_count = all_imports.len();
+
+        // Phase 2: batch insert exports and imports into database
+        if !all_exports.is_empty() {
+            self.db
+                .batch_insert_ffi_exports(&all_exports)
+                .map_err(|e| format!("batch_insert_ffi_exports failed: {}", e))?;
+        }
+
+        if !all_imports.is_empty() {
+            self.db
+                .batch_insert_ffi_imports(&all_imports)
+                .map_err(|e| format!("batch_insert_ffi_imports failed: {}", e))?;
+        }
+
+        // Phase 3: read back records with assigned IDs for matching
+        let imports_with_ids = self
+            .db
+            .get_all_ffi_imports()
+            .map_err(|e| format!("get_all_ffi_imports failed: {}", e))?;
+
+        let exports_with_ids = self
+            .db
+            .get_all_ffi_exports()
+            .map_err(|e| format!("get_all_ffi_exports failed: {}", e))?;
+
+        // Phase 4: run FFI matching engine
+        let match_result = ffi::matcher::match_all(
+            &imports_with_ids,
+            &exports_with_ids,
+            &self.db,
+        )
+        .map_err(|e| format!("FFI match_all failed: {}", e))?;
+
         Ok(FfiScanResult {
-            imports_count: 0,
-            exports_count: 0,
-            edges_count: 0,
+            imports_count,
+            exports_count,
+            edges_count: match_result.total,
         })
     }
 
