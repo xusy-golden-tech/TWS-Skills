@@ -83,14 +83,15 @@ pub fn run_calls(
     node_name: &str,
     inbound: bool,
     depth: usize,
-    cross_tier: bool,
+    enable_http: bool,
+    enable_ffi: bool,
 ) -> rusqlite::Result<Vec<CallsResult>> {
     let node_id = match db.find_node_id_by_name(node_name)? {
         Some(id) => id,
         None => return Ok(Vec::new()),
     };
 
-    let traverser = GraphTraverser::from_db(db, None, None, cross_tier)?;
+    let traverser = GraphTraverser::from_db(db, None, None, enable_http, enable_ffi)?;
 
     let results = if inbound {
         traverser.inbound_callers(&node_id, depth)
@@ -128,7 +129,8 @@ pub fn run_impact(
     db: &Database,
     node_name: &str,
     depth: usize,
-    cross_tier: bool,
+    enable_http: bool,
+    enable_ffi: bool,
 ) -> rusqlite::Result<Vec<ImpactResult>> {
     let node_id = match db.find_node_id_by_name(node_name)? {
         Some(id) => id,
@@ -137,7 +139,7 @@ pub fn run_impact(
 
     // Exclude CONTAINS edges for impact (structural containment is not a
     // real dependency).
-    let traverser = GraphTraverser::from_db(db, None, Some(&["CONTAINS"]), cross_tier)?;
+    let traverser = GraphTraverser::from_db(db, None, Some(&["CONTAINS"]), enable_http, enable_ffi)?;
 
     let affected = traverser.impact_radius(&node_id, depth, TraversalDirection::Outbound);
 
@@ -171,7 +173,8 @@ pub fn run_trace(
     db: &Database,
     src_name: &str,
     tgt_name: &str,
-    cross_tier: bool,
+    enable_http: bool,
+    enable_ffi: bool,
 ) -> rusqlite::Result<Option<Vec<(String, String)>>> {
     let src_id = match db.find_node_id_by_name(src_name)? {
         Some(id) => id,
@@ -182,7 +185,7 @@ pub fn run_trace(
         None => return Ok(None),
     };
 
-    let traverser = GraphTraverser::from_db(db, None, None, cross_tier)?;
+    let traverser = GraphTraverser::from_db(db, None, None, enable_http, enable_ffi)?;
 
     match traverser.shortest_path(&src_id, &tgt_id, TraversalDirection::Outbound) {
         Some(path) => {
@@ -328,7 +331,7 @@ mod tests {
         insert_edge(&db, &a, &b, "CALLS");
         insert_edge(&db, &b, &c, "CALLS");
 
-        let results = run_calls(&db, "func_a", false, 2, true).unwrap();
+        let results = run_calls(&db, "func_a", false, 2, true, false).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].depth, 1);
         assert_eq!(results[1].depth, 2);
@@ -345,7 +348,7 @@ mod tests {
         insert_edge(&db, &a, &c, "CALLS");
         insert_edge(&db, &b, &c, "CALLS");
 
-        let results = run_calls(&db, "func_c", true, 1, true).unwrap();
+        let results = run_calls(&db, "func_c", true, 1, true, false).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].depth, 1);
 
@@ -355,7 +358,7 @@ mod tests {
     #[test]
     fn test_run_calls_node_not_found() {
         let (db, path) = setup_db("run_calls_nf");
-        let results = run_calls(&db, "nonexistent", false, 2, true).unwrap();
+        let results = run_calls(&db, "nonexistent", false, 2, true, false).unwrap();
         assert!(results.is_empty());
         cleanup(&path);
     }
@@ -400,7 +403,7 @@ mod tests {
         insert_edge(&db, &a, &b, "CALLS");
         insert_edge(&db, &a, &c, "CALLS");
 
-        let results = run_impact(&db, "main", 1, true).unwrap();
+        let results = run_impact(&db, "main", 1, true, false).unwrap();
         assert_eq!(results.len(), 2);
         // Both should be in utils module
         assert!(results.iter().all(|r| r.module.contains("utils")));
@@ -417,7 +420,7 @@ mod tests {
         insert_edge(&db, &a, &b, "CALLS");
         insert_edge(&db, &a, &c, "CONTAINS");
 
-        let results = run_impact(&db, "main", 1, true).unwrap();
+        let results = run_impact(&db, "main", 1, true, false).unwrap();
         // CONTAINS edge should be excluded
         assert_eq!(results.len(), 1);
         assert_eq!(&results[0].node_name, "helper");
@@ -438,7 +441,7 @@ mod tests {
         insert_edge(&db, &a, &b, "CALLS");
         insert_edge(&db, &b, &c, "CALLS");
 
-        let result = run_trace(&db, "main", "db_query", true).unwrap();
+        let result = run_trace(&db, "main", "db_query", true, false).unwrap();
         assert!(result.is_some());
         let r_path = result.unwrap();
         assert_eq!(r_path.len(), 3);
@@ -455,7 +458,7 @@ mod tests {
         let _b = insert_node(&db, "other", "other::other", "other.py", "function");
         // No edges connecting them
 
-        let result = run_trace(&db, "main", "other", true).unwrap();
+        let result = run_trace(&db, "main", "other", true, false).unwrap();
         assert!(result.is_none());
 
         cleanup(&path);
@@ -464,7 +467,7 @@ mod tests {
     #[test]
     fn test_run_trace_src_not_found() {
         let (db, path) = setup_db("run_trace_srcnf");
-        let result = run_trace(&db, "nonexistent_src", "anything", true).unwrap();
+        let result = run_trace(&db, "nonexistent_src", "anything", true, false).unwrap();
         assert!(result.is_none());
         cleanup(&path);
     }

@@ -23,22 +23,29 @@ pub enum TraversalDirection {
     Bidirectional,
 }
 
-/// A single hop across a language boundary via HTTP.
+/// A single hop across a language boundary via HTTP or FFI.
 ///
 /// Represents a cross-tier link: a frontend function calls an HTTP URL,
-/// which is handled by a backend route handler (or vice versa).
+/// which is handled by a backend route handler (or vice versa); or a
+/// language A function calls a language B function via FFI (PyO3, cgo, etc.).
 #[derive(Debug, Clone)]
 pub struct CrossLangHop {
-    /// Target node ID (the node on the other side of the HTTP bridge).
+    /// Target node ID (the node on the other side of the bridge).
     pub target_node_id: String,
-    /// HTTP URL, e.g. `/api/auth/register`.
+    /// HTTP URL, e.g. `/api/auth/register`. Empty string for FFI hops.
     pub url: String,
-    /// HTTP method: GET, POST, PUT, DELETE, PATCH.
+    /// HTTP method: GET, POST, PUT, DELETE, PATCH. Empty string for FFI hops.
     pub http_method: String,
-    /// Match type: exact, template, or fuzzy.
+    /// Match type: exact, template, or fuzzy. Empty string for FFI hops.
     pub match_type: String,
-    /// Confidence score 0.0 ~ 1.0.
+    /// Confidence score 0.0 ~ 1.0. 0.0 for FFI hops.
     pub confidence: f64,
+    /// Edge kind discriminator: "CROSS_HTTP" or "CROSS_FFI".
+    pub edge_kind: String,
+    /// FFI framework name (e.g. "pyo3", "cgo"). None for HTTP hops.
+    pub ffi_framework: Option<String>,
+    /// Matched FFI symbol name. None for HTTP hops.
+    pub symbol_name: Option<String>,
 }
 
 /// A DB-backed BFS graph traverser.
@@ -46,17 +53,18 @@ pub struct CrossLangHop {
 /// On construction, loads all edges from the database and builds adjacency
 /// lists for both outbound and inbound directions.
 ///
-/// Cross-language edges from the `cross_lang_edges` table are loaded
-/// alongside regular edges, enabling BFS traversal across HTTP bridges
-/// between frontend and backend code.
+/// Cross-language edges from the `cross_lang_edges` (HTTP) and
+/// `ffi_cross_edges` (FFI) tables are loaded alongside regular edges,
+/// enabling BFS traversal across language bridges between frontend
+/// and backend code.
 pub struct GraphTraverser {
     /// outbound[source] = [(target, kind)]
     outbound: HashMap<String, Vec<(String, String)>>,
     /// inbound[target] = [(source, kind)]
     inbound: HashMap<String, Vec<(String, String)>>,
-    /// Cross-language HTTP bridge edges.
-    /// Forward: frontend func → [CrossLangHop to backend handler]
-    /// Reverse: backend handler → [CrossLangHop to frontend func]
+    /// Unified cross-language bridge edges (HTTP + FFI).
+    /// Forward: import/caller → [CrossLangHop to export/handler]
+    /// Reverse: export/handler → [CrossLangHop to import/caller]
     cross_lang: HashMap<String, Vec<CrossLangHop>>,
 }
 
@@ -65,11 +73,15 @@ impl GraphTraverser {
     ///
     /// Optionally filter edges by `kind_filter` (IN clause).
     /// Set `exclude_kinds` to filter OUT specific edge kinds (e.g. `CONTAINS`).
+    ///
+    /// `enable_http`: load HTTP cross-language edges (`cross_lang_edges` table).
+    /// `enable_ffi`:  load FFI cross-language edges (`ffi_cross_edges` table).
     pub fn from_db(
         db: &Database,
         kind_filter: Option<&[&str]>,
         exclude_kinds: Option<&[&str]>,
-        cross_tier: bool,
+        enable_http: bool,
+        enable_ffi: bool,
     ) -> rusqlite::Result<Self> {
         let edges = db.get_all_edges(None)?;
         let mut outbound: HashMap<String, Vec<(String, String)>> = HashMap::new();
@@ -100,17 +112,31 @@ impl GraphTraverser {
                 .push((source.clone(), kind.clone()));
         }
 
-        // Load cross-language edges only when cross_tier is enabled.
+        // Load HTTP cross-language edges when enabled.
         // Silently skip if tables don't exist yet (pre-v009 database).
-        let cross_lang = if cross_tier {
+        let mut cross_lang: HashMap<String, Vec<CrossLangHop>> = if enable_http {
             Self::load_cross_lang_edges(db).unwrap_or_else(|_| {
-                // Tables may not exist (pre-v009 database or --no-cross-tier).
-                // This is not an error — just means no cross-language traversal.
+                // Tables may not exist (pre-v009 database or disabled).
+                // This is not an error — just means no HTTP cross-language traversal.
                 HashMap::new()
             })
         } else {
             HashMap::new()
         };
+
+        // Load FFI cross-language edges when enabled.
+        // Silently skip if tables don't exist yet (pre-v010 database).
+        if enable_ffi {
+            let ffi_edges = Self::load_ffi_cross_edges(db).unwrap_or_else(|_| {
+                // Tables may not exist (pre-v010 database or disabled).
+                // This is not an error.
+                HashMap::new()
+            });
+            // Merge FFI edges into the unified cross_lang adjacency map
+            for (key, hops) in ffi_edges {
+                cross_lang.entry(key).or_default().extend(hops);
+            }
+        }
 
         Ok(Self { outbound, inbound, cross_lang })
     }
@@ -177,6 +203,9 @@ impl GraphTraverser {
                         http_method: edge.http_method.clone(),
                         match_type: edge.match_type.clone(),
                         confidence: edge.confidence,
+                        edge_kind: "CROSS_HTTP".to_string(),
+                        ffi_framework: None,
+                        symbol_name: None,
                     });
                 // Reverse: backend handler → frontend func
                 cross_lang.entry(to_node.clone())
@@ -187,6 +216,99 @@ impl GraphTraverser {
                         http_method: edge.http_method.clone(),
                         match_type: edge.match_type.clone(),
                         confidence: edge.confidence,
+                        edge_kind: "CROSS_HTTP".to_string(),
+                        ffi_framework: None,
+                        symbol_name: None,
+                    });
+            }
+        }
+
+        Ok(cross_lang)
+    }
+
+    /// Load FFI cross-language bridge edges from the database.
+    ///
+    /// Mirrors `load_cross_lang_edges()` but for FFI (PyO3 / cgo) instead of HTTP.
+    /// Builds a bidirectional adjacency map:
+    /// - Forward: import-side function node → export-side function node
+    /// - Reverse: export-side function node → import-side function node
+    ///
+    /// Resolves `ffi_imports.call_node_id` and `ffi_exports.func_node_id`
+    /// through the `nodes` table (rowid → string id) to build the adjacency.
+    ///
+    /// Returns an error if any of the three tables (`ffi_imports`,
+    /// `ffi_exports`, `ffi_cross_edges`) do not exist.
+    fn load_ffi_cross_edges(
+        db: &Database,
+    ) -> rusqlite::Result<HashMap<String, Vec<CrossLangHop>>> {
+        let ffi_edges = db.get_ffi_cross_edges(None, None)?;
+        let ffi_imports = db.get_all_ffi_imports()?;
+        let ffi_exports = db.get_all_ffi_exports()?;
+
+        // Build rowid → node_id map from the nodes table
+        let node_id_map: HashMap<i64, String> = {
+            let conn = db.connection();
+            let mut stmt = conn.prepare("SELECT rowid, id FROM nodes")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect::<HashMap<i64, String>>();
+            rows
+        };
+
+        // Build ffi_imports.id → node_id map
+        // call_node_id references nodes.rowid, resolve via node_id_map
+        let import_node_map: HashMap<i64, String> = ffi_imports.iter()
+            .filter_map(|i| {
+                let import_id = i.id?;
+                node_id_map.get(&i.call_node_id)
+                    .map(|node_id| (import_id, node_id.clone()))
+            })
+            .collect();
+
+        // Build ffi_exports.id → node_id map
+        // func_node_id references nodes.rowid, resolve via node_id_map
+        let export_node_map: HashMap<i64, String> = ffi_exports.iter()
+            .filter_map(|e| {
+                let export_id = e.id?;
+                node_id_map.get(&e.func_node_id)
+                    .map(|node_id| (export_id, node_id.clone()))
+            })
+            .collect();
+
+        let mut cross_lang: HashMap<String, Vec<CrossLangHop>> = HashMap::new();
+
+        for edge in &ffi_edges {
+            if let (Some(from_node), Some(to_node)) = (
+                import_node_map.get(&edge.ffi_import_id),
+                export_node_map.get(&edge.ffi_export_id),
+            ) {
+                // Forward: import-side → export-side
+                cross_lang.entry(from_node.clone())
+                    .or_default()
+                    .push(CrossLangHop {
+                        target_node_id: to_node.clone(),
+                        url: String::new(),
+                        http_method: String::new(),
+                        match_type: String::new(),
+                        confidence: 0.0,
+                        edge_kind: "CROSS_FFI".to_string(),
+                        ffi_framework: Some(edge.ffi_framework.clone()),
+                        symbol_name: Some(edge.symbol_name.clone()),
+                    });
+                // Reverse: export-side → import-side
+                cross_lang.entry(to_node.clone())
+                    .or_default()
+                    .push(CrossLangHop {
+                        target_node_id: from_node.clone(),
+                        url: String::new(),
+                        http_method: String::new(),
+                        match_type: String::new(),
+                        confidence: 0.0,
+                        edge_kind: "CROSS_FFI".to_string(),
+                        ffi_framework: Some(edge.ffi_framework.clone()),
+                        symbol_name: Some(edge.symbol_name.clone()),
                     });
             }
         }
@@ -689,7 +811,7 @@ mod tests {
         insert_edge(&db, &n_a, &n_b, "CALLS");
         insert_edge(&db, &n_b, &n_c, "CALLS");
 
-        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true, false).unwrap();
 
         let calls = t.outbound_calls(&n_a, 2);
         assert_eq!(calls.len(), 2);
@@ -710,7 +832,7 @@ mod tests {
         insert_edge(&db, &n_a, &n_b, "CALLS");
         insert_edge(&db, &n_a, &n_c, "CONTAINS"); // should be excluded
 
-        let t = GraphTraverser::from_db(&db, None, Some(&["CONTAINS"]), true).unwrap();
+        let t = GraphTraverser::from_db(&db, None, Some(&["CONTAINS"]), true, false).unwrap();
 
         let calls = t.outbound_calls(&n_a, 1);
         assert_eq!(calls.len(), 1);
@@ -729,7 +851,7 @@ mod tests {
         insert_edge(&db, &n_a, &n_b, "CALLS");
         insert_edge(&db, &n_a, &n_c, "IMPORTS");
 
-        let t = GraphTraverser::from_db(&db, Some(&["CALLS"]), None, true).unwrap();
+        let t = GraphTraverser::from_db(&db, Some(&["CALLS"]), None, true, false).unwrap();
 
         let calls = t.outbound_calls(&n_a, 1);
         assert_eq!(calls.len(), 1);
@@ -750,7 +872,7 @@ mod tests {
         insert_edge(&db, &n_b, &n_c, "CALLS");
         insert_edge(&db, &n_b, &n_d, "CALLS");
 
-        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true, false).unwrap();
         let radius = t.impact_radius(&n_a, 2, TraversalDirection::Outbound);
         assert_eq!(radius.len(), 3); // b, c, d
         assert!(!radius.contains(&n_a));
@@ -768,7 +890,7 @@ mod tests {
         insert_edge(&db, &n_a, &n_b, "CALLS");
         insert_edge(&db, &n_b, &n_c, "CALLS");
 
-        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true, false).unwrap();
 
         let s_path = t.shortest_path(&n_a, &n_c, TraversalDirection::Outbound);
         assert!(s_path.is_some());
@@ -916,7 +1038,7 @@ mod tests {
         let route_id = insert_cross_route(&db, "/api/login", "POST", be_rowid);
         insert_cross_lang_edge(&db, call_id, route_id, "/api/login", "POST", "exact", 1.0);
 
-        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true, false).unwrap();
 
         // Impact radius from frontend function should reach both
         // backend handler and database function via cross-lang edge
@@ -950,7 +1072,7 @@ mod tests {
         let route_id = insert_cross_route(&db, "/api/auth/register", "POST", be_rowid);
         insert_cross_lang_edge(&db, call_id, route_id, "/api/auth/register", "POST", "exact", 1.0);
 
-        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true, false).unwrap();
 
         // Should find path from frontend to backend via cross-lang edge
         let sp = t.shortest_path(&n_fe, &n_be, TraversalDirection::Outbound);
@@ -980,7 +1102,7 @@ mod tests {
         let route_id = insert_cross_route(&db, "/api/users", "GET", be_rowid);
         insert_cross_lang_edge(&db, call_id, route_id, "/api/users", "GET", "exact", 1.0);
 
-        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true, false).unwrap();
 
         // Reverse: backend handler → frontend function via cross-lang edge
         let sp = t.shortest_path(&n_be, &n_fe, TraversalDirection::Outbound);
@@ -1008,7 +1130,7 @@ mod tests {
         let route_id = insert_cross_route(&db, "/api/action", "PUT", be_rowid);
         insert_cross_lang_edge(&db, call_id, route_id, "/api/action", "PUT", "template", 0.95);
 
-        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true, false).unwrap();
 
         let calls = t.outbound_calls(&n_fe, 1);
         assert_eq!(calls.len(), 1);
@@ -1033,7 +1155,7 @@ mod tests {
         let route_id = insert_cross_route(&db, "/api/endpoint", "DELETE", be_rowid);
         insert_cross_lang_edge(&db, call_id, route_id, "/api/endpoint", "DELETE", "exact", 1.0);
 
-        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true, false).unwrap();
 
         // From backend handler, find frontend caller via cross-lang reverse edge
         let callers = t.inbound_callers(&n_be, 1);
@@ -1087,7 +1209,7 @@ mod tests {
         let route_id = insert_cross_route(&db, "/api/init", "GET", be_rowid);
         insert_cross_lang_edge(&db, call_id, route_id, "/api/init", "GET", "exact", 1.0);
 
-        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true, false).unwrap();
 
         // Bidirectional should find path
         let sp = t.shortest_path(&n_fe, &n_be, TraversalDirection::Bidirectional);
@@ -1115,13 +1237,356 @@ mod tests {
         let route_id = insert_cross_route(&db, "/api/form", "POST", be_rowid);
         insert_cross_lang_edge(&db, call_id, route_id, "/api/form", "POST", "exact", 1.0);
 
-        let t = GraphTraverser::from_db(&db, None, None, true).unwrap();
+        let t = GraphTraverser::from_db(&db, None, None, true, false).unwrap();
 
         // Path must exist and include both endpoints
         let sp = t.shortest_path(&n_fe, &n_be, TraversalDirection::Outbound);
         assert!(sp.is_some());
         let p = sp.unwrap();
         assert_eq!(p, vec![n_fe, n_be]);
+
+        cleanup(&db_path);
+    }
+
+    // ------------------------------------------------------------------
+    // FFI cross-language traversal tests
+    // ------------------------------------------------------------------
+
+    /// Helper: insert ffi_imports, ffi_exports, and ffi_cross_edges tables
+    /// for a test database (assumes v010 migration has run).
+    fn setup_ffi_tables(db: &Database) {
+        let conn = db.connection();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ffi_imports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol_name TEXT NOT NULL,
+                call_node_id INTEGER NOT NULL,
+                import_stmt TEXT,
+                ffi_framework TEXT NOT NULL,
+                source_lang TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                line INTEGER NOT NULL,
+                column INTEGER NOT NULL,
+                raw_snippet TEXT
+            );
+            CREATE TABLE IF NOT EXISTS ffi_exports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol_name TEXT NOT NULL,
+                symbol_name_raw TEXT,
+                func_node_id INTEGER NOT NULL,
+                ffi_framework TEXT NOT NULL,
+                source_lang TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                line INTEGER NOT NULL,
+                column INTEGER NOT NULL,
+                raw_snippet TEXT
+            );
+            CREATE TABLE IF NOT EXISTS ffi_cross_edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_node_id INTEGER NOT NULL,
+                to_node_id INTEGER NOT NULL,
+                ffi_import_id INTEGER NOT NULL,
+                ffi_export_id INTEGER NOT NULL,
+                edge_kind TEXT NOT NULL DEFAULT 'CROSS_FFI',
+                symbol_name TEXT NOT NULL,
+                ffi_framework TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
+        )
+        .unwrap();
+    }
+
+    /// Helper: insert an ffi_imports row and return its id.
+    fn insert_ffi_import(
+        db: &Database,
+        symbol_name: &str,
+        call_node_rowid: i64,
+        framework: &str,
+    ) -> i64 {
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO ffi_imports (symbol_name, call_node_id, ffi_framework, \
+             source_lang, file_path, line, column) \
+             VALUES (?1, ?2, ?3, 'python', 'caller.py', 1, 1)",
+            rusqlite::params![symbol_name, call_node_rowid, framework],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// Helper: insert an ffi_exports row and return its id.
+    fn insert_ffi_export(
+        db: &Database,
+        symbol_name: &str,
+        func_node_rowid: i64,
+        framework: &str,
+    ) -> i64 {
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO ffi_exports (symbol_name, func_node_id, ffi_framework, \
+             source_lang, file_path, line, column) \
+             VALUES (?1, ?2, ?3, 'rust', 'export.rs', 1, 1)",
+            rusqlite::params![symbol_name, func_node_rowid, framework],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// Helper: insert an ffi_cross_edges row.
+    fn insert_ffi_cross_edge(
+        db: &Database,
+        from_node_id: i64,
+        to_node_id: i64,
+        ffi_import_id: i64,
+        ffi_export_id: i64,
+        symbol_name: &str,
+        framework: &str,
+    ) {
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO ffi_cross_edges (from_node_id, to_node_id, ffi_import_id, \
+             ffi_export_id, edge_kind, symbol_name, ffi_framework) \
+             VALUES (?1, ?2, ?3, ?4, 'CROSS_FFI', ?5, ?6)",
+            rusqlite::params![from_node_id, to_node_id, ffi_import_id, ffi_export_id,
+                              symbol_name, framework],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_cross_lang_hop_http_fields() {
+        // Verify HTTP CrossLangHop fields are correctly populated
+        let hop = CrossLangHop {
+            target_node_id: "node_1".to_string(),
+            url: "/api/test".to_string(),
+            http_method: "POST".to_string(),
+            match_type: "exact".to_string(),
+            confidence: 0.95,
+            edge_kind: "CROSS_HTTP".to_string(),
+            ffi_framework: None,
+            symbol_name: None,
+        };
+        assert_eq!(hop.edge_kind, "CROSS_HTTP");
+        assert!(hop.ffi_framework.is_none());
+        assert!(hop.symbol_name.is_none());
+        assert_eq!(hop.url, "/api/test");
+        assert_eq!(hop.http_method, "POST");
+        assert_eq!(hop.match_type, "exact");
+        assert!((hop.confidence - 0.95).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_cross_lang_hop_ffi_fields() {
+        // Verify FFI CrossLangHop fields are correctly populated
+        let hop = CrossLangHop {
+            target_node_id: "export_node".to_string(),
+            url: String::new(),
+            http_method: String::new(),
+            match_type: String::new(),
+            confidence: 0.0,
+            edge_kind: "CROSS_FFI".to_string(),
+            ffi_framework: Some("pyo3".to_string()),
+            symbol_name: Some("rust_index".to_string()),
+        };
+        assert_eq!(hop.edge_kind, "CROSS_FFI");
+        assert_eq!(hop.ffi_framework, Some("pyo3".to_string()));
+        assert_eq!(hop.symbol_name, Some("rust_index".to_string()));
+        assert_eq!(hop.target_node_id, "export_node");
+        assert!(hop.url.is_empty());
+        assert!(hop.http_method.is_empty());
+    }
+
+    #[test]
+    fn test_graph_traverser_loads_ffi_edges() {
+        let (db, db_path) = temp_db("ffi_load_edges");
+        setup_ffi_tables(&db);
+
+        // Create nodes
+        let n_py = insert_node(&db, "call_rust", "py::call_rust", "bridge.py");
+        let n_rs = insert_node(&db, "rust_index", "rs::rust_index", "lib.rs");
+
+        let py_rowid = get_node_rowid(&db, &n_py);
+        let rs_rowid = get_node_rowid(&db, &n_rs);
+
+        // Create ffi import and export
+        let import_id = insert_ffi_import(&db, "rust_index", py_rowid, "pyo3");
+        let export_id = insert_ffi_export(&db, "rust_index", rs_rowid, "pyo3");
+        insert_ffi_cross_edge(&db, py_rowid, rs_rowid, import_id, export_id, "rust_index", "pyo3");
+
+        // Load with enable_http=false, enable_ffi=true
+        let t = GraphTraverser::from_db(&db, None, None, false, true).unwrap();
+
+        // Verify FFI edge exists in adjacency
+        let calls = t.outbound_calls(&n_py, 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, n_rs);
+
+        // Verify reverse direction
+        let callers = t.inbound_callers(&n_rs, 1);
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].1, n_py);
+
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn test_graph_traverser_loads_both() {
+        let (db, db_path) = temp_db("ffi_load_both");
+        setup_cross_lang_tables(&db);
+        setup_ffi_tables(&db);
+
+        // Create nodes for HTTP edges
+        let n_fe = insert_node(&db, "fe_func", "fe::func", "fe.ts");
+        let n_be = insert_node(&db, "be_handler", "be::handler", "be.py");
+
+        let fe_rowid = get_node_rowid(&db, &n_fe);
+        let be_rowid = get_node_rowid(&db, &n_be);
+
+        let call_id = insert_cross_call(&db, "/api/test", "GET", fe_rowid);
+        let route_id = insert_cross_route(&db, "/api/test", "GET", be_rowid);
+        insert_cross_lang_edge(&db, call_id, route_id, "/api/test", "GET", "exact", 1.0);
+
+        // Create nodes for FFI edges
+        let n_py = insert_node(&db, "call_rust", "py::call_rust", "bridge.py");
+        let n_rs = insert_node(&db, "rust_fn", "rs::rust_fn", "lib.rs");
+
+        let py_rowid = get_node_rowid(&db, &n_py);
+        let rs_rowid = get_node_rowid(&db, &n_rs);
+
+        let import_id = insert_ffi_import(&db, "rust_fn", py_rowid, "pyo3");
+        let export_id = insert_ffi_export(&db, "rust_fn", rs_rowid, "pyo3");
+        insert_ffi_cross_edge(&db, py_rowid, rs_rowid, import_id, export_id, "rust_fn", "pyo3");
+
+        // Load with both enabled
+        let t = GraphTraverser::from_db(&db, None, None, true, true).unwrap();
+
+        // Verify HTTP edge works
+        let http_calls = t.outbound_calls(&n_fe, 1);
+        assert_eq!(http_calls.len(), 1);
+        assert_eq!(http_calls[0].1, n_be);
+
+        // Verify FFI edge works
+        let ffi_calls = t.outbound_calls(&n_py, 1);
+        assert_eq!(ffi_calls.len(), 1);
+        assert_eq!(ffi_calls[0].1, n_rs);
+
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn test_graph_traverser_no_cross() {
+        let (db, db_path) = temp_db("ffi_no_cross");
+        setup_cross_lang_tables(&db);
+        setup_ffi_tables(&db);
+
+        // Create nodes
+        let n_a = insert_node(&db, "func_a", "mod::func_a", "a.py");
+        let n_b = insert_node(&db, "func_b", "mod::func_b", "b.py");
+
+        let a_rowid = get_node_rowid(&db, &n_a);
+        let b_rowid = get_node_rowid(&db, &n_b);
+
+        // Create HTTP edge
+        let call_id = insert_cross_call(&db, "/api/x", "GET", a_rowid);
+        let route_id = insert_cross_route(&db, "/api/x", "GET", b_rowid);
+        insert_cross_lang_edge(&db, call_id, route_id, "/api/x", "GET", "exact", 1.0);
+
+        // Create FFI edge
+        let import_id = insert_ffi_import(&db, "func_b", a_rowid, "pyo3");
+        let export_id = insert_ffi_export(&db, "func_b", b_rowid, "pyo3");
+        insert_ffi_cross_edge(&db, a_rowid, b_rowid, import_id, export_id, "func_b", "pyo3");
+
+        // Load with both disabled
+        let t = GraphTraverser::from_db(&db, None, None, false, false).unwrap();
+
+        // No cross-language edges loaded, so only regular edges
+        let calls = t.outbound_calls(&n_a, 1);
+        assert_eq!(calls.len(), 0); // no regular CALLS edges
+
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn test_traverse_ffi_edge_impact_radius() {
+        // Verify impact radius works across FFI edges
+        let (db, db_path) = temp_db("ffi_impact");
+        setup_ffi_tables(&db);
+
+        let n_py = insert_node(&db, "call_rust", "py::call_rust", "bridge.py");
+        let n_rs = insert_node(&db, "rust_export", "rs::rust_export", "lib.rs");
+        let n_inner = insert_node(&db, "inner_fn", "rs::inner_fn", "inner.rs");
+
+        // Regular edge: Rust export → inner function
+        insert_edge(&db, &n_rs, &n_inner, "CALLS");
+
+        let py_rowid = get_node_rowid(&db, &n_py);
+        let rs_rowid = get_node_rowid(&db, &n_rs);
+
+        // FFI edge: Python caller → Rust export
+        let import_id = insert_ffi_import(&db, "rust_export", py_rowid, "pyo3");
+        let export_id = insert_ffi_export(&db, "rust_export", rs_rowid, "pyo3");
+        insert_ffi_cross_edge(&db, py_rowid, rs_rowid, import_id, export_id, "rust_export", "pyo3");
+
+        let t = GraphTraverser::from_db(&db, None, None, false, true).unwrap();
+
+        // Impact from Python caller should reach both Rust functions
+        let radius = t.impact_radius(&n_py, 3, TraversalDirection::Outbound);
+        assert!(radius.contains(&n_rs), "should reach Rust export via FFI edge");
+        assert!(radius.contains(&n_inner), "should reach inner function via FFI + CALLS");
+        assert!(!radius.contains(&n_py));
+
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn test_traverse_ffi_edge_shortest_path() {
+        // Verify shortest path works across FFI edges
+        let (db, db_path) = temp_db("ffi_path");
+        setup_ffi_tables(&db);
+
+        let n_py = insert_node(&db, "py_caller", "py::caller", "caller.py");
+        let n_rs = insert_node(&db, "rs_callee", "rs::callee", "callee.rs");
+
+        let py_rowid = get_node_rowid(&db, &n_py);
+        let rs_rowid = get_node_rowid(&db, &n_rs);
+
+        let import_id = insert_ffi_import(&db, "rs_callee", py_rowid, "pyo3");
+        let export_id = insert_ffi_export(&db, "rs_callee", rs_rowid, "pyo3");
+        insert_ffi_cross_edge(&db, py_rowid, rs_rowid, import_id, export_id, "rs_callee", "pyo3");
+
+        let t = GraphTraverser::from_db(&db, None, None, false, true).unwrap();
+
+        let sp = t.shortest_path(&n_py, &n_rs, TraversalDirection::Outbound);
+        assert!(sp.is_some(), "should find path via FFI edge");
+        let p = sp.unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0], n_py);
+        assert_eq!(p[1], n_rs);
+
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn test_ffi_cgo_edge_loads_correctly() {
+        // Verify cgo FFI edges load with correct framework
+        let (db, db_path) = temp_db("ffi_cgo_load");
+        setup_ffi_tables(&db);
+
+        let n_go = insert_node(&db, "go_caller", "go::caller", "caller.go");
+        let n_c = insert_node(&db, "c_export", "c::export", "export.c");
+
+        let go_rowid = get_node_rowid(&db, &n_go);
+        let c_rowid = get_node_rowid(&db, &n_c);
+
+        let import_id = insert_ffi_import(&db, "do_work", go_rowid, "cgo");
+        let export_id = insert_ffi_export(&db, "do_work", c_rowid, "cgo");
+        insert_ffi_cross_edge(&db, go_rowid, c_rowid, import_id, export_id, "do_work", "cgo");
+
+        let t = GraphTraverser::from_db(&db, None, None, false, true).unwrap();
+
+        let calls = t.outbound_calls(&n_go, 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, n_c);
 
         cleanup(&db_path);
     }

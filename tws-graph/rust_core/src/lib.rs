@@ -799,7 +799,7 @@ fn calls(db_path: &str, name: &str, inbound: Option<bool>, depth: Option<usize>,
     let is_inbound = inbound.unwrap_or(false);
     let d = depth.unwrap_or(1);
     let cross_tier = !no_cross.unwrap_or(false);
-    let mut results = query::run_calls(&db, name, is_inbound, d, cross_tier)
+    let mut results = query::run_calls(&db, name, is_inbound, d, cross_tier, false)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     // Apply --include / --exclude scope filtering
@@ -880,7 +880,7 @@ fn impact(db_path: &str, name: &str, depth: Option<usize>, no_cross: Option<bool
     let db = open_db(db_path)?;
     let d = depth.unwrap_or(1);
     let cross_tier = !no_cross.unwrap_or(false);
-    let mut results = query::run_impact(&db, name, d, cross_tier)
+    let mut results = query::run_impact(&db, name, d, cross_tier, false)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     // Apply --include / --exclude scope filtering
@@ -923,7 +923,7 @@ fn impact(db_path: &str, name: &str, depth: Option<usize>, no_cross: Option<bool
 fn trace(db_path: &str, src: &str, tgt: &str, no_cross: Option<bool>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
     let cross_tier = !no_cross.unwrap_or(false);
-    let result = query::run_trace(&db, src, tgt, cross_tier)
+    let result = query::run_trace(&db, src, tgt, cross_tier, false)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     match result {
@@ -1152,7 +1152,7 @@ fn trace_request(db_path: &str, url: &str, method: &str, no_cross: Option<bool>)
     }
 
     let traverser = query::traversal::GraphTraverser::from_db(
-        &db, None, None, cross_tier,
+        &db, None, None, cross_tier, false,
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     let mut out = format!("Trace for '{} {}':\n", method.to_uppercase(), url);
