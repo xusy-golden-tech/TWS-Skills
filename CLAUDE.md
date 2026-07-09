@@ -65,12 +65,14 @@ The Rust core is built separately. See `tws-graph/_core/` for build instructions
 
 | Command | Purpose |
 |---------|---------|
-| `tws-graph index` | Full/incremental index of source files (Rust indexer) |
+| `tws-graph index` | Full/incremental index of source files (Rust indexer, supports `--no-cross-tier` to skip cross-tier HTTP scan) |
 | `tws-graph sync` | Incremental sync via Rust indexer |
 | `tws-graph search <query>` | FTS5 full-text search (supports `kind:`, `lang:`, `path:` qualifiers) |
-| `tws-graph calls <node>` | Show call targets/callers from a node |
-| `tws-graph impact <node>` | Show what would break if node changes |
-| `tws-graph trace <src> <tgt>` | Find paths between two nodes |
+| `tws-graph calls <node>` | Show call targets/callers from a node (supports `--no-cross` for same-language only) |
+| `tws-graph impact <node>` | Show what would break if node changes (supports `--no-cross` for same-language only) |
+| `tws-graph trace <src> <tgt>` | Find paths between two nodes (supports `--no-cross` for same-language only) |
+| `tws-graph routes` | Show route map (HTTP calls vs route definitions, supports `--unmatched`/`--url`/`--method`/`--json`) |
+| `tws-graph trace-request` | Given URL + HTTP method, output full call chain (frontend callers + backend handler chain) |
 | `tws-graph resolve` | Resolve cross-file import/call/type references (post-index) |
 | `tws-graph unresolved` | List unresolved cross-file references (classified internal/external) |
 | `tws-graph snapshot <name>` | Create named snapshot |

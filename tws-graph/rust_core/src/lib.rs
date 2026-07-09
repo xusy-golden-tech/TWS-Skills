@@ -277,8 +277,16 @@ fn index_one_file<'conn>(
 /// `""` to suppress ignore rules entirely (the scanner will not load any
 /// `.twsignore`).
 #[pyfunction]
-#[pyo3(signature = (db_path, root, twsignore_path=None, include_patterns=None, exclude_patterns=None))]
-fn index(db_path: &str, root: &str, twsignore_path: Option<&str>, include_patterns: Option<Vec<String>>, exclude_patterns: Option<Vec<String>>) -> PyResult<String> {
+#[pyo3(signature = (db_path, root, twsignore_path=None, no_cross_tier=None, no_cross_ffi=None, include_patterns=None, exclude_patterns=None))]
+fn index(
+    db_path: &str,
+    root: &str,
+    twsignore_path: Option<&str>,
+    no_cross_tier: Option<bool>,
+    no_cross_ffi: Option<bool>,
+    include_patterns: Option<Vec<String>>,
+    exclude_patterns: Option<Vec<String>>,
+) -> PyResult<String> {
     let db = init_db(db_path)?;
     let root_path = Path::new(root);
 
@@ -315,6 +323,11 @@ fn index(db_path: &str, root: &str, twsignore_path: Option<&str>, include_patter
             });
         }
     }
+
+    // Save relative file paths as strings for cross-tier scan
+    let indexed_file_paths: Vec<String> = files.iter()
+        .map(|f| f.to_string_lossy().replace('\\', "/"))
+        .collect();
 
     let conn = db.connection();
 
@@ -411,10 +424,78 @@ fn index(db_path: &str, root: &str, twsignore_path: Option<&str>, include_patter
         db.optimize()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        Ok(format!(
-            "Index complete: {} files, {} nodes, {} edges (parallel)",
-            file_count, total_nodes, total_edges
-        ))
+        // Cross-tier scan (after all extraction has been committed to DB)
+        let cross_tier_stats = if !no_cross_tier.unwrap_or(false) {
+            let scanner_db = open_db(db_path)?;
+            let mut scanner = crate::indexer::cross_tier::scanner::CrossTierScanner::new(scanner_db);
+            match scanner.scan(root_path, &indexed_file_paths) {
+                Ok(stats) => {
+                    log::info!(
+                        "Cross-tier scan: {} HTTP calls, {} HTTP routes, {} cross-language edges",
+                        stats.http_calls_count, stats.http_routes_count, stats.cross_lang_edges_count
+                    );
+                    Some(stats)
+                }
+                Err(e) => {
+                    log::warn!("Cross-tier scan failed: {}, continuing without cross-tier data", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // FFI cross-tier scan (after HTTP cross-tier scan)
+        let ffi_stats = if !no_cross_ffi.unwrap_or(false) {
+            let ffi_db = open_db(db_path)?;
+            let mut ffi_scanner = crate::indexer::cross_tier::scanner::CrossTierScanner::new(ffi_db);
+            match ffi_scanner.scan_ffi(root_path, &indexed_file_paths) {
+                Ok(stats) => {
+                    log::info!(
+                        "FFI scan: {} imports, {} exports, {} cross-edges",
+                        stats.imports_count,
+                        stats.exports_count,
+                        stats.edges_count
+                    );
+                    Some(stats)
+                }
+                Err(e) => {
+                    log::warn!("FFI scan failed: {}, continuing without FFI data", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(ref stats) = cross_tier_stats {
+            let ffi_msg = match &ffi_stats {
+                Some(ffi) => format!(
+                    "\nFFI: {} imports, {} exports, {} cross-edges",
+                    ffi.imports_count, ffi.exports_count, ffi.edges_count
+                ),
+                None => String::new(),
+            };
+            Ok(format!(
+                "Index complete: {} files, {} nodes, {} edges (parallel)\nCross-tier: {} HTTP calls, {} HTTP routes, {} cross-lang edges{}",
+                file_count, total_nodes, total_edges,
+                stats.http_calls_count, stats.http_routes_count, stats.cross_lang_edges_count,
+                ffi_msg
+            ))
+        } else {
+            let ffi_msg = match &ffi_stats {
+                Some(ffi) => format!(
+                    "\nFFI: {} imports, {} exports, {} cross-edges",
+                    ffi.imports_count, ffi.exports_count, ffi.edges_count
+                ),
+                None => String::new(),
+            };
+            Ok(format!(
+                "Index complete: {} files, {} nodes, {} edges (parallel){}",
+                file_count, total_nodes, total_edges,
+                ffi_msg
+            ))
+        }
     } else {
         // ================================================================
         // Serial path (fallback) — original single-threaded indexing
@@ -474,10 +555,78 @@ fn index(db_path: &str, root: &str, twsignore_path: Option<&str>, include_patter
         db.optimize()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        Ok(format!(
-            "Index complete: {} files, {} nodes, {} edges",
-            file_count, total_nodes, total_edges
-        ))
+        // Cross-tier scan (after all extraction has been committed to DB)
+        let cross_tier_stats = if !no_cross_tier.unwrap_or(false) {
+            let scanner_db = open_db(db_path)?;
+            let mut scanner = crate::indexer::cross_tier::scanner::CrossTierScanner::new(scanner_db);
+            match scanner.scan(root_path, &indexed_file_paths) {
+                Ok(stats) => {
+                    log::info!(
+                        "Cross-tier scan: {} HTTP calls, {} HTTP routes, {} cross-language edges",
+                        stats.http_calls_count, stats.http_routes_count, stats.cross_lang_edges_count
+                    );
+                    Some(stats)
+                }
+                Err(e) => {
+                    log::warn!("Cross-tier scan failed: {}, continuing without cross-tier data", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // FFI cross-tier scan (after HTTP cross-tier scan)
+        let ffi_stats = if !no_cross_ffi.unwrap_or(false) {
+            let ffi_db = open_db(db_path)?;
+            let mut ffi_scanner = crate::indexer::cross_tier::scanner::CrossTierScanner::new(ffi_db);
+            match ffi_scanner.scan_ffi(root_path, &indexed_file_paths) {
+                Ok(stats) => {
+                    log::info!(
+                        "FFI scan: {} imports, {} exports, {} cross-edges",
+                        stats.imports_count,
+                        stats.exports_count,
+                        stats.edges_count
+                    );
+                    Some(stats)
+                }
+                Err(e) => {
+                    log::warn!("FFI scan failed: {}, continuing without FFI data", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some(ref stats) = cross_tier_stats {
+            let ffi_msg = match &ffi_stats {
+                Some(ffi) => format!(
+                    "\nFFI: {} imports, {} exports, {} cross-edges",
+                    ffi.imports_count, ffi.exports_count, ffi.edges_count
+                ),
+                None => String::new(),
+            };
+            Ok(format!(
+                "Index complete: {} files, {} nodes, {} edges\nCross-tier: {} HTTP calls, {} HTTP routes, {} cross-lang edges{}",
+                file_count, total_nodes, total_edges,
+                stats.http_calls_count, stats.http_routes_count, stats.cross_lang_edges_count,
+                ffi_msg
+            ))
+        } else {
+            let ffi_msg = match &ffi_stats {
+                Some(ffi) => format!(
+                    "\nFFI: {} imports, {} exports, {} cross-edges",
+                    ffi.imports_count, ffi.exports_count, ffi.edges_count
+                ),
+                None => String::new(),
+            };
+            Ok(format!(
+                "Index complete: {} files, {} nodes, {} edges{}",
+                file_count, total_nodes, total_edges,
+                ffi_msg
+            ))
+        }
     }
 }
 
@@ -526,7 +675,7 @@ fn register_all_extractors(registry: &mut indexer::registry::Registry) {
 /// Each tree-sitter Language is lazily initialized via `std::sync::LazyLock`
 /// to avoid stack overflow on Windows (where the default thread stack is
 /// only 1 MB — far too small for 28+ statically-initialized parser objects).
-fn lang_to_tree_sitter(lang: &str) -> Option<tree_sitter::Language> {
+pub(crate) fn lang_to_tree_sitter(lang: &str) -> Option<tree_sitter::Language> {
     static PY_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_python::LANGUAGE.into());
     static TS_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into());
     static JAVA_LANG: LazyLock<tree_sitter::Language> = LazyLock::new(|| tree_sitter_java::LANGUAGE.into());
@@ -603,6 +752,37 @@ fn lang_to_tree_sitter(lang: &str) -> Option<tree_sitter::Language> {
 // Query operations
 // ============================================================================
 
+/// Parse cross-tier CLI flags into (enable_http, enable_ffi).
+///
+/// | Flags set              | Result              |
+/// |------------------------|---------------------|
+/// | neither                | (true, true)        |
+/// | --no-cross             | (false, false)      |
+/// | --no-cross-ffi         | (true, false)       |
+/// | --no-cross + --cross-ffi | (false, false)    |
+///
+/// `--no-cross` acts as a superset: it disables both HTTP and FFI
+/// regardless of the `no_cross_ffi` setting.
+fn parse_cross_flags(no_cross: bool, no_cross_ffi: bool) -> (bool, bool) {
+    if no_cross {
+        (false, false)
+    } else {
+        (true, !no_cross_ffi)
+    }
+}
+
+/// Format a CrossLangHop as a human-readable label.
+fn format_hop_label(hop: &query::traversal::CrossLangHop) -> String {
+    if hop.edge_kind == "CROSS_FFI" {
+        let framework = hop.ffi_framework.as_deref().unwrap_or("unknown");
+        let symbol = hop.symbol_name.as_deref().unwrap_or("unknown");
+        format!("═══ FFI {}: {} ═══", framework, symbol)
+    } else {
+        // CROSS_HTTP or other: existing format
+        format!("═══ HTTP {} {} ═══", hop.http_method, hop.url)
+    }
+}
+
 /// Full-text search with qualifier parsing (kind:, lang:, path:).
 /// Returns a list of dicts with id, name, qualified_name, kind, file_path, language.
 #[pyfunction]
@@ -644,12 +824,13 @@ fn search(py: Python<'_>, db_path: &str, query_text: &str, limit: Option<usize>,
 /// If `inbound` is true, show callers; else show callees.
 /// `format`: "json" for JSON, "brief" for old format, None/"text" for rich format.
 #[pyfunction]
-#[pyo3(signature = (db_path, name, inbound=None, depth=None, format=None, include_paths=None, exclude_paths=None))]
-fn calls(db_path: &str, name: &str, inbound: Option<bool>, depth: Option<usize>, format: Option<String>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
+#[pyo3(signature = (db_path, name, inbound=None, depth=None, format=None, no_cross=None, no_cross_ffi=None, include_paths=None, exclude_paths=None))]
+fn calls(db_path: &str, name: &str, inbound: Option<bool>, depth: Option<usize>, format: Option<String>, no_cross: Option<bool>, no_cross_ffi: Option<bool>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
     let is_inbound = inbound.unwrap_or(false);
     let d = depth.unwrap_or(1);
-    let mut results = query::run_calls(&db, name, is_inbound, d)
+    let (enable_http, enable_ffi) = parse_cross_flags(no_cross.unwrap_or(false), no_cross_ffi.unwrap_or(false));
+    let mut results = query::run_calls(&db, name, is_inbound, d, enable_http, enable_ffi)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     // Apply --include / --exclude scope filtering
@@ -725,11 +906,12 @@ fn calls(db_path: &str, name: &str, inbound: Option<bool>, depth: Option<usize>,
 
 /// Compute impact radius of a symbol, grouped by module.
 #[pyfunction]
-#[pyo3(signature = (db_path, name, depth=None, include_paths=None, exclude_paths=None))]
-fn impact(db_path: &str, name: &str, depth: Option<usize>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
+#[pyo3(signature = (db_path, name, depth=None, no_cross=None, no_cross_ffi=None, include_paths=None, exclude_paths=None))]
+fn impact(db_path: &str, name: &str, depth: Option<usize>, no_cross: Option<bool>, no_cross_ffi: Option<bool>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
     let d = depth.unwrap_or(1);
-    let mut results = query::run_impact(&db, name, d)
+    let (enable_http, enable_ffi) = parse_cross_flags(no_cross.unwrap_or(false), no_cross_ffi.unwrap_or(false));
+    let mut results = query::run_impact(&db, name, d, enable_http, enable_ffi)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     // Apply --include / --exclude scope filtering
@@ -768,21 +950,35 @@ fn impact(db_path: &str, name: &str, depth: Option<usize>, include_paths: Option
 
 /// Find the shortest path between two symbols.
 #[pyfunction]
-#[pyo3(signature = (db_path, src, tgt, include_paths=None, exclude_paths=None))]
-fn trace(db_path: &str, src: &str, tgt: &str, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
+#[pyo3(signature = (db_path, src, tgt, no_cross=None, no_cross_ffi=None, include_paths=None, exclude_paths=None))]
+fn trace(db_path: &str, src: &str, tgt: &str, no_cross: Option<bool>, no_cross_ffi: Option<bool>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    let result = query::run_trace(&db, src, tgt)
+    let (enable_http, enable_ffi) = parse_cross_flags(no_cross.unwrap_or(false), no_cross_ffi.unwrap_or(false));
+
+    // Build traverser and use annotated path for cross-tier hop formatting
+    let traverser = query::traversal::GraphTraverser::from_db(&db, None, None, enable_http, enable_ffi)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-    match result {
-        Some(mut path) => {
+    let src_id = match db.find_node_id_by_name(src)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? {
+        Some(id) => id,
+        None => return Ok(format!("No path found from '{}' to '{}'", src, tgt)),
+    };
+    let tgt_id = match db.find_node_id_by_name(tgt)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? {
+        Some(id) => id,
+        None => return Ok(format!("No path found from '{}' to '{}'", src, tgt)),
+    };
+
+    match traverser.shortest_path_annotated(&src_id, &tgt_id, query::traversal::TraversalDirection::Outbound) {
+        Some(mut annotated_path) => {
             // Apply --include / --exclude scope filtering to path nodes
             let has_scope = include_paths.as_ref().map_or(false, |v| !v.is_empty())
                 || exclude_paths.as_ref().map_or(false, |v| !v.is_empty());
             if has_scope {
                 let inc = include_paths.as_deref().unwrap_or(&[]);
                 let exc = exclude_paths.as_deref().unwrap_or(&[]);
-                path.retain(|(nid, _)| {
+                annotated_path.retain(|(nid, _)| {
                     if let Ok(Some((_id, _kind, _name, _qn, _lang, fp))) = db.get_node(nid) {
                         matches_scope(&fp, inc, exc)
                     } else {
@@ -790,14 +986,27 @@ fn trace(db_path: &str, src: &str, tgt: &str, include_paths: Option<Vec<String>>
                     }
                 });
             }
-            if path.len() < 2 {
+            if annotated_path.len() < 2 {
                 return Ok(format!("No path found from '{}' to '{}' (all nodes filtered out by scope)", src, tgt));
             }
 
+            // Resolve node names for each node id
+            let node_names: Vec<(String, Option<String>)> = annotated_path.iter().map(|(nid, hop)| {
+                let name = db.get_node(nid).ok().flatten()
+                    .map(|(_id, _kind, name, _qn, _lang, _fp)| name)
+                    .unwrap_or_else(|| format!("<unknown:{}>", nid));
+                let hop_info = hop.as_ref().map(|h| format_hop_label(h));
+                (name, hop_info)
+            }).collect();
+
             let mut out = format!("Trace from '{}' to '{}':\n", src, tgt);
-            for (i, (_id, node_name)) in path.iter().enumerate() {
+            for (i, (node_name, hop_info)) in node_names.iter().enumerate() {
                 if i > 0 {
-                    out.push_str(" -> ");
+                    if let Some(ref label) = hop_info {
+                        out.push_str(&format!("\n  {}\n  └─ ", label));
+                    } else {
+                        out.push_str(" -> ");
+                    }
                 }
                 out.push_str(node_name);
             }
@@ -805,6 +1014,364 @@ fn trace(db_path: &str, src: &str, tgt: &str, include_paths: Option<Vec<String>>
         }
         None => Ok(format!("No path found from '{}' to '{}'", src, tgt)),
     }
+}
+
+// ============================================================================
+// Cross-tier operations
+// ============================================================================
+
+/// Route overview: show matched/unmatched HTTP calls and routes.
+/// Supports filtering by URL, HTTP method, and unmatched-only mode.
+#[pyfunction]
+#[pyo3(signature = (db_path, unmatched=None, url_filter=None, method_filter=None, json_output=None))]
+fn routes(db_path: &str, unmatched: Option<bool>, url_filter: Option<&str>, method_filter: Option<&str>, json_output: Option<bool>) -> PyResult<String> {
+    let db = open_db(db_path)?;
+
+    let calls = db.get_all_http_calls()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let routes = db.get_all_http_routes()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let edges = db.get_cross_lang_edges(None, None)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    // Build sets of matched call/route IDs
+    let matched_call_ids: HashSet<i64> = edges.iter()
+        .map(|e| e.from_call_id)
+        .collect();
+    let matched_route_ids: HashSet<i64> = edges.iter()
+        .map(|e| e.to_route_id)
+        .collect();
+
+    // Filter calls
+    let filtered_calls: Vec<_> = calls.iter().filter(|c| {
+        // Method filter
+        if let Some(ref m) = method_filter {
+            if !c.http_method.eq_ignore_ascii_case(m) {
+                return false;
+            }
+        }
+        // URL filter
+        if let Some(ref u) = url_filter {
+            if !c.url.contains(u) {
+                return false;
+            }
+        }
+        // Unmatched filter
+        if unmatched.unwrap_or(false) {
+            if c.id.map_or(false, |id| matched_call_ids.contains(&id)) {
+                return false;
+            }
+        }
+        true
+    }).collect();
+
+    // Filter routes
+    let filtered_routes: Vec<_> = routes.iter().filter(|r| {
+        // Method filter
+        if let Some(ref m) = method_filter {
+            if !r.http_method.eq_ignore_ascii_case(m) {
+                return false;
+            }
+        }
+        // URL filter
+        if let Some(ref u) = url_filter {
+            if !r.url_pattern.contains(u) {
+                return false;
+            }
+        }
+        // Unmatched filter
+        if unmatched.unwrap_or(false) {
+            if r.id.map_or(false, |id| matched_route_ids.contains(&id)) {
+                return false;
+            }
+        }
+        true
+    }).collect();
+
+    // JSON output
+    if json_output.unwrap_or(false) {
+        let output = serde_json::json!({
+            "http_calls": filtered_calls,
+            "http_routes": filtered_routes,
+            "cross_lang_edges": edges,
+            "stats": {
+                "total_calls": calls.len(),
+                "total_routes": routes.len(),
+                "matched_calls": matched_call_ids.len(),
+                "matched_routes": matched_route_ids.len(),
+                "cross_lang_edges": edges.len(),
+            }
+        });
+        return serde_json::to_string_pretty(&output)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()));
+    }
+
+    // Table output
+    let mut out = format!(
+        "Route overview: {} HTTP calls, {} HTTP routes, {} cross-lang edges\n\n",
+        calls.len(), routes.len(), edges.len()
+    );
+
+    out.push_str("=== HTTP Calls ===\n");
+    out.push_str(&format!("{:<6} {:<8} {:<50} {:<30} {:<8}\n",
+        "ID", "Method", "URL", "File", "Line"));
+    out.push_str(&format!("{:-<6} {:-<8} {:-<50} {:-<30} {:-<8}\n", "", "", "", "", ""));
+    for c in &filtered_calls {
+        let matched_mark = if c.id.map_or(false, |id| matched_call_ids.contains(&id)) { " ✓" } else { "" };
+        out.push_str(&format!("{:<6} {:<8} {:<50} {:<30} {:<8}{}\n",
+            c.id.map_or(0, |v| v),
+            c.http_method,
+            if c.url.len() > 50 { c.url[..47].to_string() + "..." } else { c.url.clone() },
+            if c.file_path.len() > 30 { c.file_path[..27].to_string() + "..." } else { c.file_path.clone() },
+            c.line,
+            matched_mark,
+        ));
+    }
+
+    out.push_str("\n=== HTTP Routes ===\n");
+    out.push_str(&format!("{:<6} {:<8} {:<50} {:<30} {:<8} {:<12}\n",
+        "ID", "Method", "URL Pattern", "File", "Line", "Framework"));
+    out.push_str(&format!("{:-<6} {:-<8} {:-<50} {:-<30} {:-<8} {:-<12}\n", "", "", "", "", "", ""));
+    for r in &filtered_routes {
+        let matched_mark = if r.id.map_or(false, |id| matched_route_ids.contains(&id)) { " ✓" } else { "" };
+        out.push_str(&format!("{:<6} {:<8} {:<50} {:<30} {:<8} {:<12}{}\n",
+            r.id.map_or(0, |v| v),
+            r.http_method,
+            if r.url_pattern.len() > 50 { r.url_pattern[..47].to_string() + "..." } else { r.url_pattern.clone() },
+            if r.file_path.len() > 30 { r.file_path[..27].to_string() + "..." } else { r.file_path.clone() },
+            r.line,
+            r.source_framework.as_deref().unwrap_or("-"),
+            matched_mark,
+        ));
+    }
+
+    out.push_str("\n=== Cross-Lang Edges ===\n");
+    out.push_str(&format!("{:<8} {:<8} {:<10} {:<8} {:<40} {:<10}\n",
+        "Call ID", "Route ID", "Match Type", "Method", "URL", "Confidence"));
+    for e in &edges {
+        out.push_str(&format!("{:<8} {:<8} {:<10} {:<8} {:<40} {:<10.2}\n",
+            e.from_call_id, e.to_route_id, e.match_type, e.http_method,
+            if e.url.len() > 40 { e.url[..37].to_string() + "..." } else { e.url.clone() },
+            e.confidence,
+        ));
+    }
+
+    Ok(out)
+}
+
+/// List all detected FFI export symbols and their caller counts.
+/// Supports filtering by framework, unused-only mode, and JSON output.
+#[pyfunction]
+#[pyo3(signature = (db_path, framework=None, unused_only=None, json_output=None))]
+fn exports(db_path: &str, framework: Option<&str>, unused_only: Option<bool>, json_output: Option<bool>) -> PyResult<String> {
+    let db = open_db(db_path)?;
+    let exports_with_callers = db.get_ffi_exports_with_caller_count()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    // Filter by framework
+    let mut filtered: Vec<_> = if let Some(fw) = framework {
+        exports_with_callers.into_iter()
+            .filter(|(rec, _)| rec.ffi_framework.eq_ignore_ascii_case(fw))
+            .collect()
+    } else {
+        exports_with_callers
+    };
+
+    // Filter unused only
+    if unused_only.unwrap_or(false) {
+        filtered.retain(|(_, count)| *count == 0);
+    }
+
+    // Sort by source_lang, then symbol_name
+    filtered.sort_by(|(a, _), (b, _)| {
+        a.source_lang.cmp(&b.source_lang)
+            .then(a.symbol_name.cmp(&b.symbol_name))
+    });
+
+    let total = filtered.len();
+    let with_callers = filtered.iter().filter(|(_, c)| *c > 0).count();
+    let unused_count = total - with_callers;
+
+    // JSON output
+    if json_output.unwrap_or(false) {
+        let items: Vec<serde_json::Value> = filtered.iter().map(|(rec, count)| {
+            serde_json::json!({
+                "symbol_name": rec.symbol_name,
+                "ffi_framework": rec.ffi_framework,
+                "source_lang": rec.source_lang,
+                "file_path": rec.file_path,
+                "line": rec.line,
+                "callers": count,
+                "symbol_name_raw": rec.symbol_name_raw,
+            })
+        }).collect();
+        let output = serde_json::json!({
+            "exports": items,
+            "stats": {
+                "total": total,
+                "with_callers": with_callers,
+                "unused": unused_count,
+            }
+        });
+        return serde_json::to_string_pretty(&output)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()));
+    }
+
+    // Table output
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<12} {:<30} {:<8} {:<50}\n",
+        "LANGUAGE", "EXPORT SYMBOL", "CALLERS", "LOCATION"
+    ));
+    out.push_str(&format!("{:-<12} {:-<30} {:-<8} {:-<50}\n", "", "", "", ""));
+
+    for (rec, count) in &filtered {
+        let location = format!("{}:{}", rec.file_path, rec.line);
+        let location_display = if location.len() > 50 {
+            format!("{}...", &location[..47])
+        } else {
+            location
+        };
+        out.push_str(&format!(
+            "{:<12} {:<30} {:<8} {:<50}\n",
+            rec.source_lang,
+            if rec.symbol_name.len() > 30 { format!("{}...", &rec.symbol_name[..27]) } else { rec.symbol_name.clone() },
+            count,
+            location_display,
+        ));
+    }
+
+    out.push_str("\n");
+    out.push_str(&format!(
+        "Total: {} exports, {} have callers, {} unused\n",
+        total, with_callers, unused_count,
+    ));
+
+    Ok(out)
+}
+
+/// Trace the complete call chain for a given URL + HTTP method.
+/// Finds matching HTTP calls (frontend) and routes (backend), then traces
+/// between the involved functions using the GraphTraverser.
+#[pyfunction]
+#[pyo3(signature = (db_path, url, method, no_cross=None, no_cross_ffi=None))]
+fn trace_request(db_path: &str, url: &str, method: &str, no_cross: Option<bool>, no_cross_ffi: Option<bool>) -> PyResult<String> {
+    let db = open_db(db_path)?;
+    let (enable_http, enable_ffi) = parse_cross_flags(no_cross.unwrap_or(false), no_cross_ffi.unwrap_or(false));
+
+    // 1. Find matching HTTP calls (frontend callers of this URL)
+    let all_calls = db.get_all_http_calls()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let matching_calls: Vec<_> = all_calls.iter()
+        .filter(|c| c.url == url && c.http_method.eq_ignore_ascii_case(method))
+        .collect();
+
+    // 2. Find matching HTTP routes (backend handlers for this URL)
+    let all_routes = db.get_all_http_routes()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let matching_routes: Vec<_> = all_routes.iter()
+        .filter(|r| r.url_pattern == url && r.http_method.eq_ignore_ascii_case(method))
+        .collect();
+
+    if matching_calls.is_empty() && matching_routes.is_empty() {
+        return Ok(format!(
+            "No HTTP calls or routes found for '{} {}'",
+            method.to_uppercase(), url
+        ));
+    }
+
+    // 3. Resolve func_node_ids to node IDs and trace paths
+    let conn = db.connection();
+    let mut node_names: HashMap<i64, String> = HashMap::new();
+    let mut node_ids_by_rowid: HashMap<i64, String> = HashMap::new();
+
+    // Build rowid → node_id, rowid → node_name maps
+    {
+        let mut stmt = conn.prepare("SELECT rowid, id, name FROM nodes")
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        }).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        for row in rows.flatten() {
+            node_names.insert(row.0, row.1.clone());
+            node_ids_by_rowid.insert(row.0, row.1);
+            let _ = row.2;
+        }
+    }
+
+    let traverser = query::traversal::GraphTraverser::from_db(
+        &db, None, None, enable_http, enable_ffi,
+    ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    let mut out = format!("Trace for '{} {}':\n", method.to_uppercase(), url);
+    out.push_str("========================================\n\n");
+
+    if !matching_calls.is_empty() {
+        out.push_str("=== HTTP Calls (Frontend) ===\n");
+        for c in &matching_calls {
+            let func_name = node_names.get(&c.func_node_id)
+                .map(|s| s.as_str())
+                .unwrap_or("<unknown>");
+            out.push_str(&format!("  {}:{} - {}()\n", c.file_path, c.line, func_name));
+        }
+    }
+
+    if !matching_routes.is_empty() {
+        out.push_str("\n=== HTTP Routes (Backend) ===\n");
+        for r in &matching_routes {
+            let handler_name = node_names.get(&r.handler_node_id)
+                .map(|s| s.as_str())
+                .unwrap_or("<unknown>");
+            out.push_str(&format!("  {}:{} - {}() [{}]\n",
+                r.file_path, r.line, handler_name,
+                r.source_framework.as_deref().unwrap_or("unknown")
+            ));
+        }
+    }
+
+    // 4. Trace paths between matching call functions and route handlers
+    if !matching_calls.is_empty() && !matching_routes.is_empty() {
+        out.push_str("\n=== Cross-Tier Traces ===\n");
+        for c in &matching_calls {
+            for r in &matching_routes {
+                let from_id = node_ids_by_rowid.get(&c.func_node_id).cloned();
+                let to_id = node_ids_by_rowid.get(&r.handler_node_id).cloned();
+
+                if let (Some(src_id), Some(tgt_id)) = (from_id, to_id) {
+                    out.push_str(&format!(
+                        "\n  Front: {} → Back: {}\n",
+                        node_names.get(&c.func_node_id).map(|s| s.as_str()).unwrap_or("?"),
+                        node_names.get(&r.handler_node_id).map(|s| s.as_str()).unwrap_or("?"),
+                    ));
+                    out.push_str(&format!("  ═══ HTTP {} {} ═══\n", method.to_uppercase(), url));
+
+                    match traverser.shortest_path(
+                        &src_id, &tgt_id,
+                        query::traversal::TraversalDirection::Outbound,
+                    ) {
+                        Some(path) => {
+                            for (i, nid) in path.iter().enumerate() {
+                                if i > 0 {
+                                    out.push_str(" -> ");
+                                }
+                                if let Ok(Some((_id, _kind, name, _qn, _lang, _fp))) = db.get_node(nid) {
+                                    out.push_str(&name);
+                                } else {
+                                    out.push_str(nid);
+                                }
+                            }
+                            out.push('\n');
+                        }
+                        None => {
+                            out.push_str("  (no path found in code graph)\n");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 /// List unresolved references with internal/external classification.
@@ -1583,6 +2150,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(impact, m)?)?;
     m.add_function(wrap_pyfunction!(trace, m)?)?;
     m.add_function(wrap_pyfunction!(unresolved, m)?)?;
+
+    // Cross-tier
+    m.add_function(wrap_pyfunction!(routes, m)?)?;
+    m.add_function(wrap_pyfunction!(trace_request, m)?)?;
+    m.add_function(wrap_pyfunction!(exports, m)?)?;
 
     // Resolution
     m.add_function(wrap_pyfunction!(resolve_refs, m)?)?;

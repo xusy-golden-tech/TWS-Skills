@@ -434,6 +434,175 @@ impl Migration for V008FunctionBody {
 }
 
 // ---------------------------------------------------------------------------
+// v009 — cross-tier tracing tables
+// ---------------------------------------------------------------------------
+
+struct V009CrossTier;
+
+impl Migration for V009CrossTier {
+    fn version(&self) -> i64 {
+        9
+    }
+    fn description(&self) -> &'static str {
+        "Create http_calls, http_routes, cross_lang_edges tables and add nodes.http_role"
+    }
+    fn up(&self, conn: &Connection) -> Result<()> {
+        exec_batch(
+            conn,
+            "\
+            -- HTTP calls from frontend code (TypeScript / JavaScript)
+            CREATE TABLE IF NOT EXISTS http_calls (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                url             TEXT    NOT NULL,
+                http_method     TEXT    NOT NULL,
+                func_node_id    INTEGER NOT NULL,
+                url_is_template INTEGER DEFAULT 0,
+                file_path       TEXT    NOT NULL,
+                line            INTEGER NOT NULL,
+                column          INTEGER NOT NULL,
+                source_lang     TEXT    NOT NULL,
+                raw_snippet     TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_http_calls_url ON http_calls(url);
+            CREATE INDEX IF NOT EXISTS idx_http_calls_method ON http_calls(http_method);
+
+            -- HTTP route definitions from backend code (Python / Java / Go / etc.)
+            CREATE TABLE IF NOT EXISTS http_routes (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                url_pattern      TEXT    NOT NULL,
+                url_pattern_raw  TEXT    NOT NULL,
+                http_method      TEXT    NOT NULL,
+                handler_node_id  INTEGER NOT NULL,
+                file_path        TEXT    NOT NULL,
+                line             INTEGER NOT NULL,
+                column           INTEGER NOT NULL,
+                source_lang      TEXT    NOT NULL,
+                source_framework TEXT,
+                raw_snippet      TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_http_routes_pattern ON http_routes(url_pattern);
+            CREATE INDEX IF NOT EXISTS idx_http_routes_method ON http_routes(http_method);
+
+            -- Cross-language edges: matched HTTP call ↔ HTTP route pairs
+            CREATE TABLE IF NOT EXISTS cross_lang_edges (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_call_id    INTEGER NOT NULL,
+                to_route_id     INTEGER NOT NULL,
+                url             TEXT    NOT NULL,
+                http_method     TEXT    NOT NULL,
+                match_type      TEXT    NOT NULL,
+                confidence      REAL    NOT NULL,
+                FOREIGN KEY (from_call_id) REFERENCES http_calls(id),
+                FOREIGN KEY (to_route_id) REFERENCES http_routes(id)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_cross_lang_unique ON cross_lang_edges(from_call_id, to_route_id);
+
+            -- Extend nodes table with optional HTTP role
+            ",
+        )?;
+
+        add_column_if_not_exists(conn, "nodes", "http_role", "TEXT")
+    }
+
+    fn down(&self, conn: &Connection) -> Result<()> {
+        // Drop cross-tier tables in reverse dependency order.
+        // nodes.http_role is an optional column — no-op to keep compatibility.
+        conn.execute_batch(
+            "\
+            DROP TABLE IF EXISTS cross_lang_edges;
+            DROP TABLE IF EXISTS http_routes;
+            DROP TABLE IF EXISTS http_calls;
+            ",
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v010 — FFI cross-language tracing tables
+// ---------------------------------------------------------------------------
+
+struct V010FfiCrossTier;
+
+impl Migration for V010FfiCrossTier {
+    fn version(&self) -> i64 {
+        10
+    }
+    fn description(&self) -> &'static str {
+        "Create ffi_imports, ffi_exports, ffi_cross_edges tables for FFI cross-language tracing"
+    }
+    fn up(&self, conn: &Connection) -> Result<()> {
+        exec_batch(
+            conn,
+            "\
+            -- FFI (Foreign Function Interface) imports from source code
+            CREATE TABLE IF NOT EXISTS ffi_imports (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol_name     TEXT    NOT NULL,
+                call_node_id    INTEGER NOT NULL,
+                import_stmt     TEXT,
+                ffi_framework   TEXT    NOT NULL,
+                source_lang     TEXT    NOT NULL,
+                file_path       TEXT    NOT NULL,
+                line            INTEGER NOT NULL,
+                column          INTEGER NOT NULL,
+                raw_snippet     TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ffi_imports_symbol ON ffi_imports(symbol_name);
+            CREATE INDEX IF NOT EXISTS idx_ffi_imports_framework ON ffi_imports(ffi_framework);
+
+            -- FFI export definitions from source code (e.g. #[no_mangle] pub extern \"C\" fn)
+            CREATE TABLE IF NOT EXISTS ffi_exports (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol_name      TEXT    NOT NULL,
+                symbol_name_raw  TEXT,
+                func_node_id     INTEGER NOT NULL,
+                ffi_framework    TEXT    NOT NULL,
+                source_lang      TEXT    NOT NULL,
+                file_path        TEXT    NOT NULL,
+                line             INTEGER NOT NULL,
+                column           INTEGER NOT NULL,
+                raw_snippet      TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ffi_exports_symbol ON ffi_exports(symbol_name);
+            CREATE INDEX IF NOT EXISTS idx_ffi_exports_framework ON ffi_exports(ffi_framework);
+
+            -- Cross-language FFI edges: matched FFI import ↔ FFI export pairs
+            CREATE TABLE IF NOT EXISTS ffi_cross_edges (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_node_id    INTEGER NOT NULL,
+                to_node_id      INTEGER NOT NULL,
+                ffi_import_id   INTEGER NOT NULL,
+                ffi_export_id   INTEGER NOT NULL,
+                edge_kind       TEXT    NOT NULL DEFAULT 'CROSS_FFI',
+                symbol_name     TEXT    NOT NULL,
+                ffi_framework   TEXT    NOT NULL,
+                created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ffi_cross_from ON ffi_cross_edges(from_node_id);
+            CREATE INDEX IF NOT EXISTS idx_ffi_cross_to ON ffi_cross_edges(to_node_id);
+            ",
+        )
+    }
+
+    fn down(&self, conn: &Connection) -> Result<()> {
+        // Drop FFI cross-tier tables in reverse dependency order.
+        conn.execute_batch(
+            "\
+            DROP TABLE IF EXISTS ffi_cross_edges;
+            DROP TABLE IF EXISTS ffi_exports;
+            DROP TABLE IF EXISTS ffi_imports;
+            ",
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MigrationRunner
 // ---------------------------------------------------------------------------
 
@@ -443,7 +612,7 @@ pub struct MigrationRunner {
 }
 
 impl MigrationRunner {
-    /// Create a new runner with all 8 registered migrations (v001–v008).
+    /// Create a new runner with all 10 registered migrations (v001–v010).
     pub fn new() -> Self {
         let migrations: Vec<Box<dyn Migration>> = vec![
             Box::new(V001Initial),
@@ -454,6 +623,8 @@ impl MigrationRunner {
             Box::new(V006SchemaEnhance),
             Box::new(V007SourceColumn),
             Box::new(V008FunctionBody),
+            Box::new(V009CrossTier),
+            Box::new(V010FfiCrossTier),
         ];
         Self { migrations }
     }
@@ -564,7 +735,7 @@ mod tests {
         runner.apply(&conn).unwrap();
 
         let version = MigrationRunner::current_version(&conn).unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 10);
 
         // Verify nodes table has all columns (including those added by
         // v003 properties, v008 body, and the initial schema's body_hash).
@@ -655,7 +826,20 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_versions", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(count, 8);
+        assert_eq!(count, 10);
+
+        // Verify cross-tier tables exist (v009)
+        assert!(tables.contains(&"http_calls".to_string()));
+        assert!(tables.contains(&"http_routes".to_string()));
+        assert!(tables.contains(&"cross_lang_edges".to_string()));
+
+        // Verify nodes has http_role column (v009)
+        assert!(columns.contains(&"http_role".to_string()));
+
+        // Verify FFI cross-tier tables exist (v010)
+        assert!(tables.contains(&"ffi_imports".to_string()));
+        assert!(tables.contains(&"ffi_exports".to_string()));
+        assert!(tables.contains(&"ffi_cross_edges".to_string()));
     }
 
     #[test]
@@ -668,7 +852,7 @@ mod tests {
         runner.apply(&conn).unwrap();
 
         let version = MigrationRunner::current_version(&conn).unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 10);
 
         // Only one row per version
         let counts: Vec<(i64, i64)> = {
@@ -763,5 +947,174 @@ mod tests {
         assert!(tables.contains(&"unresolved_refs".to_string()));
         assert!(tables.contains(&"schema_versions".to_string()));
         assert!(tables.contains(&"nodes_fts".to_string()));
+    }
+
+    // ------------------------------------------------------------------
+    // v010 — FFI cross-language tracing tables
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_migration_v010_up() {
+        let conn = in_memory_connection();
+        let migration = V010FfiCrossTier;
+        migration.up(&conn).unwrap();
+
+        // Verify three tables exist
+        let tables: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        assert!(tables.contains(&"ffi_imports".to_string()));
+        assert!(tables.contains(&"ffi_exports".to_string()));
+        assert!(tables.contains(&"ffi_cross_edges".to_string()));
+
+        // Verify ffi_imports schema (PRAGMA table_info)
+        let ffi_imports_cols: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT name, type FROM pragma_table_info('ffi_imports') ORDER BY cid")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        let col_names: Vec<&str> = ffi_imports_cols.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(col_names.contains(&"id"));
+        assert!(col_names.contains(&"symbol_name"));
+        assert!(col_names.contains(&"call_node_id"));
+        assert!(col_names.contains(&"import_stmt"));
+        assert!(col_names.contains(&"ffi_framework"));
+        assert!(col_names.contains(&"source_lang"));
+        assert!(col_names.contains(&"file_path"));
+        assert!(col_names.contains(&"line"));
+        assert!(col_names.contains(&"column"));
+        assert!(col_names.contains(&"raw_snippet"));
+
+        // Verify ffi_exports schema
+        let ffi_exports_cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM pragma_table_info('ffi_exports') ORDER BY cid")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        assert!(ffi_exports_cols.contains(&"id".to_string()));
+        assert!(ffi_exports_cols.contains(&"symbol_name".to_string()));
+        assert!(ffi_exports_cols.contains(&"symbol_name_raw".to_string()));
+        assert!(ffi_exports_cols.contains(&"func_node_id".to_string()));
+        assert!(ffi_exports_cols.contains(&"ffi_framework".to_string()));
+        assert!(ffi_exports_cols.contains(&"source_lang".to_string()));
+        assert!(ffi_exports_cols.contains(&"file_path".to_string()));
+        assert!(ffi_exports_cols.contains(&"line".to_string()));
+        assert!(ffi_exports_cols.contains(&"column".to_string()));
+        assert!(ffi_exports_cols.contains(&"raw_snippet".to_string()));
+
+        // Verify ffi_cross_edges schema
+        let ffi_cross_cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM pragma_table_info('ffi_cross_edges') ORDER BY cid")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        assert!(ffi_cross_cols.contains(&"id".to_string()));
+        assert!(ffi_cross_cols.contains(&"from_node_id".to_string()));
+        assert!(ffi_cross_cols.contains(&"to_node_id".to_string()));
+        assert!(ffi_cross_cols.contains(&"ffi_import_id".to_string()));
+        assert!(ffi_cross_cols.contains(&"ffi_export_id".to_string()));
+        assert!(ffi_cross_cols.contains(&"edge_kind".to_string()));
+        assert!(ffi_cross_cols.contains(&"symbol_name".to_string()));
+        assert!(ffi_cross_cols.contains(&"ffi_framework".to_string()));
+        assert!(ffi_cross_cols.contains(&"created_at".to_string()));
+
+        // Verify indexes
+        let idx_names: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='index' ORDER BY name")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        assert!(idx_names.contains(&"idx_ffi_imports_symbol".to_string()));
+        assert!(idx_names.contains(&"idx_ffi_imports_framework".to_string()));
+        assert!(idx_names.contains(&"idx_ffi_exports_symbol".to_string()));
+        assert!(idx_names.contains(&"idx_ffi_exports_framework".to_string()));
+        assert!(idx_names.contains(&"idx_ffi_cross_from".to_string()));
+        assert!(idx_names.contains(&"idx_ffi_cross_to".to_string()));
+    }
+
+    #[test]
+    fn test_migration_v010_down() {
+        let conn = in_memory_connection();
+        let migration = V010FfiCrossTier;
+        migration.up(&conn).unwrap();
+
+        // Verify tables exist before down
+        let tables_before: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        assert!(tables_before.contains(&"ffi_imports".to_string()));
+        assert!(tables_before.contains(&"ffi_exports".to_string()));
+        assert!(tables_before.contains(&"ffi_cross_edges".to_string()));
+
+        // Execute down
+        migration.down(&conn).unwrap();
+
+        // Verify tables are gone
+        let tables_after: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        assert!(!tables_after.contains(&"ffi_imports".to_string()));
+        assert!(!tables_after.contains(&"ffi_exports".to_string()));
+        assert!(!tables_after.contains(&"ffi_cross_edges".to_string()));
+    }
+
+    #[test]
+    fn test_migration_v010_idempotent() {
+        let conn = in_memory_connection();
+        let migration = V010FfiCrossTier;
+
+        // Apply twice — should not error (IF NOT EXISTS semantics)
+        migration.up(&conn).unwrap();
+        migration.up(&conn).unwrap();
+
+        // Verify tables still exist
+        let tables: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        assert!(tables.contains(&"ffi_imports".to_string()));
+        assert!(tables.contains(&"ffi_exports".to_string()));
+        assert!(tables.contains(&"ffi_cross_edges".to_string()));
     }
 }

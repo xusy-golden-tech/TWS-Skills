@@ -174,6 +174,7 @@ impl ExtractionContext {
             properties: properties_json,
             body: None,
             body_hash: None,
+            http_role: None,
             updated_at: now_ms(),
         };
 
@@ -644,6 +645,7 @@ mod tests {
             EdgeKind::SimilarTo,
             EdgeKind::TestEdge,
             EdgeKind::ConfigLink,
+            EdgeKind::CrossFfi,
         ];
 
         for kind in &kinds {

@@ -370,7 +370,7 @@ fn tool_get_impact(db: &Database, args: &Value) -> Result<Value, String> {
     let symbol_id = get_str(args, "symbol_id").ok_or("Missing symbol_id")?;
     let depth = get_i64(args, "depth", 3) as usize;
 
-    let traverser = GraphTraverser::from_db(db, None, Some(&["CONTAINS"]))
+    let traverser = GraphTraverser::from_db(db, None, Some(&["CONTAINS"]), true, false)
         .map_err(|e| e.to_string())?;
 
     let affected = traverser.impact_radius(&symbol_id, depth, TraversalDirection::Outbound);
@@ -415,7 +415,7 @@ fn tool_trace_path(db: &Database, args: &Value) -> Result<Value, String> {
     let from_id = get_str(args, "from_id").ok_or("Missing from_id")?;
     let to_id = get_str(args, "to_id").ok_or("Missing to_id")?;
 
-    let traverser = GraphTraverser::from_db(db, None, Some(&["CONTAINS"]))
+    let traverser = GraphTraverser::from_db(db, None, Some(&["CONTAINS"]), true, false)
         .map_err(|e| e.to_string())?;
 
     let path = traverser.shortest_path(&from_id, &to_id, TraversalDirection::Bidirectional);

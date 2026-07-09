@@ -63,6 +63,9 @@ class EdgeKind(str, Enum):
     DECORATES = "decorates"
     TYPE_REF = "type_ref"
 
+    # -- v7.5 FFI 跨语言追踪 --
+    CROSS_FFI = "cross_ffi"
+
     def __str__(self) -> str:
         """返回枚举值字符串，而非 'EdgeKind.CALLS'.
 

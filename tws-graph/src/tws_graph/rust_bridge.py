@@ -4,7 +4,9 @@ Provides drop-in replacements for performance-critical operations.
 Set TWS_USE_RUST=0 to disable and fall back to Python implementations.
 """
 
+import json
 import os
+from typing import Optional
 
 
 def _rust_available() -> bool:
@@ -20,7 +22,9 @@ def _rust_available() -> bool:
 
 def rust_index(db_path: str, project_root: str, twsignore_path: str | None = None,
                include_patterns: list[str] | None = None,
-               exclude_patterns: list[str] | None = None) -> str:
+               exclude_patterns: list[str] | None = None,
+               no_cross_tier: bool = False,
+               no_cross_ffi: bool = False) -> str:
     """Run index using Rust core. Returns summary string.
 
     Args:
@@ -32,9 +36,11 @@ def rust_index(db_path: str, project_root: str, twsignore_path: str | None = Non
             files matching at least one pattern are indexed.
         exclude_patterns: Optional list of glob patterns. Files matching
             any pattern are excluded from indexing.
+        no_cross_tier: If True, skip cross-tier HTTP call/route scanning phase.
+        no_cross_ffi: If True, skip cross-tier FFI import/export scanning phase.
     """
     from _core._core import index
-    return index(db_path, project_root, twsignore_path, include_patterns, exclude_patterns)
+    return index(db_path, project_root, twsignore_path, no_cross_tier, no_cross_ffi, include_patterns, exclude_patterns)
 
 
 def rust_search(db_path: str, query: str, limit: int = 50,
@@ -55,7 +61,9 @@ def rust_search(db_path: str, query: str, limit: int = 50,
 def rust_calls(db_path: str, node_name: str, inbound: bool = True, depth: int = 5,
                format: str | None = None,
                include_paths: list[str] | None = None,
-               exclude_paths: list[str] | None = None) -> str:
+               exclude_paths: list[str] | None = None,
+               no_cross: bool = False,
+               no_cross_ffi: bool = False) -> str:
     """Find call targets/callers using Rust BFS.
 
     Default: inbound=True (show callers), matching CLI default behavior.
@@ -67,14 +75,18 @@ def rust_calls(db_path: str, node_name: str, inbound: bool = True, depth: int = 
             file_path matches at least one pattern are returned.
         exclude_paths: Optional list of glob patterns. Results whose
             file_path matches any pattern are excluded.
+        no_cross: If True, disable all cross-language tracing (HTTP + FFI).
+        no_cross_ffi: If True, disable FFI cross-language tracing only.
     """
     from _core._core import calls
-    return calls(db_path, node_name, inbound, depth, format, include_paths, exclude_paths)
+    return calls(db_path, node_name, inbound, depth, format, no_cross, no_cross_ffi, include_paths, exclude_paths)
 
 
 def rust_impact(db_path: str, node_name: str, depth: int = 5,
                 include_paths: list[str] | None = None,
-                exclude_paths: list[str] | None = None) -> str:
+                exclude_paths: list[str] | None = None,
+                no_cross: bool = False,
+                no_cross_ffi: bool = False) -> str:
     """Impact analysis using Rust BFS.
 
     Args:
@@ -82,14 +94,18 @@ def rust_impact(db_path: str, node_name: str, depth: int = 5,
             file_path matches at least one pattern are returned.
         exclude_paths: Optional list of glob patterns. Results whose
             file_path matches any pattern are excluded.
+        no_cross: If True, disable all cross-language impact analysis (HTTP + FFI).
+        no_cross_ffi: If True, disable FFI cross-language impact analysis only.
     """
     from _core._core import impact
-    return impact(db_path, node_name, depth, include_paths, exclude_paths)
+    return impact(db_path, node_name, depth, no_cross, no_cross_ffi, include_paths, exclude_paths)
 
 
 def rust_trace(db_path: str, src: str, tgt: str,
                include_paths: list[str] | None = None,
-               exclude_paths: list[str] | None = None) -> str:
+               exclude_paths: list[str] | None = None,
+               no_cross: bool = False,
+               no_cross_ffi: bool = False) -> str:
     """Find path between two symbols using Rust BFS.
 
     Args:
@@ -97,9 +113,11 @@ def rust_trace(db_path: str, src: str, tgt: str,
             file_path matches at least one pattern are included.
         exclude_paths: Optional list of glob patterns. Path nodes whose
             file_path matches any pattern are excluded.
+        no_cross: If True, disable all cross-language tracing (HTTP + FFI).
+        no_cross_ffi: If True, disable FFI cross-language tracing only.
     """
     from _core._core import trace
-    return trace(db_path, src, tgt, include_paths, exclude_paths)
+    return trace(db_path, src, tgt, no_cross, no_cross_ffi, include_paths, exclude_paths)
 
 
 def rust_unresolved(db_path: str,
@@ -436,3 +454,31 @@ def rust_federate_search(db_path: str, query: str) -> str:
     """Cross-repo federated search using Rust."""
     from _core._core import federate_search
     return federate_search(db_path, query)
+
+
+def rust_routes(db_path: str, unmatched: bool = False, url_filter: Optional[str] = None,
+                method_filter: Optional[str] = None, json_output: bool = False) -> str:
+    """查询路由全景（HTTP 调用与路由定义匹配状态）"""
+    if not _rust_available():
+        return json.dumps({"error": "Rust core not available"})
+    from _core._core import routes
+    return routes(db_path, unmatched, url_filter, method_filter, json_output)
+
+
+def rust_exports(db_path: str, framework: Optional[str] = None,
+                 unused_only: bool = False, json_output: bool = False) -> str:
+    """列出所有检测到的 FFI 导出符号及其调用者"""
+    if not _rust_available():
+        return json.dumps({"error": "Rust core not available"})
+    from _core._core import exports
+    return exports(db_path, framework, unused_only, json_output)
+
+
+def rust_trace_request(db_path: str, url: str, method: str = "GET",
+                       no_cross: bool = False,
+                       no_cross_ffi: bool = False) -> str:
+    """给定 URL 和方法，输出完整调用链（前端调用者 + 后端处理链）"""
+    if not _rust_available():
+        return json.dumps({"error": "Rust core not available"})
+    from _core._core import trace_request
+    return trace_request(db_path, url, method, no_cross, no_cross_ffi)

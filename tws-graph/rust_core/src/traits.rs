@@ -130,10 +130,10 @@ pub enum NodeKind {
 }
 
 // ---------------------------------------------------------------------------
-// EdgeKind — 24 edge types for relationships
+// EdgeKind — 25 edge types for relationships
 // ---------------------------------------------------------------------------
 
-/// 24 relationship types between nodes in the code graph.
+/// 25 relationship types between nodes in the code graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EdgeKind {
     // --- structural (10) ---
@@ -177,14 +177,22 @@ pub enum EdgeKind {
     ListensOn,
 
     // --- cross-service (4) ---
-    /// HTTP call.
+    /// HTTP call (activated in v7.4 cross-tier tracing).
+    /// Created by CrossTierScanner during indexing from http_calls/http_routes tables
+    /// and consumed by GraphTraverser during cross-language trace/impact queries.
     HttpCalls,
-    /// gRPC service definition.
+    /// gRPC service definition (reserved — not yet activated).
     GrpcService,
-    /// gRPC client usage.
+    /// gRPC client usage (reserved — not yet activated).
     GrpcClient,
-    /// gRPC server registration.
+    /// gRPC server registration (reserved — not yet activated).
     GrpcServer,
+
+    // --- cross-language FFI (1) ---
+    /// FFI call (activated in v7.5 FFI cross-language tracing).
+    /// Created by FfiScanner during indexing from ffi_imports/ffi_exports tables
+    /// and consumed by GraphTraverser during cross-language FFI trace/impact queries.
+    CrossFfi,
 
     // --- analysis (3) ---
     /// Code clone similarity.
@@ -223,6 +231,7 @@ impl EdgeKind {
             Self::SimilarTo => "SIMILAR_TO",
             Self::TestEdge => "TEST_EDGE",
             Self::ConfigLink => "CONFIG_LINK",
+            Self::CrossFfi => "CROSS_FFI",
         }
     }
 }
