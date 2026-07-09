@@ -1274,7 +1274,7 @@ mod tests {
             let conn = db.connection();
 
             let version = MigrationRunner::current_version(conn).unwrap();
-            assert_eq!(version, 9);
+            assert_eq!(version, 10);
 
             let count: i64 = conn
                 .query_row(
@@ -1283,7 +1283,7 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(count, 9);
+            assert_eq!(count, 10);
         }
 
         cleanup(&path);

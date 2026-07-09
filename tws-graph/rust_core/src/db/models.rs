@@ -267,6 +267,97 @@ pub struct CrossLangEdgeRecord {
 }
 
 // ---------------------------------------------------------------------------
+// FfiImportRecord — a detected FFI import from source code
+// ---------------------------------------------------------------------------
+
+/// A detected FFI (Foreign Function Interface) import from source code.
+///
+/// Maps to the `ffi_imports` table (created by v010 migration).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FfiImportRecord {
+    /// Auto-increment primary key (`None` during construction).
+    pub id: Option<i64>,
+    /// The symbol name being imported via FFI.
+    pub symbol_name: String,
+    /// Rowid of the call node in `nodes` that performs the FFI import.
+    pub call_node_id: i64,
+    /// The import statement text, e.g. `extern "C" { fn foo(); }`.
+    pub import_stmt: Option<String>,
+    /// FFI framework: cffi / pyo3 / jni / napi / ffi / cpython / wasm / cgo / jna.
+    pub ffi_framework: String,
+    /// Source language of the calling code.
+    pub source_lang: String,
+    /// Project-relative file path.
+    pub file_path: String,
+    /// Start line number (1-based).
+    pub line: i64,
+    /// Start column number (1-based).
+    pub column: i64,
+    /// Raw source snippet for debugging.
+    pub raw_snippet: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// FfiExportRecord — a detected FFI export definition
+// ---------------------------------------------------------------------------
+
+/// A detected FFI (Foreign Function Interface) export definition.
+///
+/// Maps to the `ffi_exports` table (created by v010 migration).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FfiExportRecord {
+    /// Auto-increment primary key (`None` during construction).
+    pub id: Option<i64>,
+    /// The exported symbol name.
+    pub symbol_name: String,
+    /// Original (raw) symbol name before normalization.
+    pub symbol_name_raw: Option<String>,
+    /// Rowid of the function node in `nodes` that is exported via FFI.
+    pub func_node_id: i64,
+    /// FFI framework: cffi / pyo3 / jni / napi / ffi / cpython / wasm / cgo / jna.
+    pub ffi_framework: String,
+    /// Source language of the exporting code.
+    pub source_lang: String,
+    /// Project-relative file path.
+    pub file_path: String,
+    /// Start line number (1-based).
+    pub line: i64,
+    /// Start column number (1-based).
+    pub column: i64,
+    /// Raw source snippet for debugging.
+    pub raw_snippet: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// FfiCrossEdgeRecord — a matched FFI import ↔ FFI export pair
+// ---------------------------------------------------------------------------
+
+/// A cross-language edge linking an FFI import to an FFI export.
+///
+/// Maps to the `ffi_cross_edges` table (created by v010 migration).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FfiCrossEdgeRecord {
+    /// Auto-increment primary key (`None` during construction).
+    pub id: Option<i64>,
+    /// Source node id (the caller node that imports via FFI).
+    pub from_node_id: i64,
+    /// Target node id (the exported function node).
+    pub to_node_id: i64,
+    /// FK → ffi_imports.id.
+    pub ffi_import_id: i64,
+    /// FK → ffi_exports.id.
+    pub ffi_export_id: i64,
+    /// Edge kind — always "CROSS_FFI".
+    pub edge_kind: String,
+    /// The matched symbol name.
+    pub symbol_name: String,
+    /// FFI framework used for this edge.
+    pub ffi_framework: String,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

@@ -45,6 +45,8 @@ EXPECTED_MEMBERS: set[str] = {
     "INSTANTIATES",
     "DECORATES",
     "TYPE_REF",
+    # v7.5 FFI 跨语言追踪
+    "CROSS_FFI",
 }
 
 
@@ -73,14 +75,15 @@ EXPECTED_VALUES: dict[str, str] = {
     "INSTANTIATES": "instantiates",
     "DECORATES": "decorates",
     "TYPE_REF": "type_ref",
+    "CROSS_FFI": "cross_ffi",
 }
 
 
 class TestMembers:
-    """Verify all 20 members exist with correct values."""
+    """Verify all 25 members exist with correct values."""
 
-    def test_exactly_24_members(self):
-        assert len(EdgeKind) == 24
+    def test_exactly_25_members(self):
+        assert len(EdgeKind) == 25
 
     def test_all_expected_names_present(self):
         actual = set(EdgeKind.__members__.keys())
@@ -97,9 +100,15 @@ class TestMembers:
         assert member == expected_value
 
     def test_no_duplicate_values(self):
-        """All 20 values must be unique."""
+        """All 25 values must be unique."""
         values = [m.value for m in EdgeKind]
         assert len(values) == len(set(values))
+
+    def test_edge_kind_cross_ffi_value(self):
+        """Verify EdgeKind.CROSS_FFI.value == "cross_ffi"."""
+        assert EdgeKind.CROSS_FFI.value == "cross_ffi"
+        assert EdgeKind.CROSS_FFI == "cross_ffi"
+        assert EdgeKind("cross_ffi") is EdgeKind.CROSS_FFI
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +178,7 @@ class TestFromStr:
             ("similar_to", EdgeKind.SIMILAR_TO),
             ("test_edge", EdgeKind.TEST_EDGE),
             ("config_link", EdgeKind.CONFIG_LINK),
+            ("cross_ffi", EdgeKind.CROSS_FFI),
         ],
     )
     def test_from_str_valid(self, s: str, expected: EdgeKind):
@@ -237,7 +247,7 @@ class TestIterationAndMembership:
 
     def test_iter_all_members(self):
         members = list(EdgeKind)
-        assert len(members) == 24
+        assert len(members) == 25
 
     def test_contains_by_name(self):
         assert "CALLS" in EdgeKind.__members__

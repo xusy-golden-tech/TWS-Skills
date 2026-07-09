@@ -645,6 +645,7 @@ mod tests {
             EdgeKind::SimilarTo,
             EdgeKind::TestEdge,
             EdgeKind::ConfigLink,
+            EdgeKind::CrossFfi,
         ];
 
         for kind in &kinds {
