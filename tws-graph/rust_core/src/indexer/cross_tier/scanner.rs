@@ -291,6 +291,18 @@ impl CrossTierScanner {
                             &source, &tree, pattern, file_path, &ts_lang,
                         )
                     }
+                    // Phase 6: PHP Laravel routes
+                    PatternProcessor::LaravelRoute => {
+                        self.extract_laravel_routes(
+                            &source, &tree, pattern, file_path, &ts_lang,
+                        )
+                    }
+                    // Phase 6: Ruby on Rails routes
+                    PatternProcessor::RailsRoute => {
+                        self.extract_rails_routes(
+                            &source, &tree, pattern, file_path, &ts_lang,
+                        )
+                    }
                 };
 
                 match result {
@@ -1977,6 +1989,206 @@ impl CrossTierScanner {
     }
 
     // -----------------------------------------------------------------------
+    // Phase 6: PHP Laravel route extraction
+    // -----------------------------------------------------------------------
+
+    /// Extract HTTP routes from PHP Laravel `Route::get('/path', handler)` patterns.
+    ///
+    /// Uses tree-sitter Query to find `scoped_call_expression` nodes in PHP source
+    /// files and extracts the HTTP method from the method name and URL from the
+    /// first string argument.
+    fn extract_laravel_routes(
+        &self,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        pattern: &FrameworkPattern,
+        file_path: &str,
+        ts_lang: &tree_sitter::Language,
+    ) -> Result<ExtractResult, String> {
+        let query = Query::new(ts_lang, pattern.pattern)
+            .map_err(|e| format!("query compile failed for {}: {}", pattern.name, e))?;
+        let mut cursor = QueryCursor::new();
+        let source_bytes = source.as_bytes();
+
+        let mut matches = cursor.matches(&query, tree.root_node(), source_bytes);
+        let mut routes: Vec<HttpRouteRecord> = Vec::new();
+
+        let method_map: std::collections::HashMap<&str, &str> = [
+            ("get", "GET"),
+            ("post", "POST"),
+            ("put", "PUT"),
+            ("delete", "DELETE"),
+            ("patch", "PATCH"),
+            ("any", "ANY"),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        while let Some(m) = matches.next() {
+            let mut class_name: Option<String> = None;
+            let mut method_name: Option<String> = None;
+            let mut url_text: Option<String> = None;
+
+            for capture in m.captures {
+                let capture_name = &query.capture_names()[capture.index as usize];
+                let text = node_text(source_bytes, capture.node);
+
+                match *capture_name {
+                    "class_name" => class_name = Some(text.clone()),
+                    "method" => method_name = Some(text.to_lowercase()),
+                    "url" => url_text = Some(strip_quotes(&text)),
+                    _ => {}
+                }
+            }
+
+            // Must be Route::xxx
+            if class_name.as_deref() != Some("Route") {
+                continue;
+            }
+
+            let method = match method_name.as_deref() {
+                Some(m) => {
+                    match method_map.get(m) {
+                        Some(http_method) => http_method.to_string(),
+                        None => continue,
+                    }
+                }
+                None => continue,
+            };
+
+            let raw_path = match url_text {
+                Some(ref u) => u.clone(),
+                None => continue,
+            };
+
+            let normalized_url = normalizer::normalize_url(&raw_path, "laravel");
+
+            let func_node_id = self.find_and_resolve_func_rowid(
+                file_path, m.captures, source_bytes,
+            );
+
+            let start_pos = m.captures[0].node.start_position();
+
+            routes.push(HttpRouteRecord {
+                id: None,
+                url_pattern: normalized_url,
+                url_pattern_raw: raw_path,
+                http_method: method,
+                handler_node_id: func_node_id,
+                file_path: file_path.to_string(),
+                line: (start_pos.row + 1) as i64,
+                column: (start_pos.column + 1) as i64,
+                source_lang: "php".to_string(),
+                source_framework: Some("laravel".to_string()),
+                raw_snippet: Some(snippet(source_bytes, m.captures[0].node)),
+            });
+        }
+
+        if routes.is_empty() {
+            Ok(ExtractResult::None)
+        } else {
+            Ok(ExtractResult::Routes(routes))
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6: Ruby on Rails route extraction
+    // -----------------------------------------------------------------------
+
+    /// Extract HTTP routes from Ruby on Rails `get '/path', to: 'controller#action'` DSL.
+    ///
+    /// Uses tree-sitter Query to find `call` nodes in Ruby source files and
+    /// extracts the HTTP method (get/post/put/patch/delete) and URL path.
+    /// Non-HTTP-verb method calls are filtered out.
+    fn extract_rails_routes(
+        &self,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        pattern: &FrameworkPattern,
+        file_path: &str,
+        ts_lang: &tree_sitter::Language,
+    ) -> Result<ExtractResult, String> {
+        let query = Query::new(ts_lang, pattern.pattern)
+            .map_err(|e| format!("query compile failed for {}: {}", pattern.name, e))?;
+        let mut cursor = QueryCursor::new();
+        let source_bytes = source.as_bytes();
+
+        let mut matches = cursor.matches(&query, tree.root_node(), source_bytes);
+        let mut routes: Vec<HttpRouteRecord> = Vec::new();
+
+        let method_map: std::collections::HashMap<&str, &str> = [
+            ("get", "GET"),
+            ("post", "POST"),
+            ("put", "PUT"),
+            ("patch", "PATCH"),
+            ("delete", "DELETE"),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        while let Some(m) = matches.next() {
+            let mut method_name: Option<String> = None;
+            let mut url_text: Option<String> = None;
+
+            for capture in m.captures {
+                let capture_name = &query.capture_names()[capture.index as usize];
+                let text = node_text(source_bytes, capture.node);
+
+                match *capture_name {
+                    "method" => method_name = Some(text.to_lowercase()),
+                    "url" => url_text = Some(strip_quotes(&text)),
+                    _ => {}
+                }
+            }
+
+            let method = match method_name.as_deref() {
+                Some(m) => {
+                    match method_map.get(m) {
+                        Some(http_method) => http_method.to_string(),
+                        None => continue, // Not an HTTP verb — skip
+                    }
+                }
+                None => continue,
+            };
+
+            let raw_path = match url_text {
+                Some(ref u) => u.clone(),
+                None => continue,
+            };
+
+            let normalized_url = normalizer::normalize_url(&raw_path, "rails");
+
+            let func_node_id = self.find_and_resolve_func_rowid(
+                file_path, m.captures, source_bytes,
+            );
+
+            let start_pos = m.captures[0].node.start_position();
+
+            routes.push(HttpRouteRecord {
+                id: None,
+                url_pattern: normalized_url,
+                url_pattern_raw: raw_path,
+                http_method: method,
+                handler_node_id: func_node_id,
+                file_path: file_path.to_string(),
+                line: (start_pos.row + 1) as i64,
+                column: (start_pos.column + 1) as i64,
+                source_lang: "ruby".to_string(),
+                source_framework: Some("rails".to_string()),
+                raw_snippet: Some(snippet(source_bytes, m.captures[0].node)),
+            });
+        }
+
+        if routes.is_empty() {
+            Ok(ExtractResult::None)
+        } else {
+            Ok(ExtractResult::Routes(routes))
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // baseURL / router prefix collection
     // -----------------------------------------------------------------------
 
@@ -2848,6 +3060,24 @@ mod tests {
         assert!(!is_express_file("const app = express();"));
         assert!(!is_express_file("router.get('/users', handler);"));
         assert!(!is_express_file(""));
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 6: Ruby on Rails AST diagnostic
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_ruby_rails_ast_structure() {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_ruby::LANGUAGE.into())
+            .unwrap();
+        let source = "get '/users', to: 'users#index'\n";
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+        let sexp = root.to_sexp();
+        println!("Ruby AST:\n{}", sexp);
+        assert!(sexp.len() > 0);
     }
 
     // ------------------------------------------------------------------

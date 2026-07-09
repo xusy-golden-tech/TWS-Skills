@@ -276,6 +276,38 @@ pub const PATTERN_ASPNET_ATTRIBUTE: &str = r#"(attribute
 // Disambiguation is done via the PatternProcessor (GoNetHttp vs GinRoute).
 
 // ============================================================================
+// Phase 6: PHP Laravel route patterns
+// ============================================================================
+
+/// Match Laravel `Route::get('/path', handler)`, `Route::post('/path', handler)`.
+///
+/// PHP uses `scoped_call_expression` for static `::` calls.
+///
+/// Captures:
+/// - `@class_name` — name "Route"
+/// - `@method`     — name (get, post, put, delete, patch)
+/// - `@url`        — first string argument (the route path)
+pub const PATTERN_LARAVEL_ROUTE: &str = r#"(scoped_call_expression
+  scope: (name) @class_name
+  name: (name) @method
+  arguments: (arguments . (argument (string) @url)))"#;
+
+// ============================================================================
+// Phase 6: Ruby on Rails route patterns
+// ============================================================================
+
+/// Match Rails `get '/path', to: 'controller#action'` routing DSL.
+///
+/// Ruby uses `call` nodes for all method calls. The pattern matches:
+/// - `@method`  — identifier (get, post, put, patch, delete)
+/// - `@url`     — first string argument (the route path)
+///
+/// Non-HTTP-verb calls are filtered in the extractor.
+pub const PATTERN_RAILS_ROUTE: &str = r#"(call
+  method: (identifier) @method
+  arguments: (argument_list . (string) @url))"#;
+
+// ============================================================================
 // FrameworkPattern registry
 // ============================================================================
 
@@ -331,6 +363,11 @@ pub enum PatternProcessor {
     AspNetAttributeRoute,
     /// Process `http.HandleFunc("/path", handler)` — Go net/http standard library.
     GoNetHttp,
+    // ── Phase 6 ──
+    /// Process `Route::get('/path', handler)` — PHP Laravel route definition.
+    LaravelRoute,
+    /// Process `get '/path', to: 'controller#action'` — Ruby on Rails route DSL.
+    RailsRoute,
 }
 
 /// A framework-specific tree-sitter Query pattern for cross-tier extraction.
@@ -513,6 +550,22 @@ pub fn get_phase1_patterns() -> Vec<FrameworkPattern> {
             framework: "go_net_http",
             pattern: PATTERN_GIN_ROUTE,
             post_process: PatternProcessor::GoNetHttp,
+        },
+        // --- Phase 6: PHP Laravel (1 pattern) ---
+        FrameworkPattern {
+            name: "PATTERN_LARAVEL_ROUTE",
+            language: "php",
+            framework: "laravel",
+            pattern: PATTERN_LARAVEL_ROUTE,
+            post_process: PatternProcessor::LaravelRoute,
+        },
+        // --- Phase 6: Ruby on Rails (1 pattern) ---
+        FrameworkPattern {
+            name: "PATTERN_RAILS_ROUTE",
+            language: "ruby",
+            framework: "rails",
+            pattern: PATTERN_RAILS_ROUTE,
+            post_process: PatternProcessor::RailsRoute,
         },
     ]
 }
@@ -1165,9 +1218,9 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_get_phase1_patterns_returns_20() {
+    fn test_get_phase1_patterns_returns_22() {
         let patterns = get_phase1_patterns();
-        assert_eq!(patterns.len(), 20);
+        assert_eq!(patterns.len(), 22);
 
         // Count by language
         let ts_count = patterns.iter().filter(|p| p.language == "typescript").count();
@@ -1175,11 +1228,15 @@ mod tests {
         let java_count = patterns.iter().filter(|p| p.language == "java").count();
         let go_count = patterns.iter().filter(|p| p.language == "go").count();
         let csharp_count = patterns.iter().filter(|p| p.language == "csharp").count();
+        let php_count = patterns.iter().filter(|p| p.language == "php").count();
+        let ruby_count = patterns.iter().filter(|p| p.language == "ruby").count();
         assert_eq!(ts_count, 10);
         assert_eq!(py_count, 4);
         assert_eq!(java_count, 2);
         assert_eq!(go_count, 3);
         assert_eq!(csharp_count, 1);
+        assert_eq!(php_count, 1);
+        assert_eq!(ruby_count, 1);
 
         // Count by framework
         let axios_count = patterns.iter().filter(|p| p.framework == "axios").count();
@@ -1195,6 +1252,8 @@ mod tests {
         let echo_count = patterns.iter().filter(|p| p.framework == "echo").count();
         let aspnet_count = patterns.iter().filter(|p| p.framework == "aspnet").count();
         let gonethttp_count = patterns.iter().filter(|p| p.framework == "go_net_http").count();
+        let laravel_count = patterns.iter().filter(|p| p.framework == "laravel").count();
+        let rails_count = patterns.iter().filter(|p| p.framework == "rails").count();
         assert_eq!(axios_count, 3);
         assert_eq!(fetch_count, 2);
         assert_eq!(fastapi_count, 2);
@@ -1208,6 +1267,8 @@ mod tests {
         assert_eq!(echo_count, 1);
         assert_eq!(aspnet_count, 1);
         assert_eq!(gonethttp_count, 1);
+        assert_eq!(laravel_count, 1);
+        assert_eq!(rails_count, 1);
     }
 
     #[test]
@@ -1216,13 +1277,13 @@ mod tests {
         let mut names: Vec<&str> = patterns.iter().map(|p| p.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 20, "All pattern names should be unique");
+        assert_eq!(names.len(), 22, "All pattern names should be unique");
     }
 
     #[test]
     fn test_get_phase1_patterns_all_have_valid_language() {
         let patterns = get_phase1_patterns();
-        let valid_langs = ["typescript", "javascript", "python", "java", "go", "csharp"];
+        let valid_langs = ["typescript", "javascript", "python", "java", "go", "csharp", "php", "ruby"];
         for p in &patterns {
             assert!(
                 valid_langs.contains(&p.language),

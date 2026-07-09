@@ -76,7 +76,7 @@ pub fn normalize_url(url: &str, framework: &str) -> String {
             // Also handle Gin-style wildcards in Flask (rare but possible)
             GIN_WILDCARD_RE.replace_all(&s, "{$1}").to_string()
         }
-        "express" | "gin" | "echo" => {
+        "express" | "gin" | "echo" | "rails" => {
             // :user_id → {user_id}  (but do NOT catch *wildcard, handled next)
             let s = EXPRESS_RE.replace_all(url, "{$1}").to_string();
             // *filepath → {filepath}
