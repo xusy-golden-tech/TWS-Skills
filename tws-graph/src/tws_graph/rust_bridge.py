@@ -465,6 +465,15 @@ def rust_routes(db_path: str, unmatched: bool = False, url_filter: Optional[str]
     return routes(db_path, unmatched, url_filter, method_filter, json_output)
 
 
+def rust_exports(db_path: str, framework: Optional[str] = None,
+                 unused_only: bool = False, json_output: bool = False) -> str:
+    """列出所有检测到的 FFI 导出符号及其调用者"""
+    if not _rust_available():
+        return json.dumps({"error": "Rust core not available"})
+    from _core._core import exports
+    return exports(db_path, framework, unused_only, json_output)
+
+
 def rust_trace_request(db_path: str, url: str, method: str = "GET",
                        no_cross: bool = False,
                        no_cross_ffi: bool = False) -> str:

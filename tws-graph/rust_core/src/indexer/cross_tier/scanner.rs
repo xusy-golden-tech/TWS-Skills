@@ -422,6 +422,12 @@ impl CrossTierScanner {
         root: &Path,
         files: &[String],
     ) -> Result<FfiScanResult, String> {
+        // Clear existing FFI data for a clean rebuild
+        let conn = self.db.connection();
+        conn.execute_batch(
+            "DELETE FROM ffi_cross_edges; DELETE FROM ffi_imports; DELETE FROM ffi_exports;"
+        ).map_err(|e| format!("scan_ffi: failed to clear old FFI data: {}", e))?;
+
         let mut all_exports: Vec<FfiExportRecord> = Vec::new();
         let mut all_imports: Vec<FfiImportRecord> = Vec::new();
         let mut parser_pool = ParserPool::new();
@@ -501,6 +507,27 @@ impl CrossTierScanner {
         let exports_count = all_exports.len();
         let imports_count = all_imports.len();
 
+        // Resolve node IDs: look up actual node rowids from the nodes table.
+        // The extractors set func_node_id=0 / call_node_id=0 because they
+        // don't have DB access. We fill them here before insertion.
+        let node_id_map = self.build_node_rowid_map()
+            .map_err(|e| format!("scan_ffi: node rowid lookup failed: {}", e))?;
+
+        for export in &mut all_exports {
+            export.func_node_id = node_id_map
+                .get(&(export.file_path.clone(), export.line, "function".to_string()))
+                .copied()
+                .unwrap_or(0);
+        }
+
+        for import in &mut all_imports {
+            // For imports, find the enclosing function in the same file
+            // (the function that contains the import statement)
+            import.call_node_id = self.find_enclosing_node_rowid(
+                &import.file_path, import.line, &node_id_map,
+            );
+        }
+
         // Phase 2: batch insert exports and imports into database
         if !all_exports.is_empty() {
             self.db
@@ -538,6 +565,63 @@ impl CrossTierScanner {
             exports_count,
             edges_count: match_result.total,
         })
+    }
+
+    /// Build a map of (file_path, line, kind) → node rowid for quick lookup.
+    ///
+    /// Only indexes function/method nodes — the only kinds that FFI edges
+    /// connect to.
+    fn build_node_rowid_map(&self) -> Result<HashMap<(String, i64, String), i64>, String> {
+        let conn = self.db.connection();
+        let mut stmt = conn
+            .prepare(
+                "SELECT rowid, file_path, start_line, kind FROM nodes \
+                 WHERE kind IN ('function', 'method')",
+            )
+            .map_err(|e| format!("build_node_rowid_map: prepare failed: {}", e))?;
+
+        let mut map: HashMap<(String, i64, String), i64> = HashMap::new();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| format!("build_node_rowid_map: query failed: {}", e))?;
+
+        for row in rows {
+            if let Ok((rowid, file_path, start_line, kind)) = row {
+                map.insert((file_path, start_line, kind), rowid);
+            }
+        }
+
+        Ok(map)
+    }
+
+    /// Find the rowid of the enclosing function node for an import line.
+    ///
+    /// Strategy: find the function whose start_line is the largest
+    /// value <= `import_line` for the given file.
+    fn find_enclosing_node_rowid(
+        &self,
+        file_path: &str,
+        import_line: i64,
+        node_id_map: &HashMap<(String, i64, String), i64>,
+    ) -> i64 {
+        let mut best_line: i64 = 0;
+        let mut best_rowid: i64 = 0;
+
+        for ((fp, start_line, _kind), rowid) in node_id_map {
+            if fp == file_path && *start_line <= import_line && *start_line > best_line {
+                best_line = *start_line;
+                best_rowid = *rowid;
+            }
+        }
+
+        best_rowid
     }
 
     // -----------------------------------------------------------------------

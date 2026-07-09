@@ -1159,6 +1159,97 @@ fn routes(db_path: &str, unmatched: Option<bool>, url_filter: Option<&str>, meth
     Ok(out)
 }
 
+/// List all detected FFI export symbols and their caller counts.
+/// Supports filtering by framework, unused-only mode, and JSON output.
+#[pyfunction]
+#[pyo3(signature = (db_path, framework=None, unused_only=None, json_output=None))]
+fn exports(db_path: &str, framework: Option<&str>, unused_only: Option<bool>, json_output: Option<bool>) -> PyResult<String> {
+    let db = open_db(db_path)?;
+    let exports_with_callers = db.get_ffi_exports_with_caller_count()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+    // Filter by framework
+    let mut filtered: Vec<_> = if let Some(fw) = framework {
+        exports_with_callers.into_iter()
+            .filter(|(rec, _)| rec.ffi_framework.eq_ignore_ascii_case(fw))
+            .collect()
+    } else {
+        exports_with_callers
+    };
+
+    // Filter unused only
+    if unused_only.unwrap_or(false) {
+        filtered.retain(|(_, count)| *count == 0);
+    }
+
+    // Sort by source_lang, then symbol_name
+    filtered.sort_by(|(a, _), (b, _)| {
+        a.source_lang.cmp(&b.source_lang)
+            .then(a.symbol_name.cmp(&b.symbol_name))
+    });
+
+    let total = filtered.len();
+    let with_callers = filtered.iter().filter(|(_, c)| *c > 0).count();
+    let unused_count = total - with_callers;
+
+    // JSON output
+    if json_output.unwrap_or(false) {
+        let items: Vec<serde_json::Value> = filtered.iter().map(|(rec, count)| {
+            serde_json::json!({
+                "symbol_name": rec.symbol_name,
+                "ffi_framework": rec.ffi_framework,
+                "source_lang": rec.source_lang,
+                "file_path": rec.file_path,
+                "line": rec.line,
+                "callers": count,
+                "symbol_name_raw": rec.symbol_name_raw,
+            })
+        }).collect();
+        let output = serde_json::json!({
+            "exports": items,
+            "stats": {
+                "total": total,
+                "with_callers": with_callers,
+                "unused": unused_count,
+            }
+        });
+        return serde_json::to_string_pretty(&output)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()));
+    }
+
+    // Table output
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<12} {:<30} {:<8} {:<50}\n",
+        "LANGUAGE", "EXPORT SYMBOL", "CALLERS", "LOCATION"
+    ));
+    out.push_str(&format!("{:-<12} {:-<30} {:-<8} {:-<50}\n", "", "", "", ""));
+
+    for (rec, count) in &filtered {
+        let location = format!("{}:{}", rec.file_path, rec.line);
+        let location_display = if location.len() > 50 {
+            format!("{}...", &location[..47])
+        } else {
+            location
+        };
+        out.push_str(&format!(
+            "{:<12} {:<30} {:<8} {:<50}\n",
+            rec.source_lang,
+            if rec.symbol_name.len() > 30 { format!("{}...", &rec.symbol_name[..27]) } else { rec.symbol_name.clone() },
+            count,
+            location_display,
+        ));
+    }
+
+    out.push_str("\n");
+    out.push_str(&format!(
+        "Total: {} exports, {} have callers, {} unused\n",
+        total, with_callers, unused_count,
+    ));
+
+    Ok(out)
+}
+
 /// Trace the complete call chain for a given URL + HTTP method.
 /// Finds matching HTTP calls (frontend) and routes (backend), then traces
 /// between the involved functions using the GraphTraverser.
@@ -2063,6 +2154,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Cross-tier
     m.add_function(wrap_pyfunction!(routes, m)?)?;
     m.add_function(wrap_pyfunction!(trace_request, m)?)?;
+    m.add_function(wrap_pyfunction!(exports, m)?)?;
 
     // Resolution
     m.add_function(wrap_pyfunction!(resolve_refs, m)?)?;

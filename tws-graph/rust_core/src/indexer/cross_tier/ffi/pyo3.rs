@@ -73,7 +73,7 @@ fn collect_rust_exports(
             if child.kind() == "attribute_item" {
                 let attr_name = get_attribute_name(child, source);
                 // Check if the next named sibling is the item this attribute decorates
-                if let Some(next) = next_named_sibling(node, i) {
+                if let Some(next) = next_named_sibling_skip_attrs(node, i) {
                     match (attr_name.as_deref(), next.kind()) {
                         (Some("pyfunction"), "function_item") => {
                             let func_name = extract_rust_func_name(next, source);
@@ -114,11 +114,23 @@ fn collect_rust_exports(
     }
 }
 
-/// Get the next named sibling at the same level, if any.
-fn next_named_sibling<'a>(parent: &Node<'a>, idx: usize) -> Option<Node<'a>> {
-    // Find the next named child after idx
+/// Get the next named sibling at the same level, skipping over other
+/// attribute_items. This handles cases like:
+/// ```
+/// #[pyfunction]
+/// #[pyo3(signature = (...))]
+/// fn my_func() { ... }
+/// ```
+/// where a second `attribute_item` sits between `#[pyfunction]` and the
+/// function/item that it decorates.
+fn next_named_sibling_skip_attrs<'a>(parent: &Node<'a>, idx: usize) -> Option<Node<'a>> {
     for j in (idx + 1)..parent.named_child_count() {
-        return parent.named_child(j);
+        if let Some(sibling) = parent.named_child(j) {
+            if sibling.kind() == "attribute_item" {
+                continue;
+            }
+            return Some(sibling);
+        }
     }
     None
 }

@@ -420,6 +420,27 @@ def routes(
 
 
 # ============================================================================
+# exports
+# ============================================================================
+
+@app.command("exports")
+def exports_cmd(
+    framework: Optional[str] = typer.Option(None, "--framework", help="按 FFI 框架过滤（pyo3, cgo）"),
+    unused: bool = typer.Option(False, "--unused", help="仅显示无调用者的导出"),
+    json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
+    db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
+):
+    """列出所有检测到的 FFI 导出符号及其调用者"""
+    resolved_db = os.path.abspath(db_path or DEFAULT_DB)
+    if not os.path.exists(resolved_db):
+        typer.echo("错误：索引数据库不存在，请先运行 tws-graph index")
+        raise typer.Exit(code=1)
+    from .rust_bridge import rust_exports
+    result = rust_exports(resolved_db, framework=framework, unused_only=unused, json_output=json_output)
+    typer.echo(result)
+
+
+# ============================================================================
 # trace-request
 # ============================================================================
 
