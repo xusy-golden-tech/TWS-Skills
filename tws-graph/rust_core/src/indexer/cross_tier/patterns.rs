@@ -99,7 +99,7 @@ pub const PATTERN_FASTAPI_DECORATOR: &str = r#"(decorator
     function: (attribute
       object: (identifier) @app
       attribute: (identifier) @method)
-    arguments: (argument_list . (string) @path .)))"#;
+    arguments: (argument_list . (string) @path)))"#;
 
 /// Match Flask route decorators:
 /// `@app.route('/users', methods=['GET'])`,

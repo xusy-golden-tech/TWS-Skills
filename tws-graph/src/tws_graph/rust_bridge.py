@@ -38,7 +38,7 @@ def rust_index(db_path: str, project_root: str, twsignore_path: str | None = Non
         no_cross_tier: If True, skip cross-tier HTTP call/route scanning phase.
     """
     from _core._core import index
-    return index(db_path, project_root, twsignore_path, include_patterns, exclude_patterns, no_cross_tier)
+    return index(db_path, project_root, twsignore_path, no_cross_tier, include_patterns, exclude_patterns)
 
 
 def rust_search(db_path: str, query: str, limit: int = 50,

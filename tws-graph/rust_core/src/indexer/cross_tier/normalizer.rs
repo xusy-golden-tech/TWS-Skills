@@ -155,6 +155,34 @@ pub fn normalize_trailing_slash(url: &str) -> String {
     }
 }
 
+/// Extract the path component from a potentially full HTTP URL.
+///
+/// If the URL starts with `http://` or `https://`, the scheme and authority
+/// (host:port) are stripped, leaving only the path (and query string, if any).
+/// URLs that are already relative paths are returned unchanged.
+///
+/// # Examples
+/// ```
+/// assert_eq!(extract_url_path("http://127.0.0.1:8000/tasks/"), "/tasks/");
+/// assert_eq!(extract_url_path("https://api.example.com/v1/users"), "/v1/users");
+/// assert_eq!(extract_url_path("/api/tasks"), "/api/tasks");
+/// assert_eq!(extract_url_path("http://localhost"), "/");
+/// ```
+pub fn extract_url_path(url: &str) -> String {
+    for scheme in &["http://", "https://"] {
+        if let Some(rest) = url.strip_prefix(scheme) {
+            // Find the first '/' after host:port
+            if let Some(pos) = rest.find('/') {
+                return rest[pos..].to_string();
+            }
+            // No path at all (e.g. "http://localhost") → root
+            return "/".to_string();
+        }
+    }
+    // Already a relative path — return unchanged
+    url.to_string()
+}
+
 /// Heuristically detect a web framework based on file path and source code content.
 ///
 /// First inspects import/dependency patterns in the source code (most reliable),
@@ -776,6 +804,62 @@ mod tests {
         assert_eq!(
             normalize("items/(?P<cat>\\w+)/(?P<id>\\d+)/", "django"),
             "items/{cat}/{id}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_url_path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_url_path_http_full() {
+        assert_eq!(
+            extract_url_path("http://127.0.0.1:8000/tasks/"),
+            "/tasks/"
+        );
+    }
+
+    #[test]
+    fn test_extract_url_path_https_full() {
+        assert_eq!(
+            extract_url_path("https://api.example.com/v1/users"),
+            "/v1/users"
+        );
+    }
+
+    #[test]
+    fn test_extract_url_path_already_relative() {
+        assert_eq!(extract_url_path("/api/tasks"), "/api/tasks");
+    }
+
+    #[test]
+    fn test_extract_url_path_root_only() {
+        assert_eq!(extract_url_path("/"), "/");
+    }
+
+    #[test]
+    fn test_extract_url_path_no_path() {
+        assert_eq!(extract_url_path("http://localhost"), "/");
+    }
+
+    #[test]
+    fn test_extract_url_path_https_no_path() {
+        assert_eq!(extract_url_path("https://example.com"), "/");
+    }
+
+    #[test]
+    fn test_extract_url_path_with_query_string() {
+        assert_eq!(
+            extract_url_path("http://127.0.0.1:8000/api/tasks?page=1&limit=10"),
+            "/api/tasks?page=1&limit=10"
+        );
+    }
+
+    #[test]
+    fn test_extract_url_path_https_with_port() {
+        assert_eq!(
+            extract_url_path("https://api.example.com:443/v2/users/123/profile"),
+            "/v2/users/123/profile"
         );
     }
 }

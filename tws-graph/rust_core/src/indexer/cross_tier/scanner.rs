@@ -386,6 +386,9 @@ impl CrossTierScanner {
             let start_pos = m.captures[0].node.start_position();
             let is_template = matches!(pattern.post_process, PatternProcessor::TemplateString);
 
+            // Normalize full URLs to path-only (e.g. http://host:port/path → /path)
+            let url = normalizer::extract_url_path(&url);
+
             calls.push(HttpCallRecord {
                 id: None,
                 url,
@@ -476,6 +479,9 @@ impl CrossTierScanner {
 
             let func_node_id = self.find_and_resolve_func_rowid(file_path, m.captures, source_bytes);
             let start_pos = m.captures[0].node.start_position();
+
+            // Normalize full URLs to path-only (e.g. http://host:port/path → /path)
+            let url = normalizer::extract_url_path(&url);
 
             calls.push(HttpCallRecord {
                 id: None,
@@ -628,6 +634,7 @@ impl CrossTierScanner {
 
         while let Some(m) = matches.next() {
             let mut path_str: Option<String> = None;
+            let mut route_attr_str: Option<String> = None;
             let mut match_node: Option<Node> = None;
 
             for capture in m.captures {
@@ -636,11 +643,21 @@ impl CrossTierScanner {
 
                 if *capture_name == "path" {
                     path_str = Some(strip_quotes(&text));
+                } else if *capture_name == "route_attr" {
+                    route_attr_str = Some(text.clone());
                 }
 
                 // Track the captured node for parent traversal
                 if match_node.is_none() {
                     match_node = Some(capture.node);
+                }
+            }
+
+            // Skip non-Flask decorators (e.g. FastAPI's @app.get which also matches
+            // structurally but uses HTTP method names instead of "route").
+            if let Some(ref attr) = route_attr_str {
+                if attr != "route" {
+                    continue;
                 }
             }
 
