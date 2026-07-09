@@ -23,7 +23,8 @@ def _rust_available() -> bool:
 def rust_index(db_path: str, project_root: str, twsignore_path: str | None = None,
                include_patterns: list[str] | None = None,
                exclude_patterns: list[str] | None = None,
-               no_cross_tier: bool = False) -> str:
+               no_cross_tier: bool = False,
+               no_cross_ffi: bool = False) -> str:
     """Run index using Rust core. Returns summary string.
 
     Args:
@@ -36,9 +37,10 @@ def rust_index(db_path: str, project_root: str, twsignore_path: str | None = Non
         exclude_patterns: Optional list of glob patterns. Files matching
             any pattern are excluded from indexing.
         no_cross_tier: If True, skip cross-tier HTTP call/route scanning phase.
+        no_cross_ffi: If True, skip cross-tier FFI import/export scanning phase.
     """
     from _core._core import index
-    return index(db_path, project_root, twsignore_path, no_cross_tier, include_patterns, exclude_patterns)
+    return index(db_path, project_root, twsignore_path, no_cross_tier, no_cross_ffi, include_patterns, exclude_patterns)
 
 
 def rust_search(db_path: str, query: str, limit: int = 50,

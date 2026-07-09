@@ -13,3 +13,4 @@ pub mod patterns;
 pub mod normalizer;
 pub mod matcher;
 pub mod scanner;
+pub mod ffi;

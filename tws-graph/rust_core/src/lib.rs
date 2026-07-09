@@ -277,8 +277,16 @@ fn index_one_file<'conn>(
 /// `""` to suppress ignore rules entirely (the scanner will not load any
 /// `.twsignore`).
 #[pyfunction]
-#[pyo3(signature = (db_path, root, twsignore_path=None, no_cross_tier=None, include_patterns=None, exclude_patterns=None))]
-fn index(db_path: &str, root: &str, twsignore_path: Option<&str>, no_cross_tier: Option<bool>, include_patterns: Option<Vec<String>>, exclude_patterns: Option<Vec<String>>) -> PyResult<String> {
+#[pyo3(signature = (db_path, root, twsignore_path=None, no_cross_tier=None, no_cross_ffi=None, include_patterns=None, exclude_patterns=None))]
+fn index(
+    db_path: &str,
+    root: &str,
+    twsignore_path: Option<&str>,
+    no_cross_tier: Option<bool>,
+    no_cross_ffi: Option<bool>,
+    include_patterns: Option<Vec<String>>,
+    exclude_patterns: Option<Vec<String>>,
+) -> PyResult<String> {
     let db = init_db(db_path)?;
     let root_path = Path::new(root);
 
@@ -437,16 +445,55 @@ fn index(db_path: &str, root: &str, twsignore_path: Option<&str>, no_cross_tier:
             None
         };
 
+        // FFI cross-tier scan (after HTTP cross-tier scan)
+        let ffi_stats = if !no_cross_ffi.unwrap_or(false) {
+            let ffi_db = open_db(db_path)?;
+            let mut ffi_scanner = crate::indexer::cross_tier::scanner::CrossTierScanner::new(ffi_db);
+            match ffi_scanner.scan_ffi(root_path, &indexed_file_paths) {
+                Ok(stats) => {
+                    log::info!(
+                        "FFI scan: {} imports, {} exports, {} cross-edges",
+                        stats.imports_count,
+                        stats.exports_count,
+                        stats.edges_count
+                    );
+                    Some(stats)
+                }
+                Err(e) => {
+                    log::warn!("FFI scan failed: {}, continuing without FFI data", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         if let Some(ref stats) = cross_tier_stats {
+            let ffi_msg = match &ffi_stats {
+                Some(ffi) => format!(
+                    "\nFFI: {} imports, {} exports, {} cross-edges",
+                    ffi.imports_count, ffi.exports_count, ffi.edges_count
+                ),
+                None => String::new(),
+            };
             Ok(format!(
-                "Index complete: {} files, {} nodes, {} edges (parallel)\nCross-tier: {} HTTP calls, {} HTTP routes, {} cross-lang edges",
+                "Index complete: {} files, {} nodes, {} edges (parallel)\nCross-tier: {} HTTP calls, {} HTTP routes, {} cross-lang edges{}",
                 file_count, total_nodes, total_edges,
-                stats.http_calls_count, stats.http_routes_count, stats.cross_lang_edges_count
+                stats.http_calls_count, stats.http_routes_count, stats.cross_lang_edges_count,
+                ffi_msg
             ))
         } else {
+            let ffi_msg = match &ffi_stats {
+                Some(ffi) => format!(
+                    "\nFFI: {} imports, {} exports, {} cross-edges",
+                    ffi.imports_count, ffi.exports_count, ffi.edges_count
+                ),
+                None => String::new(),
+            };
             Ok(format!(
-                "Index complete: {} files, {} nodes, {} edges (parallel)",
-                file_count, total_nodes, total_edges
+                "Index complete: {} files, {} nodes, {} edges (parallel){}",
+                file_count, total_nodes, total_edges,
+                ffi_msg
             ))
         }
     } else {
@@ -529,16 +576,55 @@ fn index(db_path: &str, root: &str, twsignore_path: Option<&str>, no_cross_tier:
             None
         };
 
+        // FFI cross-tier scan (after HTTP cross-tier scan)
+        let ffi_stats = if !no_cross_ffi.unwrap_or(false) {
+            let ffi_db = open_db(db_path)?;
+            let mut ffi_scanner = crate::indexer::cross_tier::scanner::CrossTierScanner::new(ffi_db);
+            match ffi_scanner.scan_ffi(root_path, &indexed_file_paths) {
+                Ok(stats) => {
+                    log::info!(
+                        "FFI scan: {} imports, {} exports, {} cross-edges",
+                        stats.imports_count,
+                        stats.exports_count,
+                        stats.edges_count
+                    );
+                    Some(stats)
+                }
+                Err(e) => {
+                    log::warn!("FFI scan failed: {}, continuing without FFI data", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         if let Some(ref stats) = cross_tier_stats {
+            let ffi_msg = match &ffi_stats {
+                Some(ffi) => format!(
+                    "\nFFI: {} imports, {} exports, {} cross-edges",
+                    ffi.imports_count, ffi.exports_count, ffi.edges_count
+                ),
+                None => String::new(),
+            };
             Ok(format!(
-                "Index complete: {} files, {} nodes, {} edges\nCross-tier: {} HTTP calls, {} HTTP routes, {} cross-lang edges",
+                "Index complete: {} files, {} nodes, {} edges\nCross-tier: {} HTTP calls, {} HTTP routes, {} cross-lang edges{}",
                 file_count, total_nodes, total_edges,
-                stats.http_calls_count, stats.http_routes_count, stats.cross_lang_edges_count
+                stats.http_calls_count, stats.http_routes_count, stats.cross_lang_edges_count,
+                ffi_msg
             ))
         } else {
+            let ffi_msg = match &ffi_stats {
+                Some(ffi) => format!(
+                    "\nFFI: {} imports, {} exports, {} cross-edges",
+                    ffi.imports_count, ffi.exports_count, ffi.edges_count
+                ),
+                None => String::new(),
+            };
             Ok(format!(
-                "Index complete: {} files, {} nodes, {} edges",
-                file_count, total_nodes, total_edges
+                "Index complete: {} files, {} nodes, {} edges{}",
+                file_count, total_nodes, total_edges,
+                ffi_msg
             ))
         }
     }

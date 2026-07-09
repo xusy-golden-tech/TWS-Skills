@@ -45,6 +45,26 @@ pub struct CrossTierStats {
     pub http_routes_count: usize,
     /// Number of cross-language edges created.
     pub cross_lang_edges_count: usize,
+    /// Number of FFI imports detected and inserted.
+    pub ffi_imports_count: usize,
+    /// Number of FFI exports detected and inserted.
+    pub ffi_exports_count: usize,
+    /// Number of FFI cross-edges created.
+    pub ffi_cross_edges_count: usize,
+}
+
+// ============================================================================
+// FfiScanResult — statistics for FFI scanning phase
+// ============================================================================
+
+/// Statistics returned after a successful FFI scan.
+pub struct FfiScanResult {
+    /// Number of FFI imports detected and inserted.
+    pub imports_count: usize,
+    /// Number of FFI exports detected and inserted.
+    pub exports_count: usize,
+    /// Number of FFI cross-edges created.
+    pub edges_count: usize,
 }
 
 // ============================================================================
@@ -372,6 +392,36 @@ impl CrossTierScanner {
             http_calls_count: calls_with_ids.len(),
             http_routes_count: routes_with_ids.len(),
             cross_lang_edges_count: edge_count,
+            ffi_imports_count: 0,
+            ffi_exports_count: 0,
+            ffi_cross_edges_count: 0,
+        })
+    }
+
+    /// Scan source files for FFI (Foreign Function Interface) imports and exports.
+    ///
+    /// This method runs after the HTTP cross-tier scan. In the current phase (skeleton),
+    /// it performs no actual extraction — it returns an empty result that serves as
+    /// a hook point for future PyO3/CGo/JNA extractors.
+    ///
+    /// # Arguments
+    /// * `_root` — Project root directory.
+    /// * `_files` — List of indexed file paths (relative to project root).
+    ///
+    /// # Returns
+    /// `FfiScanResult` with all counts set to 0 (empty skeleton).
+    pub fn scan_ffi(
+        &mut self,
+        _root: &Path,
+        _files: &[String],
+    ) -> Result<FfiScanResult, String> {
+        // Phase B2 skeleton: no actual extraction yet.
+        // Future phases will iterate over files, detect languages,
+        // extract FFI import/export records, and create cross-edges.
+        Ok(FfiScanResult {
+            imports_count: 0,
+            exports_count: 0,
+            edges_count: 0,
         })
     }
 
@@ -2992,10 +3042,16 @@ mod tests {
             http_calls_count: 5,
             http_routes_count: 3,
             cross_lang_edges_count: 2,
+            ffi_imports_count: 0,
+            ffi_exports_count: 0,
+            ffi_cross_edges_count: 0,
         };
         assert_eq!(stats.http_calls_count, 5);
         assert_eq!(stats.http_routes_count, 3);
         assert_eq!(stats.cross_lang_edges_count, 2);
+        assert_eq!(stats.ffi_imports_count, 0);
+        assert_eq!(stats.ffi_exports_count, 0);
+        assert_eq!(stats.ffi_cross_edges_count, 0);
     }
 
     #[test]
@@ -3174,5 +3230,31 @@ mod tests {
             }
         }
         assert_eq!(url, "/api/users/create");
+    }
+
+    // ------------------------------------------------------------------
+    // FFI scan skeleton tests
+    // ------------------------------------------------------------------
+
+    /// Test that scan_ffi() returns an empty result (skeleton phase).
+    #[test]
+    fn test_scan_ffi_skeleton_returns_empty() {
+        use crate::db::Database;
+        use std::path::Path;
+
+        // Create a temporary file-based database
+        let db_path = Path::new("test_scan_ffi_skeleton.db");
+        let _ = std::fs::remove_file(db_path);
+        let db = Database::initialize(db_path).unwrap();
+        let mut scanner = CrossTierScanner::new(db);
+        let root = Path::new("/fake/root");
+        let files: Vec<String> = vec![];
+
+        let result = scanner.scan_ffi(root, &files).unwrap();
+        assert_eq!(result.imports_count, 0);
+        assert_eq!(result.exports_count, 0);
+        assert_eq!(result.edges_count, 0);
+
+        let _ = std::fs::remove_file(db_path);
     }
 }

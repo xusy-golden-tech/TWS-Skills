@@ -167,6 +167,7 @@ def index(
     force: bool = typer.Option(False, "--force", help="强制全量重建索引（跳过 content-hash 检查）"),
     deep: bool = typer.Option(False, "--deep", help="启用深度分析（代码克隆检测 similar_to 边，耗时较长）"),
     no_cross_tier: bool = typer.Option(False, "--no-cross-tier", help="跳过跨层 HTTP 调用/路由扫描阶段"),
+    no_cross_ffi: bool = typer.Option(False, "--no-cross-ffi", help="跳过跨层 FFI 导入/导出扫描阶段"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径（默认: 项目目录/.tws/codegraph/index.db）"),
     twsignore: Optional[str] = typer.Option(None, "--twsignore", help=".twsignore 文件路径（默认: 项目根/.twsignore；传空串禁用忽略规则）"),
     include_patterns: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
@@ -196,7 +197,8 @@ def index(
     typer.echo(f"正在索引: {root_dir}")
     _t0 = _time.time()
     result = rust_index(str(db_path_resolved), str(root_dir), twsignore_resolved,
-                        include_patterns, exclude_patterns, no_cross_tier=no_cross_tier)
+                        include_patterns, exclude_patterns, no_cross_tier=no_cross_tier,
+                        no_cross_ffi=no_cross_ffi)
     _duration_ms = int((_time.time() - _t0) * 1000)
     # Populate files table from nodes (Rust index fills nodes but not files)
     store = _get_store(db_path_resolved)

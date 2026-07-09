@@ -6,7 +6,10 @@
 //! (``tws_graph/store/connection.py``) exactly.
 
 use crate::db::migrations::MigrationRunner;
-use crate::db::models::{CrossLangEdgeRecord, HttpCallRecord, HttpRouteRecord};
+use crate::db::models::{
+    CrossLangEdgeRecord, FfiCrossEdgeRecord, FfiExportRecord, FfiImportRecord, HttpCallRecord,
+    HttpRouteRecord,
+};
 use crate::query::NodeInfo;
 use rusqlite::{Connection, Result};
 use sha2::{Digest, Sha256};
@@ -796,6 +799,237 @@ impl Database {
             rusqlite::params![role, node_rowid],
         )?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-tier: ffi_imports
+    // -----------------------------------------------------------------------
+
+    /// Insert a single FFI import record.
+    ///
+    /// Returns the new row ID on success.
+    pub fn insert_ffi_import(&self, record: &FfiImportRecord) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO ffi_imports (symbol_name, call_node_id, import_stmt, ffi_framework, \
+             source_lang, file_path, line, column, raw_snippet) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                record.symbol_name,
+                record.call_node_id,
+                record.import_stmt,
+                record.ffi_framework,
+                record.source_lang,
+                record.file_path,
+                record.line,
+                record.column,
+                record.raw_snippet,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Batch-insert FFI import records in a single transaction.
+    ///
+    /// Returns the number of rows inserted.
+    pub fn batch_insert_ffi_imports(&self, records: &[FfiImportRecord]) -> Result<usize> {
+        self.conn.execute_batch("BEGIN TRANSACTION")?;
+        let mut count = 0;
+        for record in records {
+            self.insert_ffi_import(record)?;
+            count += 1;
+        }
+        self.conn.execute_batch("COMMIT")?;
+        Ok(count)
+    }
+
+    /// Get all FFI import records.
+    pub fn get_all_ffi_imports(&self) -> Result<Vec<FfiImportRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, symbol_name, call_node_id, import_stmt, ffi_framework, \
+             source_lang, file_path, line, column, raw_snippet FROM ffi_imports",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(FfiImportRecord {
+                id: Some(row.get(0)?),
+                symbol_name: row.get(1)?,
+                call_node_id: row.get(2)?,
+                import_stmt: row.get(3)?,
+                ffi_framework: row.get(4)?,
+                source_lang: row.get(5)?,
+                file_path: row.get(6)?,
+                line: row.get(7)?,
+                column: row.get(8)?,
+                raw_snippet: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-tier: ffi_exports
+    // -----------------------------------------------------------------------
+
+    /// Insert a single FFI export record.
+    ///
+    /// Returns the new row ID on success.
+    pub fn insert_ffi_export(&self, record: &FfiExportRecord) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO ffi_exports (symbol_name, symbol_name_raw, func_node_id, ffi_framework, \
+             source_lang, file_path, line, column, raw_snippet) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                record.symbol_name,
+                record.symbol_name_raw,
+                record.func_node_id,
+                record.ffi_framework,
+                record.source_lang,
+                record.file_path,
+                record.line,
+                record.column,
+                record.raw_snippet,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Batch-insert FFI export records in a single transaction.
+    ///
+    /// Returns the number of rows inserted.
+    pub fn batch_insert_ffi_exports(&self, records: &[FfiExportRecord]) -> Result<usize> {
+        self.conn.execute_batch("BEGIN TRANSACTION")?;
+        let mut count = 0;
+        for record in records {
+            self.insert_ffi_export(record)?;
+            count += 1;
+        }
+        self.conn.execute_batch("COMMIT")?;
+        Ok(count)
+    }
+
+    /// Get all FFI export records.
+    pub fn get_all_ffi_exports(&self) -> Result<Vec<FfiExportRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, symbol_name, symbol_name_raw, func_node_id, ffi_framework, \
+             source_lang, file_path, line, column, raw_snippet FROM ffi_exports",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(FfiExportRecord {
+                id: Some(row.get(0)?),
+                symbol_name: row.get(1)?,
+                symbol_name_raw: row.get(2)?,
+                func_node_id: row.get(3)?,
+                ffi_framework: row.get(4)?,
+                source_lang: row.get(5)?,
+                file_path: row.get(6)?,
+                line: row.get(7)?,
+                column: row.get(8)?,
+                raw_snippet: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-tier: ffi_cross_edges
+    // -----------------------------------------------------------------------
+
+    /// Insert a single FFI cross-edge record.
+    ///
+    /// Returns the new row ID on success.
+    pub fn insert_ffi_cross_edge(&self, record: &FfiCrossEdgeRecord) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO ffi_cross_edges (from_node_id, to_node_id, ffi_import_id, \
+             ffi_export_id, edge_kind, symbol_name, ffi_framework) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                record.from_node_id,
+                record.to_node_id,
+                record.ffi_import_id,
+                record.ffi_export_id,
+                record.edge_kind,
+                record.symbol_name,
+                record.ffi_framework,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Get FFI cross-edges, optionally filtered by import_id or export_id.
+    pub fn get_ffi_cross_edges(
+        &self,
+        import_id: Option<i64>,
+        export_id: Option<i64>,
+    ) -> Result<Vec<FfiCrossEdgeRecord>> {
+        let mut sql = String::from(
+            "SELECT id, from_node_id, to_node_id, ffi_import_id, ffi_export_id, \
+             edge_kind, symbol_name, ffi_framework, created_at \
+             FROM ffi_cross_edges WHERE 1=1",
+        );
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(iid) = import_id {
+            sql.push_str(" AND ffi_import_id = ?1");
+            params.push(Box::new(iid));
+        }
+        if let Some(eid) = export_id {
+            let idx = params.len() + 1;
+            sql.push_str(&format!(" AND ffi_export_id = ?{}", idx));
+            params.push(Box::new(eid));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            |row| {
+                Ok(FfiCrossEdgeRecord {
+                    id: Some(row.get(0)?),
+                    from_node_id: row.get(1)?,
+                    to_node_id: row.get(2)?,
+                    ffi_import_id: row.get(3)?,
+                    ffi_export_id: row.get(4)?,
+                    edge_kind: row.get(5)?,
+                    symbol_name: row.get(6)?,
+                    ffi_framework: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            },
+        )?;
+        rows.collect()
+    }
+
+    /// Get all FFI exports with the number of callers (cross-edges) for each.
+    ///
+    /// Uses LEFT JOIN + GROUP BY to count cross-edges per export.
+    /// Returns a vector of (FfiExportRecord, caller_count) pairs.
+    pub fn get_ffi_exports_with_caller_count(
+        &self,
+    ) -> Result<Vec<(FfiExportRecord, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id, e.symbol_name, e.symbol_name_raw, e.func_node_id, \
+             e.ffi_framework, e.source_lang, e.file_path, e.line, e.column, e.raw_snippet, \
+             COALESCE(COUNT(c.id), 0) AS caller_count \
+             FROM ffi_exports e \
+             LEFT JOIN ffi_cross_edges c ON c.ffi_export_id = e.id \
+             GROUP BY e.id \
+             ORDER BY caller_count DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let record = FfiExportRecord {
+                id: Some(row.get(0)?),
+                symbol_name: row.get(1)?,
+                symbol_name_raw: row.get(2)?,
+                func_node_id: row.get(3)?,
+                ffi_framework: row.get(4)?,
+                source_lang: row.get(5)?,
+                file_path: row.get(6)?,
+                line: row.get(7)?,
+                column: row.get(8)?,
+                raw_snippet: row.get(9)?,
+            };
+            let count: i64 = row.get(10)?;
+            Ok((record, count))
+        })?;
+        rows.collect()
     }
 
     // -----------------------------------------------------------------------
@@ -1692,6 +1926,295 @@ mod tests {
         assert_eq!(node.3, "src.mod::my_func");
         assert_eq!(node.4, "rust");
         assert_eq!(node.5, "src/mod.rs");
+
+        cleanup(&path);
+    }
+
+    // ------------------------------------------------------------------
+    // FFI import / export / cross-edge tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_insert_and_query_ffi_import() {
+        let path = temp_db_path("ffi_import_crud");
+        cleanup(&path);
+
+        let db = Database::initialize(&path).unwrap();
+        let db_conn = db.connection();
+
+        let record = FfiImportRecord {
+            id: None,
+            symbol_name: "rust_index".to_string(),
+            call_node_id: 42,
+            import_stmt: Some("from tws_graph._core import rust_index".to_string()),
+            ffi_framework: "pyo3".to_string(),
+            source_lang: "python".to_string(),
+            file_path: "src/tws_graph/cli.py".to_string(),
+            line: 15,
+            column: 5,
+            raw_snippet: Some("from tws_graph._core import rust_index".to_string()),
+        };
+
+        // Insert
+        let new_id = db.insert_ffi_import(&record).unwrap();
+        assert!(new_id > 0);
+
+        // Query
+        let results = db.get_all_ffi_imports().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, Some(new_id));
+        assert_eq!(results[0].symbol_name, "rust_index");
+        assert_eq!(results[0].call_node_id, 42);
+        assert_eq!(results[0].ffi_framework, "pyo3");
+        assert_eq!(results[0].source_lang, "python");
+        assert_eq!(results[0].file_path, "src/tws_graph/cli.py");
+        assert_eq!(results[0].line, 15);
+        assert_eq!(results[0].column, 5);
+        assert_eq!(
+            results[0].import_stmt,
+            Some("from tws_graph._core import rust_index".to_string())
+        );
+        assert_eq!(
+            results[0].raw_snippet,
+            Some("from tws_graph._core import rust_index".to_string())
+        );
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_insert_and_query_ffi_export() {
+        let path = temp_db_path("ffi_export_crud");
+        cleanup(&path);
+
+        let db = Database::initialize(&path).unwrap();
+        let db_conn = db.connection();
+
+        let record = FfiExportRecord {
+            id: None,
+            symbol_name: "my_exported_fn".to_string(),
+            symbol_name_raw: Some("my_exported_fn_raw".to_string()),
+            func_node_id: 101,
+            ffi_framework: "pyo3".to_string(),
+            source_lang: "rust".to_string(),
+            file_path: "tws-graph/rust_core/src/lib.rs".to_string(),
+            line: 280,
+            column: 1,
+            raw_snippet: Some("#[pyfunction]\nfn my_exported_fn() {}".to_string()),
+        };
+
+        // Insert
+        let new_id = db.insert_ffi_export(&record).unwrap();
+        assert!(new_id > 0);
+
+        // Query
+        let results = db.get_all_ffi_exports().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, Some(new_id));
+        assert_eq!(results[0].symbol_name, "my_exported_fn");
+        assert_eq!(results[0].symbol_name_raw, Some("my_exported_fn_raw".to_string()));
+        assert_eq!(results[0].func_node_id, 101);
+        assert_eq!(results[0].ffi_framework, "pyo3");
+        assert_eq!(results[0].source_lang, "rust");
+        assert_eq!(results[0].file_path, "tws-graph/rust_core/src/lib.rs");
+        assert_eq!(results[0].line, 280);
+        assert_eq!(results[0].column, 1);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_insert_ffi_cross_edge() {
+        let path = temp_db_path("ffi_cross_edge_crud");
+        cleanup(&path);
+
+        let db = Database::initialize(&path).unwrap();
+        let db_conn = db.connection();
+
+        // First insert an import and export to get their IDs
+        let import_record = FfiImportRecord {
+            id: None,
+            symbol_name: "my_fn".to_string(),
+            call_node_id: 1,
+            import_stmt: None,
+            ffi_framework: "pyo3".to_string(),
+            source_lang: "python".to_string(),
+            file_path: "src/cli.py".to_string(),
+            line: 10,
+            column: 1,
+            raw_snippet: None,
+        };
+        let import_id = db.insert_ffi_import(&import_record).unwrap();
+
+        let export_record = FfiExportRecord {
+            id: None,
+            symbol_name: "my_fn".to_string(),
+            symbol_name_raw: None,
+            func_node_id: 100,
+            ffi_framework: "pyo3".to_string(),
+            source_lang: "rust".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            line: 280,
+            column: 1,
+            raw_snippet: None,
+        };
+        let export_id = db.insert_ffi_export(&export_record).unwrap();
+
+        // Now insert a cross-edge
+        let edge = FfiCrossEdgeRecord {
+            id: None,
+            from_node_id: 1,
+            to_node_id: 100,
+            ffi_import_id: import_id,
+            ffi_export_id: export_id,
+            edge_kind: "CROSS_FFI".to_string(),
+            symbol_name: "my_fn".to_string(),
+            ffi_framework: "pyo3".to_string(),
+            created_at: String::new(),
+        };
+        let edge_id = db.insert_ffi_cross_edge(&edge).unwrap();
+        assert!(edge_id > 0);
+
+        // Query cross-edges by import_id
+        let edges = db.get_ffi_cross_edges(Some(import_id), None).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].id, Some(edge_id));
+        assert_eq!(edges[0].ffi_import_id, import_id);
+        assert_eq!(edges[0].ffi_export_id, export_id);
+        assert_eq!(edges[0].symbol_name, "my_fn");
+        assert_eq!(edges[0].ffi_framework, "pyo3");
+        assert_eq!(edges[0].edge_kind, "CROSS_FFI");
+
+        // Query cross-edges by export_id
+        let edges2 = db.get_ffi_cross_edges(None, Some(export_id)).unwrap();
+        assert_eq!(edges2.len(), 1);
+        assert_eq!(edges2[0].ffi_export_id, export_id);
+
+        // Query cross-edges without filters
+        let edges3 = db.get_ffi_cross_edges(None, None).unwrap();
+        assert_eq!(edges3.len(), 1);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_get_exports_with_caller_count_empty() {
+        let path = temp_db_path("ffi_callers_empty");
+        cleanup(&path);
+
+        let db = Database::initialize(&path).unwrap();
+        let db_conn = db.connection();
+
+        // Insert an export with no cross-edges
+        let export = FfiExportRecord {
+            id: None,
+            symbol_name: "orphan_fn".to_string(),
+            symbol_name_raw: None,
+            func_node_id: 200,
+            ffi_framework: "cgo".to_string(),
+            source_lang: "go".to_string(),
+            file_path: "src/export.go".to_string(),
+            line: 5,
+            column: 1,
+            raw_snippet: None,
+        };
+        let export_id = db.insert_ffi_export(&export).unwrap();
+
+        // Get exports with caller count — should return 0 callers
+        let results = db.get_ffi_exports_with_caller_count().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.id, Some(export_id));
+        assert_eq!(results[0].0.symbol_name, "orphan_fn");
+        assert_eq!(results[0].1, 0); // caller_count should be 0
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_get_exports_with_caller_count() {
+        let path = temp_db_path("ffi_callers_count");
+        cleanup(&path);
+
+        let db = Database::initialize(&path).unwrap();
+        let db_conn = db.connection();
+
+        // Insert an export
+        let export = FfiExportRecord {
+            id: None,
+            symbol_name: "popular_fn".to_string(),
+            symbol_name_raw: None,
+            func_node_id: 300,
+            ffi_framework: "pyo3".to_string(),
+            source_lang: "rust".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            line: 100,
+            column: 1,
+            raw_snippet: None,
+        };
+        let export_id = db.insert_ffi_export(&export).unwrap();
+
+        // Insert 2 imports
+        let import1 = FfiImportRecord {
+            id: None,
+            symbol_name: "popular_fn".to_string(),
+            call_node_id: 10,
+            import_stmt: None,
+            ffi_framework: "pyo3".to_string(),
+            source_lang: "python".to_string(),
+            file_path: "src/a.py".to_string(),
+            line: 1,
+            column: 1,
+            raw_snippet: None,
+        };
+        let import1_id = db.insert_ffi_import(&import1).unwrap();
+
+        let import2 = FfiImportRecord {
+            id: None,
+            symbol_name: "popular_fn".to_string(),
+            call_node_id: 20,
+            import_stmt: None,
+            ffi_framework: "pyo3".to_string(),
+            source_lang: "python".to_string(),
+            file_path: "src/b.py".to_string(),
+            line: 1,
+            column: 1,
+            raw_snippet: None,
+        };
+        let import2_id = db.insert_ffi_import(&import2).unwrap();
+
+        // Create 2 cross-edges linking these imports to the same export
+        let edge1 = FfiCrossEdgeRecord {
+            id: None,
+            from_node_id: 10,
+            to_node_id: 300,
+            ffi_import_id: import1_id,
+            ffi_export_id: export_id,
+            edge_kind: "CROSS_FFI".to_string(),
+            symbol_name: "popular_fn".to_string(),
+            ffi_framework: "pyo3".to_string(),
+            created_at: String::new(),
+        };
+        db.insert_ffi_cross_edge(&edge1).unwrap();
+
+        let edge2 = FfiCrossEdgeRecord {
+            id: None,
+            from_node_id: 20,
+            to_node_id: 300,
+            ffi_import_id: import2_id,
+            ffi_export_id: export_id,
+            edge_kind: "CROSS_FFI".to_string(),
+            symbol_name: "popular_fn".to_string(),
+            ffi_framework: "pyo3".to_string(),
+            created_at: String::new(),
+        };
+        db.insert_ffi_cross_edge(&edge2).unwrap();
+
+        // Get exports with caller count — should return 2 callers
+        let results = db.get_ffi_exports_with_caller_count().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.id, Some(export_id));
+        assert_eq!(results[0].0.symbol_name, "popular_fn");
+        assert_eq!(results[0].1, 2); // caller_count should be 2
 
         cleanup(&path);
     }
