@@ -169,18 +169,27 @@ pub fn normalize_trailing_slash(url: &str) -> String {
 /// assert_eq!(extract_url_path("http://localhost"), "/");
 /// ```
 pub fn extract_url_path(url: &str) -> String {
-    for scheme in &["http://", "https://"] {
-        if let Some(rest) = url.strip_prefix(scheme) {
-            // Find the first '/' after host:port
-            if let Some(pos) = rest.find('/') {
-                return rest[pos..].to_string();
-            }
-            // No path at all (e.g. "http://localhost") → root
-            return "/".to_string();
+    let path = if let Some(rest) = url.strip_prefix("http://") {
+        if let Some(pos) = rest.find('/') {
+            rest[pos..].to_string()
+        } else {
+            "/".to_string()
         }
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        if let Some(pos) = rest.find('/') {
+            rest[pos..].to_string()
+        } else {
+            "/".to_string()
+        }
+    } else {
+        url.to_string()
+    };
+    // Strip query string
+    if let Some(pos) = path.find('?') {
+        path[..pos].to_string()
+    } else {
+        path
     }
-    // Already a relative path — return unchanged
-    url.to_string()
 }
 
 /// Heuristically detect a web framework based on file path and source code content.
@@ -848,10 +857,10 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_url_path_with_query_string() {
+    fn test_extract_url_path_strips_query_string() {
         assert_eq!(
             extract_url_path("http://127.0.0.1:8000/api/tasks?page=1&limit=10"),
-            "/api/tasks?page=1&limit=10"
+            "/api/tasks"
         );
     }
 

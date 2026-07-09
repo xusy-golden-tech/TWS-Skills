@@ -131,6 +131,64 @@ pub const PATTERN_FASTAPI_INCLUDE_ROUTER: &str = r#"(expression_statement
     arguments: (argument_list)))"#;
 
 // ============================================================================
+// Phase 2: Frontend HTTP call patterns — jQuery (TypeScript / JavaScript)
+// ============================================================================
+
+/// Match `$.ajax({ url: '/api/xxx', method: 'POST', ... })` config-object calls.
+///
+/// Captures:
+/// - `@obj`       — identifier "$"
+/// - `@func_name` — property_identifier "ajax"
+/// - `@config`    — first object argument containing url/method pairs
+pub const PATTERN_JQUERY_AJAX_CONFIG: &str = r#"(call_expression
+  function: (member_expression
+    object: (identifier) @obj
+    property: (property_identifier) @func_name)
+  arguments: (arguments . (object) @config))"#;
+
+/// Match jQuery shorthand HTTP calls: `$.get(url)`, `$.post(url, data)`,
+/// `$.getJSON(url)`, `$.put(url)`, `$.delete(url)`.
+///
+/// Captures:
+/// - `@obj`       — identifier "$"
+/// - `@method`    — property_identifier (get, post, getJSON, put, delete)
+/// - `@url`       — first string argument (the URL)
+pub const PATTERN_JQUERY_SHORTHAND: &str = r#"(call_expression
+  function: (member_expression
+    object: (identifier) @obj
+    property: (property_identifier) @method)
+  arguments: (arguments . (string) @url))"#;
+
+// ============================================================================
+// Phase 2: Backend route definition patterns — Spring Boot (Java)
+// ============================================================================
+
+/// Match Spring Boot mapping annotations:
+/// `@GetMapping("/path")`, `@PostMapping("/path")`, `@PutMapping("/path")`,
+/// `@DeleteMapping("/path")`, `@PatchMapping("/path")`.
+///
+/// Captures:
+/// - `@annotation` — the annotation name (GetMapping, PostMapping, etc.)
+/// - `@url`        — first string argument (the URL path)
+///
+/// Also matches the more verbose form:
+/// `@RequestMapping(value = "/path", method = RequestMethod.GET)`.
+pub const PATTERN_SPRING_MAPPING: &str = r#"[(marker_annotation
+  name: (identifier) @annotation)
+ (annotation
+  name: (identifier) @annotation
+  arguments: (annotation_argument_list . (string) @url))]"#;
+
+/// Match `@RequestMapping("/prefix")` at class level for route prefix tracking.
+///
+/// Captures:
+/// - `@annotation` — "RequestMapping"
+/// - `@url`        — prefix string
+pub const PATTERN_SPRING_REQUESTMAPPING_PREFIX: &str = r#"(marker_annotation
+  name: (identifier) @annotation
+  arguments: (annotation_argument_list . (string) @url))"#;
+
+// ============================================================================
 // FrameworkPattern registry
 // ============================================================================
 
@@ -156,6 +214,15 @@ pub enum PatternProcessor {
     FlaskRoute,
     /// Process FastAPI `app.include_router(router, prefix="/prefix")` — extract prefix.
     FastApiIncludeRouter,
+    // ── Phase 2 ──
+    /// Process `$.ajax({ url, method })` — walk object pairs for method/url.
+    JQueryAjaxConfig,
+    /// Process `$.get(url)`, `$.post(url, data)` — @method is the HTTP method.
+    JQueryShorthand,
+    /// Process `@GetMapping("/path")` — annotation name encodes HTTP method.
+    SpringMapping,
+    /// Process `@RequestMapping("/prefix")` at class-level — collect route prefix.
+    SpringRequestMappingPrefix,
 }
 
 /// A framework-specific tree-sitter Query pattern for cross-tier extraction.
@@ -239,6 +306,39 @@ pub fn get_phase1_patterns() -> Vec<FrameworkPattern> {
             framework: "flask",
             pattern: PATTERN_FLASK_ROUTE,
             post_process: PatternProcessor::FlaskRoute,
+        },
+        // --- Phase 2: jQuery (2 patterns) ---
+        FrameworkPattern {
+            name: "PATTERN_JQUERY_AJAX_CONFIG",
+            language: "typescript",
+            framework: "jquery",
+            pattern: PATTERN_JQUERY_AJAX_CONFIG,
+            post_process: PatternProcessor::JQueryAjaxConfig,
+        },
+        FrameworkPattern {
+            name: "PATTERN_JQUERY_SHORTHAND",
+            language: "typescript",
+            framework: "jquery",
+            pattern: PATTERN_JQUERY_SHORTHAND,
+            post_process: PatternProcessor::JQueryShorthand,
+        },
+        // --- Phase 2: Spring Boot (2 patterns) ---
+        // IMPORTANT: PREFIX pattern must come FIRST — extract_spring_mapping
+        // reads from self.router_prefixes, so collect_spring_prefixes must
+        // populate it before the mapping patterns are processed.
+        FrameworkPattern {
+            name: "PATTERN_SPRING_REQUESTMAPPING_PREFIX",
+            language: "java",
+            framework: "spring_boot",
+            pattern: PATTERN_SPRING_REQUESTMAPPING_PREFIX,
+            post_process: PatternProcessor::SpringRequestMappingPrefix,
+        },
+        FrameworkPattern {
+            name: "PATTERN_SPRING_MAPPING",
+            language: "java",
+            framework: "spring_boot",
+            pattern: PATTERN_SPRING_MAPPING,
+            post_process: PatternProcessor::SpringMapping,
         },
     ]
 }
@@ -891,25 +991,31 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_get_phase1_patterns_returns_8() {
+    fn test_get_phase1_patterns_returns_12() {
         let patterns = get_phase1_patterns();
-        assert_eq!(patterns.len(), 8);
+        assert_eq!(patterns.len(), 12);
 
         // Count by language
         let ts_count = patterns.iter().filter(|p| p.language == "typescript").count();
         let py_count = patterns.iter().filter(|p| p.language == "python").count();
-        assert_eq!(ts_count, 5);
+        let java_count = patterns.iter().filter(|p| p.language == "java").count();
+        assert_eq!(ts_count, 7);
         assert_eq!(py_count, 3);
+        assert_eq!(java_count, 2);
 
         // Count by framework
         let axios_count = patterns.iter().filter(|p| p.framework == "axios").count();
         let fetch_count = patterns.iter().filter(|p| p.framework == "fetch").count();
         let fastapi_count = patterns.iter().filter(|p| p.framework == "fastapi").count();
         let flask_count = patterns.iter().filter(|p| p.framework == "flask").count();
+        let jquery_count = patterns.iter().filter(|p| p.framework == "jquery").count();
+        let spring_count = patterns.iter().filter(|p| p.framework == "spring_boot").count();
         assert_eq!(axios_count, 3);
         assert_eq!(fetch_count, 2);
         assert_eq!(fastapi_count, 2);
         assert_eq!(flask_count, 1);
+        assert_eq!(jquery_count, 2);
+        assert_eq!(spring_count, 2);
     }
 
     #[test]
@@ -918,13 +1024,13 @@ mod tests {
         let mut names: Vec<&str> = patterns.iter().map(|p| p.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 8, "All pattern names should be unique");
+        assert_eq!(names.len(), 12, "All pattern names should be unique");
     }
 
     #[test]
     fn test_get_phase1_patterns_all_have_valid_language() {
         let patterns = get_phase1_patterns();
-        let valid_langs = ["typescript", "javascript", "python"];
+        let valid_langs = ["typescript", "javascript", "python", "java"];
         for p in &patterns {
             assert!(
                 valid_langs.contains(&p.language),
@@ -969,5 +1075,88 @@ mod tests {
     #[test]
     fn test_strip_quotes_no_quotes() {
         assert_eq!(strip_quotes("hello"), "hello");
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 2: Spring Boot annotation detection (Java AST walk)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_spring_annotation_detection() {
+        let src = r#"@GetMapping("/blog/getAllBlogs")
+public List<Blog> getPost() {
+    return blogRepository.findAll();
+}"#;
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_java::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+
+        // Dump AST
+        fn dump(node: tree_sitter::Node, src: &[u8], depth: usize) {
+            let indent = "  ".repeat(depth);
+            let text = node.utf8_text(src).unwrap_or("<err>");
+            eprintln!("{}{} [{}..{}]: {:?}",
+                indent, node.kind(), node.start_position().column, node.end_position().column,
+                if text.len() > 60 { &text[..60] } else { text });
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                dump(child, src, depth + 1);
+            }
+        }
+        dump(tree.root_node(), src.as_bytes(), 0);
+
+        // Walk AST looking for annotation nodes, including inside modifiers
+        let mut found = Vec::new();
+        let mut to_visit: Vec<tree_sitter::Node> = Vec::new();
+        to_visit.push(tree.root_node());
+
+        while let Some(node) = to_visit.pop() {
+            let kind = node.kind();
+            // Check all possible annotation node types
+            if kind == "annotation" || kind == "marker_annotation" {
+                let mut ann_name = String::new();
+                let mut ann_url = String::new();
+                let mut cursor = node.walk();
+                eprintln!("--- annotation node children ---");
+                for child in node.children(&mut cursor) {
+                    let ck = child.kind();
+                    let ct = child.utf8_text(src.as_bytes()).unwrap_or("<err>");
+                    eprintln!("  child: kind={} text={:?}", ck, if ct.len() > 100 { &ct[..100] } else { ct });
+                    if ck == "identifier" {
+                        ann_name = ct.to_string();
+                    }
+                    if ck == "annotation_argument_list" {
+                        let mut ac = child.walk();
+                        for arg in child.children(&mut ac) {
+                            let ak = arg.kind();
+                            let at = arg.utf8_text(src.as_bytes()).unwrap_or("<err>");
+                            eprintln!("    arg: kind={} text={:?}", ak, if at.len() > 100 { &at[..100] } else { at });
+                            if ak == "string_literal" || ak == "string" {
+                                ann_url = at.to_string();
+                            }
+                        }
+                    }
+                }
+                if !ann_name.is_empty() {
+                    found.push((ann_name.clone(), ann_url.clone()));
+                    eprintln!("Found: {} with URL '{}' (kind={})", ann_name, ann_url, kind);
+                }
+            }
+            // Also check the modifiers field of method/class declarations
+            if kind == "method_declaration" || kind == "class_declaration" {
+                if let Some(modifiers) = node.child_by_field_name("modifiers") {
+                    to_visit.push(modifiers);
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                to_visit.push(child);
+            }
+        }
+
+        eprintln!("Total found: {}", found.len());
+        assert!(!found.is_empty(), "No annotations found");
+        assert_eq!(found[0].0, "GetMapping");
+        assert!(found[0].1.contains("/blog/getAllBlogs"), "URL was: {}", found[0].1);
     }
 }

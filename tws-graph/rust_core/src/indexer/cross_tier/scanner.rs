@@ -168,6 +168,8 @@ impl CrossTierScanner {
             }
 
             for pattern in &applicable {
+                let _ = std::fs::write("/tmp/tws_scanner_debug.txt",
+                    format!("file={} lang={} pattern={}\n", file_path, query_lang, pattern.name));
                 let result = match pattern.post_process {
                     // Frontend HTTP call patterns
                     PatternProcessor::AxiosMethodShorthand
@@ -213,6 +215,23 @@ impl CrossTierScanner {
                             &ts_lang,
                         )
                     }
+                    // Phase 2: jQuery patterns
+                    PatternProcessor::JQueryAjaxConfig => {
+                        self.extract_jquery_ajax_config(
+                            &source, &tree, pattern, file_path, query_lang, &ts_lang,
+                        )
+                    }
+                    PatternProcessor::JQueryShorthand => {
+                        self.extract_jquery_shorthand(
+                            &source, &tree, pattern, file_path, query_lang, &ts_lang,
+                        )
+                    }
+                    // Phase 2: Spring Boot patterns
+                    PatternProcessor::SpringMapping => {
+                        self.extract_spring_mapping(
+                            &source, &tree, pattern, file_path, &ts_lang,
+                        )
+                    }
                     // Infrastructure patterns (collected into internal maps)
                     PatternProcessor::AxiosCreateBaseUrl => {
                         self.collect_base_urls(&source, &tree, file_path);
@@ -220,6 +239,10 @@ impl CrossTierScanner {
                     }
                     PatternProcessor::FastApiIncludeRouter => {
                         self.collect_router_prefixes(&source, &tree, file_path);
+                        Ok(ExtractResult::None)
+                    }
+                    PatternProcessor::SpringRequestMappingPrefix => {
+                        self.collect_spring_prefixes(&source, &tree, file_path);
                         Ok(ExtractResult::None)
                     }
                 };
@@ -728,6 +751,367 @@ impl CrossTierScanner {
     }
 
     // -----------------------------------------------------------------------
+    // Phase 2: jQuery extraction
+    // -----------------------------------------------------------------------
+
+    /// Extract HTTP calls from `$.ajax({ url: '/api/xxx', method: 'POST', ... })`.
+    fn extract_jquery_ajax_config(
+        &self,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        pattern: &FrameworkPattern,
+        file_path: &str,
+        lang: &str,
+        ts_lang: &tree_sitter::Language,
+    ) -> Result<ExtractResult, String> {
+        let query = Query::new(ts_lang, pattern.pattern)
+            .map_err(|e| format!("query compile failed for {}: {}", pattern.name, e))?;
+        let mut cursor = QueryCursor::new();
+        let source_bytes = source.as_bytes();
+
+        let mut matches = cursor.matches(&query, tree.root_node(), source_bytes);
+        let mut calls: Vec<HttpCallRecord> = Vec::new();
+
+        while let Some(m) = matches.next() {
+            let mut obj_text: Option<String> = None;
+            let mut func_text: Option<String> = None;
+            let mut config_node: Option<Node> = None;
+
+            for capture in m.captures {
+                let capture_name = &query.capture_names()[capture.index as usize];
+                let text = node_text(source_bytes, capture.node);
+
+                match *capture_name {
+                    "obj" => obj_text = Some(text.clone()),
+                    "func_name" => func_text = Some(text.clone()),
+                    "config" => config_node = Some(capture.node),
+                    _ => {}
+                }
+            }
+
+            // Only match $.ajax(...)
+            if obj_text.as_deref() != Some("$") || func_text.as_deref() != Some("ajax") {
+                continue;
+            }
+
+            let config = match config_node {
+                Some(n) => n,
+                None => continue,
+            };
+
+            let url_value = extract_object_prop(source_bytes, config, "url");
+            let method_value = extract_object_prop(source_bytes, config, "method");
+
+            let url = match url_value {
+                Some(u) => normalizer::extract_url_path(&u),
+                None => continue,
+            };
+
+            let http_method = method_value
+                .unwrap_or_else(|| "GET".to_string())
+                .to_uppercase();
+
+            let func_node_id = self.find_and_resolve_func_rowid(file_path, m.captures, source_bytes);
+            let start_pos = m.captures[0].node.start_position();
+
+            calls.push(HttpCallRecord {
+                id: None,
+                url,
+                http_method,
+                func_node_id,
+                url_is_template: false,
+                file_path: file_path.to_string(),
+                line: (start_pos.row + 1) as i64,
+                column: (start_pos.column + 1) as i64,
+                source_lang: lang.to_string(),
+                raw_snippet: Some(snippet(source_bytes, m.captures[0].node)),
+            });
+        }
+
+        if calls.is_empty() {
+            Ok(ExtractResult::None)
+        } else {
+            Ok(ExtractResult::Calls(calls))
+        }
+    }
+
+    /// Extract HTTP calls from jQuery shorthand: `$.get(url)`, `$.post(url, data)`,
+    /// `$.getJSON(url)`.
+    fn extract_jquery_shorthand(
+        &self,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        pattern: &FrameworkPattern,
+        file_path: &str,
+        lang: &str,
+        ts_lang: &tree_sitter::Language,
+    ) -> Result<ExtractResult, String> {
+        let query = Query::new(ts_lang, pattern.pattern)
+            .map_err(|e| format!("query compile failed for {}: {}", pattern.name, e))?;
+        let mut cursor = QueryCursor::new();
+        let source_bytes = source.as_bytes();
+
+        let mut matches = cursor.matches(&query, tree.root_node(), source_bytes);
+        let mut calls: Vec<HttpCallRecord> = Vec::new();
+
+        // jQuery shorthand HTTP methods
+        let method_map: std::collections::HashMap<&str, &str> = [
+            ("get", "GET"),
+            ("post", "POST"),
+            ("put", "PUT"),
+            ("delete", "DELETE"),
+            ("getJSON", "GET"),
+            ("getScript", "GET"),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        while let Some(m) = matches.next() {
+            let mut obj_text: Option<String> = None;
+            let mut method_text: Option<String> = None;
+            let mut url_text: Option<String> = None;
+
+            for capture in m.captures {
+                let capture_name = &query.capture_names()[capture.index as usize];
+                let text = node_text(source_bytes, capture.node);
+
+                match *capture_name {
+                    "obj" => obj_text = Some(text.clone()),
+                    "method" => method_text = Some(text.clone()),
+                    "url" => url_text = Some(strip_quotes(&text)),
+                    _ => {}
+                }
+            }
+
+            // Only match $.<method> calls
+            if obj_text.as_deref() != Some("$") {
+                continue;
+            }
+
+            let url = match url_text {
+                Some(ref u) => normalizer::extract_url_path(u),
+                None => continue,
+            };
+
+            let http_method = match method_text.as_deref() {
+                Some(m) => method_map
+                    .get(m)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| m.to_uppercase()),
+                None => "GET".to_string(),
+            };
+
+            let func_node_id = self.find_and_resolve_func_rowid(file_path, m.captures, source_bytes);
+            let start_pos = m.captures[0].node.start_position();
+
+            calls.push(HttpCallRecord {
+                id: None,
+                url,
+                http_method,
+                func_node_id,
+                url_is_template: false,
+                file_path: file_path.to_string(),
+                line: (start_pos.row + 1) as i64,
+                column: (start_pos.column + 1) as i64,
+                source_lang: lang.to_string(),
+                raw_snippet: Some(snippet(source_bytes, m.captures[0].node)),
+            });
+        }
+
+        if calls.is_empty() {
+            Ok(ExtractResult::None)
+        } else {
+            Ok(ExtractResult::Calls(calls))
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Spring Boot extraction
+    // -----------------------------------------------------------------------
+
+    /// Extract HTTP routes from Spring Boot mapping annotations using AST walking.
+    /// `@GetMapping("/path")` → GET, `@PostMapping("/path")` → POST, etc.
+    fn extract_spring_mapping(
+        &self,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        _pattern: &FrameworkPattern,
+        file_path: &str,
+        _ts_lang: &tree_sitter::Language,
+    ) -> Result<ExtractResult, String> {
+        let source_bytes = source.as_bytes();
+
+        let method_map: std::collections::HashMap<&str, &str> = [
+            ("GetMapping", "GET"),
+            ("PostMapping", "POST"),
+            ("PutMapping", "PUT"),
+            ("DeleteMapping", "DELETE"),
+            ("PatchMapping", "PATCH"),
+            ("RequestMapping", "GET"),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        let mut routes: Vec<HttpRouteRecord> = Vec::new();
+        let mut to_visit: Vec<Node> = Vec::new();
+        to_visit.push(tree.root_node());
+
+        while let Some(node) = to_visit.pop() {
+            // Only process annotations on method declarations (skip class-level @RequestMapping)
+            if node.kind() == "annotation" && node.parent().map(|p| p.kind()) == Some("modifiers") {
+                // Check that this modifier belongs to a method (not a class)
+                let grandparent = node.parent().and_then(|p| p.parent());
+                let is_method_annotation = grandparent.map(|gp| gp.kind() == "method_declaration").unwrap_or(false);
+                if !is_method_annotation {
+                    let mut cursor = node.walk();
+                    for child in node.children(&mut cursor) {
+                        to_visit.push(child);
+                    }
+                    continue;
+                }
+
+                let mut ann_cursor = node.walk();
+                let mut ann_name: Option<String> = None;
+                let mut ann_url: Option<String> = None;
+
+                for child in node.children(&mut ann_cursor) {
+                    if child.kind() == "identifier" {
+                        ann_name = Some(node_text(source_bytes, child));
+                    }
+                    if child.kind() == "annotation_argument_list" {
+                        // Extract the first string argument
+                        let mut aal_cursor = child.walk();
+                        for arg in child.children(&mut aal_cursor) {
+                            if arg.kind() == "string_literal" || arg.kind() == "string" {
+                                ann_url = Some(strip_quotes(&node_text(source_bytes, arg)));
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if let (Some(name), Some(url)) = (ann_name, ann_url) {
+                    if let Some(&http_method) = method_map.get(name.as_str()) {
+                        let raw_path = url;
+                        let raw_path_original = raw_path.clone();
+
+                        // Apply class-level prefix
+                        let final_url = if let Some(prefix) = self.router_prefixes.get(file_path) {
+                            format!("{}{}", prefix, raw_path)
+                        } else {
+                            raw_path
+                        };
+
+                        let normalized_url = normalizer::normalize_url(&final_url, "spring_boot");
+                        let func_node_id = self.resolve_spring_handler(source_bytes, &[node]);
+
+                        let start_pos = node.start_position();
+
+                        routes.push(HttpRouteRecord {
+                            id: None,
+                            url_pattern: normalized_url,
+                            url_pattern_raw: raw_path_original,
+                            http_method: http_method.to_string(),
+                            handler_node_id: func_node_id,
+                            file_path: file_path.to_string(),
+                            line: (start_pos.row + 1) as i64,
+                            column: (start_pos.column + 1) as i64,
+                            source_lang: "java".to_string(),
+                            source_framework: Some("spring_boot".to_string()),
+                            raw_snippet: Some(snippet(source_bytes, node)),
+                        });
+                    }
+                }
+            }
+
+            // Push children for DFS
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                to_visit.push(child);
+            }
+        }
+
+        if routes.is_empty() {
+            Ok(ExtractResult::None)
+        } else {
+            Ok(ExtractResult::Routes(routes))
+        }
+    }
+
+    /// Resolve the handler function for a Spring Boot annotation match.
+    /// Walks up from the annotation node to find the enclosing method_declaration
+    /// and computes a stable rowid from the method name.
+    fn resolve_spring_handler(
+        &self,
+        source_bytes: &[u8],
+        captures: &[tree_sitter::Node],
+    ) -> i64 {
+        if captures.is_empty() {
+            return 0;
+        }
+        let node = captures[0];
+        let method_node = find_ancestor_by_kind(node, "method_declaration");
+        if let Some(method) = method_node {
+            let mut cursor = method.walk();
+            for child in method.children(&mut cursor) {
+                if child.kind() == "identifier" {
+                    let name = node_text(source_bytes, child);
+                    // Use a simple hash: sum of bytes as i64
+                    let hash: i64 = name.bytes().map(|b| b as i64).sum();
+                    return if hash == 0 { 1 } else { hash.abs() };
+                }
+            }
+        }
+        0
+    }
+
+    /// Collect `@RequestMapping("/prefix")` at class level for route prefix tracking.
+    /// Stores them in `self.router_prefixes` keyed by file_path.
+    fn collect_spring_prefixes(
+        &mut self,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        file_path: &str,
+    ) {
+        let source_bytes = source.as_bytes();
+        let mut to_visit: Vec<Node> = Vec::new();
+        to_visit.push(tree.root_node());
+
+        while let Some(node) = to_visit.pop() {
+            if node.kind() == "class_declaration" {
+                // In tree-sitter Java, annotations on class_declaration are wrapped
+                // in a `modifiers` child. This child exists by KIND but NOT as a
+                // named field — child_by_field_name("modifiers") returns None.
+                // Walk class_declaration's children by kind to find `modifiers`,
+                // then look for @RequestMapping annotations inside it.
+                let mut cc = node.walk();
+                for child in node.children(&mut cc) {
+                    if child.kind() == "modifiers" {
+                        let mut mc = child.walk();
+                        for mn in child.children(&mut mc) {
+                            if mn.kind() == "annotation" || mn.kind() == "marker_annotation" {
+                                let text = node_text(source_bytes, mn);
+                                if text.contains("RequestMapping") {
+                                    let prefix = extract_annotation_string_arg(source_bytes, mn);
+                                    if let Some(p) = prefix {
+                                        self.router_prefixes.insert(file_path.to_string(), p);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                to_visit.push(child);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // baseURL / router prefix collection
     // -----------------------------------------------------------------------
 
@@ -933,6 +1317,96 @@ impl CrossTierScanner {
 // ============================================================================
 // Free helper functions
 // ============================================================================
+
+/// Extract a property value from a JavaScript object literal node.
+/// Walks the object's `pair` children looking for `key: value` where key matches.
+/// For string concatenation values (e.g. `"base/" + id`), extracts just the
+/// string literal prefix.
+fn extract_object_prop(source: &[u8], obj_node: Node, prop_name: &str) -> Option<String> {
+    let mut cursor = obj_node.walk();
+    for child in obj_node.children(&mut cursor) {
+        if child.kind() == "pair" {
+            let key_node = child.child_by_field_name("key")?;
+            let key_text = node_text(source, key_node);
+            let key = strip_quotes(&key_text);
+            if key == prop_name {
+                let val_node = child.child_by_field_name("value")?;
+                // Handle string concatenation: "prefix/" + expr → extract "prefix/"
+                if val_node.kind() == "binary_expression" {
+                    if let Some(left) = val_node.child_by_field_name("left") {
+                        if left.kind() == "string" {
+                            let text = node_text(source, left);
+                            return Some(strip_quotes(&text));
+                        }
+                    }
+                }
+                let val_text = node_text(source, val_node);
+                return Some(strip_quotes(&val_text));
+            }
+        }
+    }
+    None
+}
+
+/// Pre-order visit all nodes in a subtree, calling `f` on each.
+fn visit_preorder<F>(node: &Node, f: &mut F)
+where
+    F: FnMut(Node) -> bool,
+{
+    if !f(*node) {
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        visit_preorder(&child, f);
+    }
+}
+
+/// Extract the first string argument from a Java annotation node.
+fn extract_annotation_string_arg(source: &[u8], annotation: Node) -> Option<String> {
+    let mut cursor = annotation.walk();
+    for child in annotation.children(&mut cursor) {
+        if child.kind() == "annotation_argument_list" {
+            let mut ac = child.walk();
+            for arg in child.children(&mut ac) {
+                if arg.kind() == "string_literal" || arg.kind() == "string" {
+                    // tree-sitter Java: string_literal is `"..."`
+                    let mut sc = arg.walk();
+                    for frag in arg.children(&mut sc) {
+                        if frag.kind() == "string_fragment" {
+                            let text = node_text(source, frag);
+                            if text.starts_with('/') {
+                                return Some(text);
+                            }
+                            return Some(format!("/{}", text));
+                        }
+                    }
+                    let text = node_text(source, arg);
+                    let stripped = text.trim_matches('"');
+                    if stripped.is_empty() || stripped == text {
+                        return None;
+                    }
+                    if stripped.starts_with('/') {
+                        return Some(stripped.to_string());
+                    }
+                    return Some(format!("/{}", stripped));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Walk up the AST from `start` to find an ancestor of the given kind.
+fn find_ancestor_by_kind<'a>(start: Node<'a>, kind: &str) -> Option<Node<'a>> {
+    let mut current = start.parent()?;
+    loop {
+        if current.kind() == kind {
+            return Some(current);
+        }
+        current = current.parent()?;
+    }
+}
 
 /// Get the source text of a tree-sitter node.
 fn node_text(source: &[u8], node: Node) -> String {
