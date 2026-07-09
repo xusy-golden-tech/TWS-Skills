@@ -276,7 +276,8 @@ def calls(
     depth: int = typer.Option(1, "--depth", "-d", help="追溯深度"),
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
     brief: bool = typer.Option(False, "--brief", help="简洁格式输出（与 --json 互斥）"),
-    no_cross: bool = typer.Option(False, "--no-cross", help="禁用跨语言调用分析"),
+    no_cross: bool = typer.Option(False, "--no-cross", help="禁用跨语言调用分析（含 HTTP 和 FFI）"),
+    no_cross_ffi: bool = typer.Option(False, "--no-cross-ffi", help="禁用 FFI 跨语言追踪"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
     include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
     exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
@@ -314,7 +315,7 @@ def calls(
         typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
 
-    typer.echo(rust_calls(resolved_db, symbol, inbound, depth, format=fmt, include_paths=include_paths, exclude_paths=exclude_paths, no_cross=no_cross))
+    typer.echo(rust_calls(resolved_db, symbol, inbound, depth, format=fmt, include_paths=include_paths, exclude_paths=exclude_paths, no_cross=no_cross, no_cross_ffi=no_cross_ffi))
 
 
 # ============================================================================
@@ -326,7 +327,8 @@ def impact(
     symbol: str = typer.Argument(..., help="要评估影响的符号名"),
     depth: int = typer.Option(2, "--depth", "-d", help="影响传播深度 (默认 2)"),
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
-    no_cross: bool = typer.Option(False, "--no-cross", help="禁用跨语言影响分析"),
+    no_cross: bool = typer.Option(False, "--no-cross", help="禁用跨语言影响分析（含 HTTP 和 FFI）"),
+    no_cross_ffi: bool = typer.Option(False, "--no-cross-ffi", help="禁用 FFI 跨语言影响分析"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
     include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
     exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
@@ -340,7 +342,7 @@ def impact(
     if not _rust_available():
         typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
-    typer.echo(rust_impact(resolved_db, symbol, depth, include_paths, exclude_paths, no_cross=no_cross))
+    typer.echo(rust_impact(resolved_db, symbol, depth, include_paths, exclude_paths, no_cross=no_cross, no_cross_ffi=no_cross_ffi))
 
 
 # ============================================================================
@@ -352,7 +354,8 @@ def trace(
     from_symbol: str = typer.Argument(..., help="入口符号"),
     to_symbol: str = typer.Argument(..., help="目标符号（报错点）"),
     json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
-    no_cross: bool = typer.Option(False, "--no-cross", help="禁用跨语言追踪，仅在同语言内追踪"),
+    no_cross: bool = typer.Option(False, "--no-cross", help="禁用跨语言追踪（含 HTTP 和 FFI），仅在同语言内追踪"),
+    no_cross_ffi: bool = typer.Option(False, "--no-cross-ffi", help="禁用 FFI 跨语言追踪"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
     include_paths: Optional[list[str]] = typer.Option(None, "--include", "-I", help="Include files matching glob pattern (repeatable)"),
     exclude_paths: Optional[list[str]] = typer.Option(None, "--exclude", "-X", help="Exclude files matching glob pattern (repeatable)"),
@@ -366,7 +369,7 @@ def trace(
     if not _rust_available():
         typer.echo("错误: Rust 核心库不可用。", err=True)
         raise typer.Exit(1)
-    typer.echo(rust_trace(resolved_db, from_symbol, to_symbol, include_paths, exclude_paths, no_cross=no_cross))
+    typer.echo(rust_trace(resolved_db, from_symbol, to_symbol, include_paths, exclude_paths, no_cross=no_cross, no_cross_ffi=no_cross_ffi))
 
 
 # ============================================================================
@@ -424,13 +427,14 @@ def routes(
 def trace_request(
     url: str = typer.Argument(..., help="要追踪的 HTTP URL"),
     method: str = typer.Argument("GET", help="HTTP 方法（GET/POST/PUT/DELETE/PATCH）"),
-    no_cross: bool = typer.Option(False, "--no-cross", help="禁用跨语言追踪"),
+    no_cross: bool = typer.Option(False, "--no-cross", help="禁用跨语言追踪（含 HTTP 和 FFI）"),
+    no_cross_ffi: bool = typer.Option(False, "--no-cross-ffi", help="禁用 FFI 跨语言追踪"),
     db_path: Optional[str] = typer.Option(None, "--db", help="索引数据库路径"),
 ):
     """给定 URL 和方法，输出完整调用链（前端调用者 + 后端处理链）"""
     resolved_db = os.path.abspath(db_path or DEFAULT_DB)
     from .rust_bridge import rust_trace_request
-    result = rust_trace_request(resolved_db, url=url, method=method, no_cross=no_cross)
+    result = rust_trace_request(resolved_db, url=url, method=method, no_cross=no_cross, no_cross_ffi=no_cross_ffi)
     typer.echo(result)
 
 

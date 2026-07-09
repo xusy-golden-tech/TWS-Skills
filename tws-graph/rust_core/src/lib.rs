@@ -752,6 +752,37 @@ pub(crate) fn lang_to_tree_sitter(lang: &str) -> Option<tree_sitter::Language> {
 // Query operations
 // ============================================================================
 
+/// Parse cross-tier CLI flags into (enable_http, enable_ffi).
+///
+/// | Flags set              | Result              |
+/// |------------------------|---------------------|
+/// | neither                | (true, true)        |
+/// | --no-cross             | (false, false)      |
+/// | --no-cross-ffi         | (true, false)       |
+/// | --no-cross + --cross-ffi | (false, false)    |
+///
+/// `--no-cross` acts as a superset: it disables both HTTP and FFI
+/// regardless of the `no_cross_ffi` setting.
+fn parse_cross_flags(no_cross: bool, no_cross_ffi: bool) -> (bool, bool) {
+    if no_cross {
+        (false, false)
+    } else {
+        (true, !no_cross_ffi)
+    }
+}
+
+/// Format a CrossLangHop as a human-readable label.
+fn format_hop_label(hop: &query::traversal::CrossLangHop) -> String {
+    if hop.edge_kind == "CROSS_FFI" {
+        let framework = hop.ffi_framework.as_deref().unwrap_or("unknown");
+        let symbol = hop.symbol_name.as_deref().unwrap_or("unknown");
+        format!("═══ FFI {}: {} ═══", framework, symbol)
+    } else {
+        // CROSS_HTTP or other: existing format
+        format!("═══ HTTP {} {} ═══", hop.http_method, hop.url)
+    }
+}
+
 /// Full-text search with qualifier parsing (kind:, lang:, path:).
 /// Returns a list of dicts with id, name, qualified_name, kind, file_path, language.
 #[pyfunction]
@@ -793,13 +824,13 @@ fn search(py: Python<'_>, db_path: &str, query_text: &str, limit: Option<usize>,
 /// If `inbound` is true, show callers; else show callees.
 /// `format`: "json" for JSON, "brief" for old format, None/"text" for rich format.
 #[pyfunction]
-#[pyo3(signature = (db_path, name, inbound=None, depth=None, format=None, no_cross=None, include_paths=None, exclude_paths=None))]
-fn calls(db_path: &str, name: &str, inbound: Option<bool>, depth: Option<usize>, format: Option<String>, no_cross: Option<bool>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
+#[pyo3(signature = (db_path, name, inbound=None, depth=None, format=None, no_cross=None, no_cross_ffi=None, include_paths=None, exclude_paths=None))]
+fn calls(db_path: &str, name: &str, inbound: Option<bool>, depth: Option<usize>, format: Option<String>, no_cross: Option<bool>, no_cross_ffi: Option<bool>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
     let is_inbound = inbound.unwrap_or(false);
     let d = depth.unwrap_or(1);
-    let cross_tier = !no_cross.unwrap_or(false);
-    let mut results = query::run_calls(&db, name, is_inbound, d, cross_tier, false)
+    let (enable_http, enable_ffi) = parse_cross_flags(no_cross.unwrap_or(false), no_cross_ffi.unwrap_or(false));
+    let mut results = query::run_calls(&db, name, is_inbound, d, enable_http, enable_ffi)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     // Apply --include / --exclude scope filtering
@@ -875,12 +906,12 @@ fn calls(db_path: &str, name: &str, inbound: Option<bool>, depth: Option<usize>,
 
 /// Compute impact radius of a symbol, grouped by module.
 #[pyfunction]
-#[pyo3(signature = (db_path, name, depth=None, no_cross=None, include_paths=None, exclude_paths=None))]
-fn impact(db_path: &str, name: &str, depth: Option<usize>, no_cross: Option<bool>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
+#[pyo3(signature = (db_path, name, depth=None, no_cross=None, no_cross_ffi=None, include_paths=None, exclude_paths=None))]
+fn impact(db_path: &str, name: &str, depth: Option<usize>, no_cross: Option<bool>, no_cross_ffi: Option<bool>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
     let d = depth.unwrap_or(1);
-    let cross_tier = !no_cross.unwrap_or(false);
-    let mut results = query::run_impact(&db, name, d, cross_tier, false)
+    let (enable_http, enable_ffi) = parse_cross_flags(no_cross.unwrap_or(false), no_cross_ffi.unwrap_or(false));
+    let mut results = query::run_impact(&db, name, d, enable_http, enable_ffi)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     // Apply --include / --exclude scope filtering
@@ -919,22 +950,35 @@ fn impact(db_path: &str, name: &str, depth: Option<usize>, no_cross: Option<bool
 
 /// Find the shortest path between two symbols.
 #[pyfunction]
-#[pyo3(signature = (db_path, src, tgt, no_cross=None, include_paths=None, exclude_paths=None))]
-fn trace(db_path: &str, src: &str, tgt: &str, no_cross: Option<bool>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
+#[pyo3(signature = (db_path, src, tgt, no_cross=None, no_cross_ffi=None, include_paths=None, exclude_paths=None))]
+fn trace(db_path: &str, src: &str, tgt: &str, no_cross: Option<bool>, no_cross_ffi: Option<bool>, include_paths: Option<Vec<String>>, exclude_paths: Option<Vec<String>>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    let cross_tier = !no_cross.unwrap_or(false);
-    let result = query::run_trace(&db, src, tgt, cross_tier, false)
+    let (enable_http, enable_ffi) = parse_cross_flags(no_cross.unwrap_or(false), no_cross_ffi.unwrap_or(false));
+
+    // Build traverser and use annotated path for cross-tier hop formatting
+    let traverser = query::traversal::GraphTraverser::from_db(&db, None, None, enable_http, enable_ffi)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-    match result {
-        Some(mut path) => {
+    let src_id = match db.find_node_id_by_name(src)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? {
+        Some(id) => id,
+        None => return Ok(format!("No path found from '{}' to '{}'", src, tgt)),
+    };
+    let tgt_id = match db.find_node_id_by_name(tgt)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))? {
+        Some(id) => id,
+        None => return Ok(format!("No path found from '{}' to '{}'", src, tgt)),
+    };
+
+    match traverser.shortest_path_annotated(&src_id, &tgt_id, query::traversal::TraversalDirection::Outbound) {
+        Some(mut annotated_path) => {
             // Apply --include / --exclude scope filtering to path nodes
             let has_scope = include_paths.as_ref().map_or(false, |v| !v.is_empty())
                 || exclude_paths.as_ref().map_or(false, |v| !v.is_empty());
             if has_scope {
                 let inc = include_paths.as_deref().unwrap_or(&[]);
                 let exc = exclude_paths.as_deref().unwrap_or(&[]);
-                path.retain(|(nid, _)| {
+                annotated_path.retain(|(nid, _)| {
                     if let Ok(Some((_id, _kind, _name, _qn, _lang, fp))) = db.get_node(nid) {
                         matches_scope(&fp, inc, exc)
                     } else {
@@ -942,14 +986,27 @@ fn trace(db_path: &str, src: &str, tgt: &str, no_cross: Option<bool>, include_pa
                     }
                 });
             }
-            if path.len() < 2 {
+            if annotated_path.len() < 2 {
                 return Ok(format!("No path found from '{}' to '{}' (all nodes filtered out by scope)", src, tgt));
             }
 
+            // Resolve node names for each node id
+            let node_names: Vec<(String, Option<String>)> = annotated_path.iter().map(|(nid, hop)| {
+                let name = db.get_node(nid).ok().flatten()
+                    .map(|(_id, _kind, name, _qn, _lang, _fp)| name)
+                    .unwrap_or_else(|| format!("<unknown:{}>", nid));
+                let hop_info = hop.as_ref().map(|h| format_hop_label(h));
+                (name, hop_info)
+            }).collect();
+
             let mut out = format!("Trace from '{}' to '{}':\n", src, tgt);
-            for (i, (_id, node_name)) in path.iter().enumerate() {
+            for (i, (node_name, hop_info)) in node_names.iter().enumerate() {
                 if i > 0 {
-                    out.push_str(" -> ");
+                    if let Some(ref label) = hop_info {
+                        out.push_str(&format!("\n  {}\n  └─ ", label));
+                    } else {
+                        out.push_str(" -> ");
+                    }
                 }
                 out.push_str(node_name);
             }
@@ -1106,10 +1163,10 @@ fn routes(db_path: &str, unmatched: Option<bool>, url_filter: Option<&str>, meth
 /// Finds matching HTTP calls (frontend) and routes (backend), then traces
 /// between the involved functions using the GraphTraverser.
 #[pyfunction]
-#[pyo3(signature = (db_path, url, method, no_cross=None))]
-fn trace_request(db_path: &str, url: &str, method: &str, no_cross: Option<bool>) -> PyResult<String> {
+#[pyo3(signature = (db_path, url, method, no_cross=None, no_cross_ffi=None))]
+fn trace_request(db_path: &str, url: &str, method: &str, no_cross: Option<bool>, no_cross_ffi: Option<bool>) -> PyResult<String> {
     let db = open_db(db_path)?;
-    let cross_tier = !no_cross.unwrap_or(false);
+    let (enable_http, enable_ffi) = parse_cross_flags(no_cross.unwrap_or(false), no_cross_ffi.unwrap_or(false));
 
     // 1. Find matching HTTP calls (frontend callers of this URL)
     let all_calls = db.get_all_http_calls()
@@ -1152,7 +1209,7 @@ fn trace_request(db_path: &str, url: &str, method: &str, no_cross: Option<bool>)
     }
 
     let traverser = query::traversal::GraphTraverser::from_db(
-        &db, None, None, cross_tier, false,
+        &db, None, None, enable_http, enable_ffi,
     ).map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     let mut out = format!("Trace for '{} {}':\n", method.to_uppercase(), url);

@@ -592,6 +592,87 @@ impl GraphTraverser {
         None
     }
 
+    /// Like [`shortest_path`] but returns cross-tier hop annotations alongside
+    /// each node ID, so callers can format cross-language bridge labels
+    /// (e.g. `═══ FFI PyO3: rust_index ═══` or `═══ HTTP POST /api/x ═══`).
+    ///
+    /// The first element (src) always has `None` as its hop.  Every subsequent
+    /// element has the [`CrossLangHop`] that was followed to reach it (or `None`
+    /// for same-language edges).
+    pub fn shortest_path_annotated(
+        &self,
+        src: &str,
+        tgt: &str,
+        direction: TraversalDirection,
+    ) -> Option<Vec<(String, Option<CrossLangHop>)>> {
+        if src == tgt {
+            return Some(vec![(src.to_string(), None)]);
+        }
+
+        let mut queue = VecDeque::new();
+        // parent[child] = (parent_node, optional_cross_lang_hop)
+        let mut parent: HashMap<String, (String, Option<CrossLangHop>)> = HashMap::new();
+        let mut visited = HashSet::new();
+
+        queue.push_back(src.to_string());
+        visited.insert(src.to_string());
+
+        while let Some(node) = queue.pop_front() {
+            let mut neighbors: Vec<(String, Option<CrossLangHop>)> = Vec::new();
+
+            let use_outbound = direction == TraversalDirection::Outbound
+                || direction == TraversalDirection::Bidirectional;
+            let use_inbound = direction == TraversalDirection::Inbound
+                || direction == TraversalDirection::Bidirectional;
+
+            if use_outbound {
+                if let Some(edges) = self.outbound.get(&node) {
+                    for (nbr, _kind) in edges {
+                        neighbors.push((nbr.clone(), None));
+                    }
+                }
+            }
+            if use_inbound {
+                if let Some(edges) = self.inbound.get(&node) {
+                    for (nbr, _kind) in edges {
+                        neighbors.push((nbr.clone(), None));
+                    }
+                }
+            }
+            if let Some(cross_hops) = self.cross_lang.get(&node) {
+                for hop in cross_hops {
+                    neighbors.push((hop.target_node_id.clone(), Some(hop.clone())));
+                }
+            }
+
+            for (nbr, hop) in &neighbors {
+                if !visited.contains(nbr) {
+                    visited.insert(nbr.clone());
+                    parent.insert(nbr.clone(), (node.clone(), hop.clone()));
+                    if nbr == tgt {
+                        // Reconstruct annotated path: work backwards from tgt
+                        let mut reversed: Vec<(String, Option<CrossLangHop>)> = Vec::new();
+                        let mut cur = tgt.to_string();
+                        loop {
+                            if cur == *src {
+                                reversed.push((cur.clone(), None));
+                                break;
+                            }
+                            let (prev, hop_into_cur) = parent[&cur].clone();
+                            reversed.push((cur.clone(), hop_into_cur));
+                            cur = prev;
+                        }
+                        reversed.reverse();
+                        return Some(reversed);
+                    }
+                    queue.push_back(nbr.clone());
+                }
+            }
+        }
+
+        None
+    }
+
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
