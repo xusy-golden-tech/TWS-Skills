@@ -1,4 +1,4 @@
-# tws-graph 用户手册 v7.3.4
+# tws-graph 用户手册 v7.4.0
 
 > 面向人类的完整 CLI + MCP 工具参考。Agent 使用指南见 `found-tws-graph-usage`。
 

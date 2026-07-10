@@ -1,6 +1,6 @@
 [project]
 name = "tws-graph"
-version = "7.3.4"
+version = "7.4.0"
 description = "TWS Code Graph — 预建代码符号关系图，agent 查图而非搜索"
 requires-python = ">=3.10"
 dependencies = [
